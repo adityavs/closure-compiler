@@ -32,7 +32,6 @@ import com.google.javascript.rhino.jstype.JSType;
 import com.google.javascript.rhino.jstype.JSTypeRegistry;
 import com.google.javascript.rhino.jstype.ObjectType;
 import com.google.javascript.rhino.jstype.Visitor;
-
 import java.util.Map;
 
 /**
@@ -42,35 +41,6 @@ import java.util.Map;
  */
 public final class ClosureReverseAbstractInterpreter
     extends ChainableReverseAbstractInterpreter {
-
-  /**
-   * For when {@code goog.isArray} returns true.
-   */
-  private final Visitor<JSType> restrictToArrayVisitor =
-      new RestrictByTrueTypeOfResultVisitor() {
-        @Override
-        protected JSType caseTopType(JSType topType) {
-          return topType.isAllType() ?
-              getNativeType(ARRAY_TYPE) : topType;
-        }
-
-        @Override
-        public JSType caseObjectType(ObjectType type) {
-          JSType arrayType = getNativeType(ARRAY_TYPE);
-          return arrayType.isSubtype(type) ? arrayType : null;
-        }
-      };
-
-  /**
-   * For when {@code goog.isArray} returns false.
-   */
-  private final Visitor<JSType> restrictToNotArrayVisitor =
-      new RestrictByFalseTypeOfResultVisitor() {
-        @Override
-        public JSType caseObjectType(ObjectType type) {
-          return type.isSubtype(getNativeType(ARRAY_TYPE)) ? null : type;
-        }
-      };
 
   /**
    * For when {@code goog.isObject} returns true. This includes functions, but
@@ -118,7 +88,7 @@ public final class ClosureReverseAbstractInterpreter
       };
 
   /** Functions used to restrict types. */
-  private Map<String, Function<TypeRestriction, JSType>> restricters;
+  private final Map<String, Function<TypeRestriction, JSType>> restricters;
 
   public ClosureReverseAbstractInterpreter(final JSTypeRegistry typeRegistry) {
     super(typeRegistry);
@@ -212,7 +182,7 @@ public final class ClosureReverseAbstractInterpreter
   @Override
   public FlowScope getPreciserScopeKnowingConditionOutcome(Node condition,
       FlowScope blindScope, boolean outcome) {
-    if (condition.isCall() && condition.getChildCount() == 2) {
+    if (condition.isCall() && condition.hasTwoChildren()) {
       Node callee = condition.getFirstChild();
       Node param = condition.getLastChild();
       if (callee.isGetProp() && param.isQualifiedName()) {

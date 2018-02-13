@@ -99,8 +99,8 @@ public class BooleanType extends ValueType {
   }
 
   @Override
-  String toStringHelper(boolean forAnnotations) {
-    return getDisplayName();
+  StringBuilder appendTo(StringBuilder sb, boolean forAnnotations) {
+    return sb.append(getDisplayName());
   }
 
   @Override
@@ -116,5 +116,10 @@ public class BooleanType extends ValueType {
   @Override
   public <T> T visit(Visitor<T> visitor) {
     return visitor.caseBooleanType();
+  }
+
+  @Override
+  public int hashCode() {
+    return System.identityHashCode(this);
   }
 }

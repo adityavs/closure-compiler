@@ -16,67 +16,47 @@
 
 package com.google.javascript.refactoring;
 
-import java.util.Objects;
+import com.google.auto.value.AutoValue;
+import com.google.auto.value.AutoValue.CopyAnnotations;
+import com.google.errorprone.annotations.Immutable;
 
 /**
  * Class that represents a set of changes to make to the code.
  *
  * @author mknichel@google.com (Mark Knichel)
  */
-public final class CodeReplacement {
+@AutoValue @CopyAnnotations @Immutable
+public abstract class CodeReplacement {
 
-  private final int startPosition;
-  private final int length;
-  private final String newContent;
+  static CodeReplacement create(int startPosition, int length, String newContent) {
+    return create(startPosition, length, newContent, "");
+  }
 
-  CodeReplacement(int startPosition, int length, String newContent) {
-    this.startPosition = startPosition;
-    this.length = length;
-    this.newContent = newContent;
+  static CodeReplacement create(int startPosition, int length, String newContent, String sortKey) {
+    return new AutoValue_CodeReplacement(startPosition, length, newContent, sortKey);
   }
 
   /**
-   * Returns the start position within the file that the modification
+   * Returns the start position within the file that the modification should be applied starting at.
+   */
+  public abstract int getStartPosition();
+
+  /** Returns how many characters the new content should replace in the original content. */
+  public abstract int getLength();
+
+  /**
+   * Returns the end position within the file that the modification
    * should be applied starting at.
    */
-  public int getStartPosition() {
-    return startPosition;
+  public int getEndPosition() {
+    return getStartPosition() + getLength();
   }
+
+  /** Returns the new content that should be inserted into the file. */
+  public abstract String getNewContent();
 
   /**
-   * Returns how many bytes the new content should replace in the
-   * original content.
+   * Returns an additional String key that can be used to sort replacements using lexical ordering.
    */
-  public int getLength() {
-    return length;
-  }
-
-  /**
-   * Returns the new content that should be inserted into the file.
-   */
-  public String getNewContent() {
-    return newContent;
-  }
-
-  @Override public String toString() {
-    return String.format(
-        "Start position: %d\nLength: %d\nNew Content: \"%s\"", startPosition, length, newContent);
-  }
-
-  @Override public boolean equals(Object o) {
-    if (o == this) {
-      return true;
-    }
-    if (!(o instanceof CodeReplacement)) {
-      return false;
-    }
-    CodeReplacement other = (CodeReplacement) o;
-    return startPosition == other.startPosition
-        && length == other.length
-        && newContent.equals(other.newContent);
-  }
-
-  @Override public int hashCode() {
-    return Objects.hash(startPosition, length, newContent);
-  }
+  public abstract String getSortKey();
 }

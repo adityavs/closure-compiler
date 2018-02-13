@@ -16,6 +16,8 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.javascript.jscomp.CompilerOptions.LanguageMode.ECMASCRIPT_NEXT;
+
 /**
  * Verifies that valid candidates for object literals are inlined as
  * expected, and invalid candidates are not touched.
@@ -23,13 +25,11 @@ package com.google.javascript.jscomp;
  */
 public final class InlineObjectLiteralsTest extends CompilerTestCase {
 
-  public InlineObjectLiteralsTest() {
-    enableNormalize();
-  }
-
   @Override
-  public void setUp() {
-    super.enableLineNumberCheck(true);
+  protected void setUp() throws Exception {
+    super.setUp();
+    enableNormalize();
+    setAcceptedLanguage(ECMASCRIPT_NEXT);
   }
 
   @Override
@@ -171,8 +171,7 @@ public final class InlineObjectLiteralsTest extends CompilerTestCase {
          "var b = f();" +
          "JSCompiler_object_inline_a_0=a,JSCompiler_object_inline_b_1=b,true;" +
          "if(JSCompiler_object_inline_a_0) g(JSCompiler_object_inline_b_1)");
-    testLocal("var x = {}; var b = f(); x = {a:a, b:b}; if(x.a) g(x.b) + x.c",
-         "var x = {}; var b = f(); x = {a:a, b:b}; if(x.a) g(x.b) + x.c");
+    testSameLocal("var x = {}; var b = f(); x = {a:a, b:b}; if(x.a) g(x.b) + x.c");
     testLocal("var x; var b = f(); x = {a:a, b:b}; x.c = c; if(x.a) g(x.b) + x.c",
          "var JSCompiler_object_inline_a_0;" +
          "var JSCompiler_object_inline_b_1;" +
@@ -212,8 +211,7 @@ public final class InlineObjectLiteralsTest extends CompilerTestCase {
   }
 
   public void testObject12() {
-    testLocal("var a; a = {x:1, y:2}; f(a.x, a.y2);",
-        "var a; a = {x:1, y:2}; f(a.x, a.y2);");
+    testSameLocal("var a; a = {x:1, y:2}; f(a.x, a.y2);");
   }
 
   public void testObject13() {
@@ -285,8 +283,7 @@ public final class InlineObjectLiteralsTest extends CompilerTestCase {
       " f(JSCompiler_object_inline_y_0,JSCompiler_object_inline_x_1)" +
       "}");
 
-    testLocal("var a; while (1) { f(a.x, a.y); a = {x:1, y:1};}",
-        "var a; while (1) { f(a.x, a.y); a = {x:1, y:1};}");
+    testSameLocal("var a; while (1) { f(a.x, a.y); a = {x:1, y:1};}");
   }
 
   public void testObject23() {
@@ -335,8 +332,11 @@ public final class InlineObjectLiteralsTest extends CompilerTestCase {
          "new JSCompiler_object_inline_b_0.c");
   }
 
-  public void testBug545() {
+  public void testBug545a() {
     testLocal("var a = {}", "");
+  }
+
+  public void testBug545b() {
     testLocal("var a; a = {}", "true");
   }
 
@@ -355,8 +355,143 @@ public final class InlineObjectLiteralsTest extends CompilerTestCase {
         "return foo.bar;");
   }
 
-  private final String LOCAL_PREFIX = "function local(){";
-  private final String LOCAL_POSTFIX = "}";
+  public void testProto() {
+    testSameLocal(
+        lines(
+            "var protoObject = {",
+            "  f: function() {",
+            "    return 1;",
+            "  }",
+            "};",
+            "var object = {",
+            "  __proto__: protoObject,",
+            "};",
+            "g(object.f);"));
+
+    testSame(
+        lines(
+            "var protoObject = {",
+            "  f: function() {",
+            "    return 1;",
+            "  }",
+            "};",
+            "var object = {",
+            "  __proto__: protoObject,",
+            "  g: false",
+            "};",
+            "g(object.g);"),
+        lines(
+            "var protoObject = {",
+            "  f: function() {",
+            "    return 1;",
+            "  }",
+            "};",
+            "var JSCompiler_object_inline___proto___0=protoObject;",
+            "var JSCompiler_object_inline_g_1=false;",
+            "g(JSCompiler_object_inline_g_1)"));
+  }
+
+  public void testSuper() {
+    testSameLocal(
+        lines(
+            "var superObject = {",
+            "  f() {",
+            "    return 1;",
+            "  }",
+            "};",
+            "var object = {",
+            "  __proto__: superObject,",
+            "  f() {",
+            "    return super.f();",
+            "  }",
+            "}",
+            "g(object.f());"));
+  }
+
+  public void testShorthandFunctions() {
+    testSameLocal(
+        lines(
+            "var object = {",
+            "  items: [],",
+            "  add(item) {",
+            "    this.items.push(item);",
+            "  },",
+            "};",
+            "object.add(1);"));
+
+    testSameLocal(
+        lines(
+            "var object = {", "  one() {", "    return 1", "  },", "};", "object.one();"));
+  }
+
+  public void testShorthandAssignments() {
+    testLocal(
+        lines(
+            "var object = {",
+            "  x,",
+            "  y",
+            "};",
+            "f(object.x, object.y);"),
+        lines(
+            "var JSCompiler_object_inline_x_0=x;",
+            "var JSCompiler_object_inline_y_1=y;",
+            "f(JSCompiler_object_inline_x_0,JSCompiler_object_inline_y_1)"));
+
+    testLocal(
+        lines(
+            "var object = {",
+            "  x,",
+            "};",
+            "object.y = y",
+            "f(object.x, object.y);"),
+        lines(
+            "var JSCompiler_object_inline_x_0=x;",
+            "var JSCompiler_object_inline_y_1;",
+            "var JSCompiler_object_inline_y_1=y;",
+            "f(JSCompiler_object_inline_x_0,JSCompiler_object_inline_y_1)"));
+  }
+
+  public void testComputedPropertyName() {
+    testSameLocal(
+        lines(
+            "function addBar(name) {",
+            "  return name + 'Bar'",
+            "}",
+            "var object = {",
+            "  [addBar(\"foo\")]: 1",
+            "};"));
+
+    testSameLocal(
+        lines(
+            "var sym = Symbol('key');",
+            "var object = {",
+            "  [sym]: 1,",
+            "  x: true",
+            "}",
+            "use(object[sym]);"));
+  }
+
+  public void testQuotedKeyThatIsNotRead() {
+    testLocal("var obj = {'a.b.c': 'd'};", "var JSCompiler_object_inline_string_key_0 = 'd';");
+    testLocal("var obj = {'@': 5, '!': 4, 'foo': 3};",
+        lines(
+            "var JSCompiler_object_inline_string_key_0 = 5;",
+            "var JSCompiler_object_inline_string_key_1 = 4;",
+            "var JSCompiler_object_inline_foo_2 = 3;"
+        ));
+
+    testSameLocal("var obj = {}; obj['@'] = 3;");
+  }
+
+
+  public void testQuotedKeyThatIsRead() {
+    testSameLocal("var obj = {'a.b.c': 'd'}; use(obj['a.b.c']);");
+
+    testSameLocal("var obj = {}; obj['a'] = 3; use(obj['a']);");
+  }
+
+  private static final String LOCAL_PREFIX = "function local(){";
+  private static final String LOCAL_POSTFIX = "}";
 
   private void testLocal(String code, String result) {
     test(LOCAL_PREFIX + code + LOCAL_POSTFIX,
@@ -364,6 +499,6 @@ public final class InlineObjectLiteralsTest extends CompilerTestCase {
   }
 
   private void testSameLocal(String code) {
-    testLocal(code, code);
+    testSame(LOCAL_PREFIX + code + LOCAL_POSTFIX);
   }
 }

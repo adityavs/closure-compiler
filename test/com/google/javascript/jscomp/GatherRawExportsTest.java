@@ -31,7 +31,12 @@ public final class GatherRawExportsTest extends CompilerTestCase {
 
   public GatherRawExportsTest() {
     super(EXTERNS);
-    super.enableNormalize();
+  }
+
+  @Override
+  protected void setUp() throws Exception {
+    super.setUp();
+    enableNormalize();
   }
 
   @Override
@@ -104,6 +109,13 @@ public final class GatherRawExportsTest extends CompilerTestCase {
     // It would be nice to handle this case, hopefully inlining will take care
     // of it for us.
     assertExported("var a = window; a['b']");
+  }
+
+  public void testExportsFound17() {
+    // Gather "this" reference in a global if block.
+    assertExported("if (true) { this.a }", "a");
+    // Does not gather "this" reference in a local if block.
+    assertExported("function f() { if (true) { this.a } }");
   }
 
   public void testExportOnTopFound1() {

@@ -16,13 +16,18 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.collect.Lists.transform;
+
+import com.google.common.base.Function;
 import com.google.common.base.Predicates;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.JSDocInfo;
+import com.google.javascript.rhino.JSTypeExpression;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
+import com.google.javascript.rhino.TypeI;
 import com.google.javascript.rhino.TypeIRegistry;
-import com.google.javascript.rhino.jstype.JSType;
+import java.util.List;
 
 /**
  * Warn about types in JSDoc that are implicitly nullable.
@@ -31,12 +36,11 @@ import com.google.javascript.rhino.jstype.JSType;
 public final class ImplicitNullabilityCheck extends AbstractPostOrderCallback
     implements CompilerPass {
 
-  static final DiagnosticType IMPLICITLY_NULLABLE_JSDOC =
-    DiagnosticType.warning(
+  public static final DiagnosticType IMPLICITLY_NULLABLE_JSDOC =
+    DiagnosticType.disabled(
         "JSC_IMPLICITLY_NULLABLE_JSDOC",
-        "Name {0} in JSDoc is implicitly nullable.\n"
-        + "Please add a '!' to make it non-nullable,"
-        + " or a '?' to make it explicitly nullable.");
+        "Name {0} in JSDoc is implicitly nullable, and is discouraged by the style guide.\n"
+        + "Please add a '!' to make it non-nullable, or a '?' to make it explicitly nullable.");
 
   private final AbstractCompiler compiler;
 
@@ -46,7 +50,7 @@ public final class ImplicitNullabilityCheck extends AbstractPostOrderCallback
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverseRoots(compiler, this, externs, root);
+    NodeTraversal.traverseRootsEs6(compiler, this, externs, root);
   }
 
   /**
@@ -61,45 +65,65 @@ public final class ImplicitNullabilityCheck extends AbstractPostOrderCallback
     }
     final TypeIRegistry registry = compiler.getTypeIRegistry();
 
+    final List<Node> thrownTypes =
+        transform(
+            info.getThrownTypes(),
+            new Function<JSTypeExpression, Node>() {
+              @Override
+              public Node apply(JSTypeExpression expr) {
+                return expr.getRoot();
+              }
+            });
+
     for (Node typeRoot : info.getTypeNodes()) {
-      NodeUtil.visitPreOrder(typeRoot, new NodeUtil.Visitor() {
-        public void visit(Node node) {
-          if (!node.isString()) {
-            return;
-          }
-          Node parent = node.getParent();
-          if (parent != null) {
-            switch (parent.getType()) {
-              case Token.BANG:
-              case Token.QMARK:
-              case Token.THIS:  // The names inside function(this:Foo) and
-              case Token.NEW:   // function(new:Bar) are already non-null.
+      NodeUtil.visitPreOrder(
+          typeRoot,
+          new NodeUtil.Visitor() {
+            @Override
+            public void visit(Node node) {
+              if (!node.isString()) {
                 return;
-              case Token.PIPE: { // Inside a union
-                Node gp = parent.getParent();
-                if (gp != null && gp.getType() == Token.QMARK) {
-                  return; // Inside an explicitly nullable union
+              }
+              if (thrownTypes.contains(node)) {
+                return;
+              }
+              Node parent = node.getParent();
+              if (parent != null) {
+                switch (parent.getToken()) {
+                  case BANG:
+                  case QMARK:
+                  case THIS: // The names inside function(this:Foo) and
+                  case NEW: // function(new:Bar) are already non-null.
+                    return;
+                  case PIPE:
+                    { // Inside a union
+                      Node gp = parent.getParent();
+                      if (gp != null && gp.getToken() == Token.QMARK) {
+                        return; // Inside an explicitly nullable union
+                      }
+                      for (Node child : parent.children()) {
+                        if ((child.isString() && child.getString().equals("null"))
+                            || child.getToken() == Token.QMARK) {
+                          return; // Inside a union that contains null or nullable type
+                        }
+                      }
+                      break;
+                    }
+                  default:
+                    break;
                 }
-                for (Node child : parent.children()) {
-                  if (child.isString() && child.getString().equals("null")
-                      || child.getType() == Token.QMARK) {
-                    return; // Inside a union that contains null or nullable type
-                  }
-                }
-                break;
+              }
+              String typeName = node.getString();
+              if (typeName.equals("null") || registry.getType(typeName) == null) {
+                return;
+              }
+              TypeI type = registry.createTypeFromCommentNode(node);
+              if (type.isNullable()) {
+                reportWarning(t, node, typeName);
               }
             }
-          }
-          String typeName = node.getString();
-          if (typeName.equals("null") || registry.getType(typeName) == null) {
-            return;
-          }
-          JSType type = (JSType) registry.createTypeFromCommentNode(node, "[internal]", null);
-          if (type.isNullable()) {
-            reportWarning(t, node, typeName);
-          }
-        }
-      }, Predicates.<Node>alwaysTrue());
+          },
+          Predicates.<Node>alwaysTrue());
     }
   }
 

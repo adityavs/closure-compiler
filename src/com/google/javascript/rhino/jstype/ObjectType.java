@@ -39,20 +39,23 @@
 
 package com.google.javascript.rhino.jstype;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.javascript.rhino.jstype.TernaryValue.FALSE;
 import static com.google.javascript.rhino.jstype.TernaryValue.UNKNOWN;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.ObjectTypeI;
-
-import java.util.HashMap;
+import com.google.javascript.rhino.TypeI;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import javax.annotation.Nullable;
 
 /**
  * Object type.
@@ -99,7 +102,7 @@ public abstract class ObjectType
 
   public Node getRootNode() { return null; }
 
-  public ObjectType getParentScope() {
+  public final ObjectType getParentScope() {
     return getImplicitPrototype();
   }
 
@@ -128,8 +131,10 @@ public abstract class ObjectType
 
   /**
    * Gets the declared default element type.
+   *
    * @see TemplatizedType
    */
+  @Override
   public ImmutableList<JSType> getTemplateTypes() {
     return null;
   }
@@ -203,6 +208,7 @@ public abstract class ObjectType
    * @return the object's name or {@code null} if this is an anonymous
    *         object
    */
+  @Nullable
   public abstract String getReferenceName();
 
   /**
@@ -212,14 +218,19 @@ public abstract class ObjectType
    * We construct these types by appending suffixes to the constructor name.
    *
    * The normalized reference name does not have these suffixes, and as such,
-   * recollapses these implicit types back to their real type.
+   * recollapses these implicit types back to their real type.  Note that
+   * suffixes such as ".prototype" can be added <i>after</i> the delegate
+   * suffix, so anything after the parentheses must still be retained.
    */
-  public String getNormalizedReferenceName() {
+  @Nullable
+  public final String getNormalizedReferenceName() {
     String name = getReferenceName();
     if (name != null) {
-      int pos = name.indexOf('(');
-      if (pos != -1) {
-        return name.substring(0, pos);
+      int start = name.indexOf('(');
+      if (start != -1) {
+        int end = name.lastIndexOf(')');
+        String prefix = name.substring(0, start);
+        return end + 1 % name.length() == 0 ? prefix : prefix + name.substring(end + 1);
       }
     }
     return name;
@@ -239,11 +250,26 @@ public abstract class ObjectType
   }
 
   /**
-   * Returns true if the object is named.
    * @return true if the object is named, false if it is anonymous
    */
   public boolean hasReferenceName() {
     return false;
+  }
+
+  @Override
+  public final boolean isAmbiguousObject() {
+    return !hasReferenceName();
+  }
+
+  @Override
+  public ObjectType getRawType() {
+    TemplatizedType t = toMaybeTemplatizedType();
+    return t == null ? this : t.getReferencedType();
+  }
+
+  @Override
+  public ObjectTypeI instantiateGenericsWithUnknown() {
+    return this.registry.instantiateGenericsWithUnknown(this);
   }
 
   @Override
@@ -270,10 +296,39 @@ public abstract class ObjectType
   @Override
   public abstract FunctionType getConstructor();
 
+  @Override
+  public FunctionType getSuperClassConstructor() {
+    ObjectType iproto = getPrototypeObject();
+    if (iproto == null) {
+      return null;
+    }
+    iproto = iproto.getPrototypeObject();
+    return iproto == null ? null : iproto.getConstructor();
+  }
+
+  @Override
+  public ObjectType getTopDefiningInterface(String propertyName) {
+    ObjectType foundType = null;
+    if (hasProperty(propertyName)) {
+      foundType = this;
+    }
+    for (ObjectType interfaceType : getCtorExtendedInterfaces()) {
+      if (interfaceType.hasProperty(propertyName)) {
+        foundType = interfaceType.getTopDefiningInterface(propertyName);
+      }
+    }
+    return foundType;
+  }
+
   /**
    * Gets the implicit prototype (a.k.a. the {@code [[Prototype]]} property).
    */
   public abstract ObjectType getImplicitPrototype();
+
+  @Override
+  public final ObjectType getPrototypeObject() {
+    return getImplicitPrototype();
+  }
 
   /**
    * Defines a property whose type is explicitly declared by the programmer.
@@ -381,14 +436,32 @@ public abstract class ObjectType
     return p == null ? null : p.getNode();
   }
 
+  @Override
+  public Node getPropertyDefSite(String propertyName) {
+    return getPropertyNode(propertyName);
+  }
+
+  @Override
+  public JSDocInfo getPropertyJSDocInfo(String propertyName) {
+    Property p = getSlot(propertyName);
+    return p == null ? null : p.getJSDocInfo();
+  }
+
   /**
    * Gets the docInfo on the specified property on this type.  This should not
    * be implemented recursively, as you generally need to know exactly on
    * which type in the prototype chain the JSDocInfo exists.
    */
+  @Override
   public JSDocInfo getOwnPropertyJSDocInfo(String propertyName) {
     Property p = getOwnSlot(propertyName);
     return p == null ? null : p.getJSDocInfo();
+  }
+
+  @Override
+  public Node getOwnPropertyDefSite(String propertyName) {
+    Property p = getOwnSlot(propertyName);
+    return p == null ? null : p.getNode();
   }
 
   /**
@@ -423,6 +496,7 @@ public abstract class ObjectType
    * @return the property's type or {@link UnknownType}. This method never
    *         returns {@code null}.
    */
+  @Override
   public JSType getPropertyType(String propertyName) {
     StaticTypedSlot<JSType> slot = getSlot(propertyName);
     if (slot == null) {
@@ -446,6 +520,7 @@ public abstract class ObjectType
    * Checks whether the property whose name is given is present directly on
    * the object.  Returns false even if it is declared on a supertype.
    */
+  @Override
   public boolean hasOwnProperty(String propertyName) {
     return getOwnSlot(propertyName) != null;
   }
@@ -455,7 +530,11 @@ public abstract class ObjectType
    *
    * Overridden by FunctionType to add "prototype".
    */
+  @Override
   public Set<String> getOwnPropertyNames() {
+    // TODO(sdh): ObjectTypeI specifies that this should include prototype properties,
+    // but currently it does not.  Check if this is a constructor and add them, but
+    // this could possibly break things so it should be done separately.
     return getPropertyMap().getOwnPropertyNames();
   }
 
@@ -473,6 +552,12 @@ public abstract class ObjectType
   public boolean isPropertyTypeDeclared(String propertyName) {
     StaticTypedSlot<JSType> slot = getSlot(propertyName);
     return slot == null ? false : !slot.isTypeInferred();
+  }
+
+  @Override
+  public boolean isStructuralType() {
+    FunctionType constructor = this.getConstructor();
+    return constructor != null && constructor.isStructuralInterface();
   }
 
   /**
@@ -496,9 +581,90 @@ public abstract class ObjectType
   }
 
   /**
+   * Check for structural equivalence with {@code that}.
+   * (e.g. two @record types with the same prototype properties)
+   */
+  boolean checkStructuralEquivalenceHelper(
+      ObjectType otherObject, EquivalenceMethod eqMethod, EqCache eqCache) {
+    if (this.isTemplatizedType() && this.toMaybeTemplatizedType().wrapsSameRawType(otherObject)) {
+      return this.getTemplateTypeMap().checkEquivalenceHelper(
+          otherObject.getTemplateTypeMap(), eqMethod, eqCache, SubtypingMode.NORMAL);
+    }
+
+    MatchStatus result = eqCache.checkCache(this, otherObject);
+    if (result != null) {
+      return result.subtypeValue();
+    }
+    Set<String> keySet = getPropertyNames();
+    Set<String> otherKeySet = otherObject.getPropertyNames();
+    if (!otherKeySet.equals(keySet)) {
+      eqCache.updateCache(this, otherObject, MatchStatus.NOT_MATCH);
+      return false;
+    }
+    for (String key : keySet) {
+      if (!otherObject.getPropertyType(key).checkEquivalenceHelper(
+              getPropertyType(key), eqMethod, eqCache)) {
+        eqCache.updateCache(this, otherObject, MatchStatus.NOT_MATCH);
+        return false;
+      }
+    }
+    eqCache.updateCache(this, otherObject, MatchStatus.MATCH);
+    return true;
+  }
+
+  private static boolean isStructuralSubtypeHelper(
+      ObjectType typeA, ObjectType typeB,
+      ImplCache implicitImplCache, SubtypingMode subtypingMode) {
+
+    // typeA is a subtype of record type typeB iff:
+    // 1) typeA has all the non-optional properties declared in typeB.
+    // 2) And for each property of typeB, its type must be
+    //    a super type of the corresponding property of typeA.
+    for (String property : typeB.getPropertyNames()) {
+      JSType propB = typeB.getPropertyType(property);
+      if (!typeA.hasProperty(property)) {
+        // Currently, any type that explicitly includes undefined (eg, `?|undefined`) is optional.
+        if (propB.isExplicitlyVoidable()) {
+          continue;
+        }
+        return false;
+      }
+      JSType propA = typeA.getPropertyType(property);
+      if (!propA.isSubtype(propB, implicitImplCache, subtypingMode)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Determine if {@code this} is a an implicit subtype of {@code superType}.
+   */
+  boolean isStructuralSubtype(ObjectType superType,
+      ImplCache implicitImplCache, SubtypingMode subtypingMode) {
+    // Union types should be handled by isSubtype already
+    checkArgument(!this.isUnionType());
+    checkArgument(!superType.isUnionType());
+    Preconditions.checkArgument(superType.isStructuralType(),
+        "isStructuralSubtype should be called with structural supertype. Found %s", superType);
+
+    MatchStatus cachedResult = implicitImplCache.checkCache(this, superType);
+    if (cachedResult != null) {
+      return cachedResult.subtypeValue();
+    }
+
+    boolean result = isStructuralSubtypeHelper(
+        this, superType, implicitImplCache, subtypingMode);
+    implicitImplCache.updateCache(
+        this, superType, result ? MatchStatus.MATCH : MatchStatus.NOT_MATCH);
+    return result;
+  }
+
+  /**
    * Returns a list of properties defined or inferred on this type and any of
    * its supertypes.
    */
+  @Override
   public Set<String> getPropertyNames() {
     Set<String> props = new TreeSet<>();
     collectPropertyNames(props);
@@ -603,6 +769,11 @@ public abstract class ObjectType
     return false;
   }
 
+  @Override
+  public JSType getLegacyResolvedType() {
+    return toMaybeNamedType().getReferencedType();
+  }
+
   /**
    * A null-safe version of JSType#toObjectType.
    */
@@ -615,13 +786,24 @@ public abstract class ObjectType
     return getOwnerFunction() != null;
   }
 
-  /** Gets the owner of this if it's a function prototype. */
+  @Override
   public FunctionType getOwnerFunction() {
     return null;
   }
 
   /** Sets the owner function. By default, does nothing. */
   void setOwnerFunction(FunctionType type) {}
+
+  @Override
+  public ObjectType normalizeObjectForCheckAccessControls() {
+    if (this.isFunctionPrototypeType()) {
+      FunctionType owner = this.getOwnerFunction();
+      if (owner.hasInstanceType()) {
+        return owner.getInstanceType();
+      }
+    }
+    return this;
+  }
 
   /**
    * Gets the interfaces implemented by the ctor associated with this type.
@@ -641,13 +823,29 @@ public abstract class ObjectType
 
   /**
    * get the map of properties to types covered in an object type
-   * @return a Map that maps the property's name to the property's type
-   */
+   * @return a Map that maps the property's name to the property's type */
   public Map<String, JSType> getPropertyTypeMap() {
-    Map<String, JSType> propTypeMap = new HashMap<String, JSType>();
+    ImmutableMap.Builder<String, JSType> propTypeMap = ImmutableMap.builder();
     for (String name : this.getPropertyNames()) {
       propTypeMap.put(name, this.getPropertyType(name));
     }
-    return propTypeMap;
+    return propTypeMap.build();
+  }
+
+  @Override
+  public TypeI getEnumeratedTypeOfEnumObject() {
+    return null;
+  }
+
+  @Override
+  public ObjectTypeI withoutStrayProperties() {
+    // OTI represents object types in a way that already exhibits the behavior of this method,
+    // so we don't need to change anything.
+    return this;
+  }
+
+  @Override
+  public TypeI getInstantiatedTypeArgument(TypeI supertype) {
+    throw new UnsupportedOperationException();
   }
 }

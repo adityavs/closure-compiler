@@ -82,7 +82,9 @@ public enum Keywords {
 
     // TypeScript
     DECLARE("declare", TokenType.DECLARE),
-    TYPE("type", TokenType.TYPE);
+    TYPE("type", TokenType.TYPE),
+    MODULE("module", TokenType.MODULE), // Only accepted as alias for namespaces.
+    NAMESPACE("namespace", TokenType.NAMESPACE);
 
   private static final Map<String, Keywords> KEYWORDS_BY_NAME;
   private static final Map<TokenType, Keywords> KEYWORDS_BY_TYPE;
@@ -117,6 +119,18 @@ public enum Keywords {
 
   public static boolean isKeyword(TokenType token) {
     return get(token) != null;
+  }
+
+  public static boolean isTypeScriptSpecificKeyword(String value) {
+    switch (value) {
+      case "declare":
+      case "type":
+      case "module":
+      case "namespace":
+        return true;
+      default:
+        return false;
+    }
   }
 
   /**

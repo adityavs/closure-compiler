@@ -168,6 +168,24 @@ public final class Matchers {
   }
 
   /**
+   * Returns a Matcher that matches all nodes that are function calls that match the provided name.
+   *
+   * @param name The name of the function to match. For non-static functions, this must be the fully
+   *     qualified name that includes the type of the object. For instance: {@code
+   *     ns.AppContext.prototype.get} will match {@code appContext.get} and {@code this.get} when
+   *     called from the AppContext class.
+   */
+  public static Matcher functionCall(final String name) {
+    return new Matcher() {
+      @Override
+      public boolean matches(Node node, NodeMetadata metadata) {
+        // TODO(mknichel): Handle the case when functions are applied through .call or .apply.
+        return node.isCall() && propertyAccess(name).matches(node.getFirstChild(), metadata);
+      }
+    };
+  }
+
+  /**
    * Returns a Matcher that matches any function call that has the given
    * number of arguments.
    */
@@ -179,17 +197,40 @@ public final class Matchers {
     };
   }
 
+  /**
+   * Returns a Matcher that matches any function call that has the given
+   * number of arguments and the given name.
+   * @param name The name of the function to match. For non-static functions,
+   *     this must be the fully qualified name that includes the type of the
+   *     object. For instance: {@code ns.AppContext.prototype.get} will match
+   *     {@code appContext.get} and {@code this.get} when called from the
+   *     AppContext class.
+   */
   public static Matcher functionCallWithNumArgs(final String name, final int numArgs) {
     return allOf(functionCallWithNumArgs(numArgs), functionCall(name));
   }
 
-  public static Matcher functionCall(final String name) {
+  public static Matcher googRequire(final String namespace) {
     return new Matcher() {
-      @Override public boolean matches(Node node, NodeMetadata metadata) {
-        // TODO(mknichel): Handle the case when functions are applied through .call or .apply.
-        return node.isCall() && propertyAccess(name).matches(node.getFirstChild(), metadata);
+      @Override
+      public boolean matches(Node node, NodeMetadata metadata) {
+        return functionCall("goog.require").matches(node, metadata)
+            && node.getSecondChild().isString()
+            && node.getSecondChild().getString().equals(namespace);
       }
     };
+  }
+
+  public static Matcher googRequire() {
+    return functionCall("goog.require");
+  }
+
+  public static Matcher googModule() {
+    return functionCall("goog.module");
+  }
+
+  public static Matcher googModuleOrProvide() {
+    return anyOf(googModule(), functionCall("goog.provide"));
   }
 
   /**
@@ -199,14 +240,24 @@ public final class Matchers {
     return propertyAccess(null);
   }
 
+  /**
+   * Returns a Matcher that matches nodes representing a GETPROP access of
+   * an object property.
+   * @param name The name of the property to match. For non-static properties,
+   *     this must be the fully qualified name that includes the type of the
+   *     object. For instance: {@code ns.AppContext.prototype.root}
+   *     will match {@code appContext.root} and {@code this.root} when accessed
+   *     from the AppContext.
+   */
   public static Matcher propertyAccess(final String name) {
     return new Matcher() {
-      @Override public boolean matches(Node node, NodeMetadata metadata) {
+      @Override
+      public boolean matches(Node node, NodeMetadata metadata) {
         if (node.isGetProp()) {
           if (name == null) {
             return true;
           }
-          if (name.equals(node.getQualifiedName())) {
+          if (node.matchesQualifiedName(name)) {
             return true;
           } else if (name.contains(".prototype.")) {
             return matchesPrototypeInstanceVar(node, metadata, name);
@@ -294,7 +345,7 @@ public final class Matchers {
         JSDocInfo jsDoc = node.getParent().isVar()
             ? node.getParent().getJSDocInfo() : node.getJSDocInfo();
         JSType jsType = node.getJSType();
-        return jsDoc != null && jsType != null
+        return jsDoc != null && jsDoc.hasType() && jsType != null
             && providedJsType.isEquivalentTo(jsType.restrictByNotNullOrUndefined());
       }
     };
@@ -313,7 +364,7 @@ public final class Matchers {
         // }
         if (!node.isAssign()
             || !node.getFirstChild().isGetProp()
-            || !node.getFirstChild().getFirstChild().isThis()) {
+            || !node.getFirstFirstChild().isThis()) {
           return false;
         }
         while (node != null && !node.isFunction()) {
@@ -364,6 +415,12 @@ public final class Matchers {
     return false;
   }
 
+  /**
+   * Checks to see if the node represents an access of an instance variable
+   * on an object given a prototype declaration of an object. For instance,
+   * {@code ns.AppContext.prototype.get} will match {@code appContext.get}
+   * or {@code this.get} when accessed from within the AppContext object.
+   */
   private static boolean matchesPrototypeInstanceVar(Node node, NodeMetadata metadata,
       String name) {
     String[] parts = name.split(".prototype.");

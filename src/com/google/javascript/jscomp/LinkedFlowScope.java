@@ -16,18 +16,18 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Iterables;
 import com.google.javascript.jscomp.type.FlowScope;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.jstype.JSType;
 import com.google.javascript.rhino.jstype.SimpleSlot;
 import com.google.javascript.rhino.jstype.StaticTypedScope;
 import com.google.javascript.rhino.jstype.StaticTypedSlot;
-
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -60,26 +60,26 @@ class LinkedFlowScope implements FlowScope {
   // linked list of slots.
   private LinkedFlowSlot lastSlot;
 
-  private LinkedFlowScope(FlatFlowScopeCache cache,
-      LinkedFlowScope directParent) {
+  /**
+   * Creates a flow scope without a direct parent.  This can happen in three cases: (1) the "bottom"
+   * scope for a CFG root, (2) a direct child of a parent at the maximum depth, or (3) a joined
+   * scope with more than one direct parent.  The parent is non-null only in the second case.
+   */
+  private LinkedFlowScope(FlatFlowScopeCache cache) {
     this.cache = cache;
-    if (directParent == null) {
-      this.lastSlot = null;
-      this.depth = 0;
-      this.parent = cache.linkedEquivalent;
-    } else {
-      this.lastSlot = directParent.lastSlot;
-      this.depth = directParent.depth + 1;
-      this.parent = directParent;
-    }
+    this.lastSlot = null;
+    this.depth = 0;
+    this.parent = cache.linkedEquivalent;
   }
 
-  LinkedFlowScope(FlatFlowScopeCache cache) {
-    this(cache, null);
-  }
-
-  LinkedFlowScope(LinkedFlowScope directParent) {
-    this(directParent.cache, directParent);
+  /**
+   * Creates a child flow scope with a single parent.
+   */
+  private LinkedFlowScope(LinkedFlowScope directParent) {
+    this.cache = directParent.cache;
+    this.lastSlot = directParent.lastSlot;
+    this.depth = directParent.depth + 1;
+    this.parent = directParent;
   }
 
   /** Gets the function scope for this flow scope. */
@@ -101,7 +101,7 @@ class LinkedFlowScope implements FlowScope {
 
   @Override
   public void inferSlotType(String symbol, JSType type) {
-    Preconditions.checkState(!frozen);
+    checkState(!frozen);
     lastSlot = new LinkedFlowSlot(symbol, type, lastSlot);
     depth++;
     cache.dirtySymbols.add(symbol);
@@ -211,26 +211,6 @@ class LinkedFlowScope implements FlowScope {
   }
 
   /**
-   * Look through the given scope, and try to find slots where it doesn't
-   * have enough type information. Then fill in that type information
-   * with stuff that we've inferred in the local flow.
-   */
-  @Override
-  public void completeScope(StaticTypedScope<JSType> staticScope) {
-    TypedScope scope = (TypedScope) staticScope;
-    for (Iterator<TypedVar> it = scope.getVars(); it.hasNext();) {
-      TypedVar var = it.next();
-      if (var.isTypeInferred()) {
-        JSType type = var.getType();
-        if (type == null || type.isUnknownType()) {
-          JSType flowType = getSlot(var.getName()).getType();
-          var.setType(flowType);
-        }
-      }
-    }
-  }
-
-  /**
    * Remove flow scopes that add nothing to the flow.
    */
   // NOTE(nicksantos): This function breaks findUniqueRefinedSlot, because
@@ -238,7 +218,9 @@ class LinkedFlowScope implements FlowScope {
   // of blindScope. This is not necessarily true if this scope has been
   // optimize()d and blindScope has not. This should be fixed. For now,
   // we only use optimize() where we know that we won't have to do
-  // a findUniqueRefinedSlot on it.
+  // a findUniqueRefinedSlot on it (i.e. between CFG nodes, while the
+  // latter is only used within a single node to backwards-infer the LHS
+  // of short circuiting AND and OR operators).
   @Override
   public LinkedFlowScope optimize() {
     LinkedFlowScope current;
@@ -251,7 +233,6 @@ class LinkedFlowScope implements FlowScope {
 
   /** Join the two FlowScopes. */
   static class FlowScopeJoinOp extends JoinOp.BinaryJoinOp<FlowScope> {
-    @SuppressWarnings("unchecked")
     @Override
     public FlowScope apply(FlowScope a, FlowScope b) {
       // To join the two scopes, we have to
@@ -355,7 +336,7 @@ class LinkedFlowScope implements FlowScope {
    * a slot for x or z.
    */
   private Map<String, StaticTypedSlot<JSType>> allFlowSlots() {
-    Map<String, StaticTypedSlot<JSType>> slots = new HashMap<>();
+    Map<String, StaticTypedSlot<JSType>> slots = new LinkedHashMap<>();
     for (LinkedFlowSlot slot = lastSlot;
          slot != null; slot = slot.parent) {
       if (!slots.containsKey(slot.getName())) {
@@ -402,7 +383,7 @@ class LinkedFlowScope implements FlowScope {
 
     // All the symbols defined before this point in the local flow.
     // May not include lazily declared qualified names.
-    private Map<String, StaticTypedSlot<JSType>> symbols = new HashMap<>();
+    private Map<String, StaticTypedSlot<JSType>> symbols = new LinkedHashMap<>();
 
     // Used to help make lookup faster for LinkedFlowScopes by recording
     // symbols that may be redefined "soon", for an arbitrary definition
@@ -412,7 +393,7 @@ class LinkedFlowScope implements FlowScope {
     // and this is the closest FlatFlowScopeCache, then that symbol is marked
     // "dirty". In this way, we don't waste time looking in the LinkedFlowScope
     // list for symbols that aren't defined anywhere nearby.
-    final Set<String> dirtySymbols = new HashSet<>();
+    final Set<String> dirtySymbols = new LinkedHashSet<>();
 
     // The cache at the bottom of the lattice.
     FlatFlowScopeCache(TypedScope functionScope) {
@@ -456,10 +437,8 @@ class LinkedFlowScope implements FlowScope {
       //    not in joinedScopeA. Join the two types.
       // 5) The type is declared in joinedScopeA and joinedScopeB. Join
       //    the two types.
-      Set<String> symbolNames = new HashSet<>(symbols.keySet());
-      symbolNames.addAll(slotsB.keySet());
 
-      for (String name : symbolNames) {
+      for (String name : Iterables.concat(symbols.keySet(), slotsB.keySet())) {
         StaticTypedSlot<JSType> slotA = slotsA.get(name);
         StaticTypedSlot<JSType> slotB = slotsB.get(name);
 

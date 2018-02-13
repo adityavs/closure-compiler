@@ -79,15 +79,15 @@ angular.$q.Promise.prototype.finally = function(callback) {};
  * @constructor
  * @template T
  */
-angular.$q.Deferred;
+angular.$q.Deferred = function() {};
 
 /** @param {T=} opt_value */
 angular.$q.Deferred.prototype.resolve = function(opt_value) {};
 
-/** @param {*=} opt_reason */
+/** @param {?=} opt_reason */
 angular.$q.Deferred.prototype.reject = function(opt_reason) {};
 
-/** @param {*=} opt_value */
+/** @param {?=} opt_value */
 angular.$q.Deferred.prototype.notify = function(opt_value) {};
 
 /** @type {!angular.$q.Promise.<T>} */
@@ -95,13 +95,13 @@ angular.$q.Deferred.prototype.promise;
 
 /**
  * $q.all has different output type based on the input type.
- * When {@code promise} is an array, the output is an array too: for each item n
+ * When `promise` is an array, the output is an array too: for each item n
  * in the input array, the corresponding item in the returned array would be the
  * the same type of n, or if n is a templated $q.Promise, the type of the
  * resolve value.
- * When {@code promise} is in form of a record, the output should be also be a
+ * When `promise` is in form of a record, the output should be also be a
  * record with the same properties.
- * When {@code promise} is other forms, the returned type is an Object.
+ * When `promise` is other forms, the returned type is an Object.
  *
  * @param {VALUE} promises
  * @template VALUE
@@ -135,10 +135,10 @@ angular.$q.prototype.all = function(promises) {};
 angular.$q.prototype.defer = function() {};
 
 /**
- * @param {*} reason
+ * @param {?=} opt_reason
  * @return {!angular.$q.Promise}
  */
-angular.$q.prototype.reject = function(reason) {};
+angular.$q.prototype.reject = function(opt_reason) {};
 
 /**
  * @param {RESULT} value

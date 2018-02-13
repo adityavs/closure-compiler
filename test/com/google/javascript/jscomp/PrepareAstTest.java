@@ -16,32 +16,27 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
-import com.google.javascript.rhino.Node;
+import static com.google.common.base.Preconditions.checkState;
 
+import com.google.javascript.rhino.Node;
 
 /**
  * Tests for PrepareAst.
  * @author nicksantos@google.com (Nick Santos)
  */
 public final class PrepareAstTest extends CompilerTestCase {
-
-  public PrepareAstTest() {
-    super.enableLineNumberCheck(true);
-  }
-
   @Override
-  public CompilerPass getProcessor(Compiler compiler) {
+  protected CompilerPass getProcessor(Compiler compiler) {
     return null; // unused
   }
 
   public void testFreeCall1() throws Exception {
     Node root = parseExpectedJs("foo();");
     Node script = root.getFirstChild();
-    Preconditions.checkState(script.isScript());
+    checkState(script.isScript());
     Node firstExpr = script.getFirstChild();
     Node call = firstExpr.getFirstChild();
-    Preconditions.checkState(call.isCall());
+    checkState(call.isCall());
 
     assertTrue(call.getBooleanProp(Node.FREE_CALL));
   }
@@ -49,10 +44,10 @@ public final class PrepareAstTest extends CompilerTestCase {
   public void testFreeCall2() throws Exception {
     Node root = parseExpectedJs("x.foo();");
     Node script = root.getFirstChild();
-    Preconditions.checkState(script.isScript());
+    checkState(script.isScript());
     Node firstExpr = script.getFirstChild();
     Node call = firstExpr.getFirstChild();
-    Preconditions.checkState(call.isCall());
+    checkState(call.isCall());
 
     assertFalse(call.getBooleanProp(Node.FREE_CALL));
   }

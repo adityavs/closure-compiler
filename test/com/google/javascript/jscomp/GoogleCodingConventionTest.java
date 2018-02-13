@@ -20,14 +20,13 @@ import com.google.javascript.jscomp.CodingConvention.SubclassRelationship;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.StaticSourceFile;
 import com.google.javascript.rhino.Token;
-
 import junit.framework.TestCase;
 
 /**
  * Test class for {@link GoogleCodingConvention}.
  */
 public final class GoogleCodingConventionTest extends TestCase {
-  private GoogleCodingConvention conv = new GoogleCodingConvention();
+  private final GoogleCodingConvention conv = new GoogleCodingConvention();
 
   public void testVarAndOptionalParams() {
     Node args = new Node(Token.PARAM_LIST,
@@ -101,7 +100,7 @@ public final class GoogleCodingConventionTest extends TestCase {
   }
 
   public void testInheritanceDetection3() {
-    assertDefinesClasses("A.inherits(B);", "A", "B");
+    assertNotClassDefining("A.inherits(B);");
   }
 
   public void testInheritanceDetection4() {
@@ -109,7 +108,7 @@ public final class GoogleCodingConventionTest extends TestCase {
   }
 
   public void testInheritanceDetection5() {
-    assertDefinesClasses("goog.A.inherits(goog.B);", "goog.A", "goog.B");
+    assertNotClassDefining("goog.A.inherits(goog.B);");
   }
 
   public void testInheritanceDetection6() {
@@ -125,8 +124,7 @@ public final class GoogleCodingConventionTest extends TestCase {
   }
 
   public void testInheritanceDetection9() {
-    assertDefinesClasses("A.mixin(B.prototype);",
-        "A", "B");
+    assertNotClassDefining("A.mixin(B.prototype);");
   }
 
   public void testInheritanceDetection10() {
@@ -159,6 +157,10 @@ public final class GoogleCodingConventionTest extends TestCase {
     assertPackageName("foo/bar/baz/unittests/quux.js", "foo/bar/baz/unittests");
     assertPackageName("foo/bar/test/baz/quux.js", "foo/bar/test/baz");
     assertPackageName("foo/test/bar/baz/quux.js", "foo/test/bar/baz");
+    assertPackageName("bazel-out/host/genfiles/bar/baz/quux.js", "bar/baz");
+    assertPackageName("bazel-out/host/genfiles/foo/test/bar.js", "foo");
+    assertPackageName("bazel-out/host/bin/bar/baz/quux.js", "bar/baz");
+    assertPackageName("bazel-out/host/bin/foo/test/bar.js", "foo");
   }
 
   private void assertPackageName(String filename, String expectedPackageName) {

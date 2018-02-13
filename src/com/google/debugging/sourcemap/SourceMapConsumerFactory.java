@@ -16,10 +16,6 @@
 
 package com.google.debugging.sourcemap;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParseException;
-
 /**
  * Detect and parse the provided source map.
  * @author johnlenz@google.com (John Lenz)
@@ -52,23 +48,18 @@ public final class SourceMapConsumerFactory {
       throw new SourceMapParseException(
           "This appears to be a V1 SourceMap, which is not supported.");
     } else if (contents.startsWith("{")){
-      try {
-        // Revision 2 and 3, are JSON Objects
-        JsonObject sourceMapRoot = new Gson().fromJson(contents, JsonObject.class);
-        // Check basic assertions about the format.
-        int version = sourceMapRoot.get("version").getAsInt();
-        switch (version) {
-          case 3: {
-            SourceMapConsumerV3 consumer =  new SourceMapConsumerV3();
-            consumer.parse(sourceMapRoot, supplier);
-            return consumer;
-          }
-          default:
-            throw new SourceMapParseException(
-                "Unknown source map version:" + version);
+      SourceMapObject sourceMapObject = SourceMapObjectParser.parse(contents);
+
+      // Check basic assertions about the format.
+      switch (sourceMapObject.getVersion()) {
+        case 3: {
+          SourceMapConsumerV3 consumer =  new SourceMapConsumerV3();
+          consumer.parse(sourceMapObject, supplier);
+          return consumer;
         }
-      } catch (JsonParseException ex) {
-        throw new SourceMapParseException("JSON parse exception: " + ex);
+        default:
+          throw new SourceMapParseException(
+              "Unknown source map version:" + sourceMapObject.getVersion());
       }
     }
 

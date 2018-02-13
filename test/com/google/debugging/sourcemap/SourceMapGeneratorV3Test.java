@@ -26,7 +26,6 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import com.google.javascript.jscomp.SourceMap;
 import com.google.javascript.jscomp.SourceMap.Format;
-
 import java.io.File;
 import java.io.IOException;
 import java.io.StringWriter;
@@ -52,7 +51,7 @@ public final class SourceMapGeneratorV3Test extends SourceMapTestCase {
     return SourceMap.Format.V3;
   }
 
-  private String getEncodedFileName() {
+  private static String getEncodedFileName() {
     if (File.separatorChar == '\\') {
       return "c:/myfile.js";
     } else {
@@ -145,7 +144,6 @@ public final class SourceMapGeneratorV3Test extends SourceMapTestCase {
   }
 
   public void testGoldenOutput0a() throws Exception {
-    // Empty source map test
     checkSourceMap("a;",
 
                    "{\n" +
@@ -154,6 +152,20 @@ public final class SourceMapGeneratorV3Test extends SourceMapTestCase {
                    "\"lineCount\":1,\n" +
                    "\"mappings\":\"AAAAA;\",\n" +
                    "\"sources\":[\"testcode\"],\n" +
+                   "\"names\":[\"a\"]\n" +
+                   "}\n");
+
+    sourceMapIncludeSourcesContent = true;
+
+    checkSourceMap("a;",
+
+                   "{\n" +
+                   "\"version\":3,\n" +
+                   "\"file\":\"testcode\",\n" +
+                   "\"lineCount\":1,\n" +
+                   "\"mappings\":\"AAAAA;\",\n" +
+                   "\"sources\":[\"testcode\"],\n" +
+                   "\"sourcesContent\":[\"a;\"],\n" +
                    "\"names\":[\"a\"]\n" +
                    "}\n");
   }
@@ -186,6 +198,23 @@ public final class SourceMapGeneratorV3Test extends SourceMapTestCase {
                        "GAAhBF,EAAuBC,GAAvBD,CAA6BC,GAA7BD,CAAmCE,GAAnCF," +
                        "SAAmDC,IAAnDD;\",\n" +
                    "\"sources\":[\"testcode\"],\n" +
+                   "\"names\":[\"f\",\"foo\",\"bar\"]\n" +
+                   "}\n");
+
+    sourceMapIncludeSourcesContent = true;
+
+    checkSourceMap("function f(foo, bar) { foo = foo + bar + 2; return foo; }",
+
+                   "{\n" +
+                   "\"version\":3,\n" +
+                   "\"file\":\"testcode\",\n" +
+                   "\"lineCount\":1,\n" +
+                   "\"mappings\":\"AAAAA,QAASA,EAATA,CAAWC,GAAXD,CAAgBE," +
+                       "GAAhBF,EAAuBC,GAAvBD,CAA6BC,GAA7BD,CAAmCE,GAAnCF," +
+                       "SAAmDC,IAAnDD;\",\n" +
+                   "\"sources\":[\"testcode\"],\n" +
+                   "\"sourcesContent\":" +
+                       "[\"function f(foo, bar) { foo = foo + bar + 2; return foo; }\"],\n" +
                    "\"names\":[\"f\",\"foo\",\"bar\"]\n" +
                    "}\n");
   }
@@ -383,7 +412,7 @@ public final class SourceMapGeneratorV3Test extends SourceMapTestCase {
             + "}\n");
   }
 
-  private String getEmptyMapFor(String name) throws IOException {
+  private static String getEmptyMapFor(String name) throws IOException {
     StringWriter out = new StringWriter();
     SourceMapGeneratorV3 generator = new SourceMapGeneratorV3();
     generator.appendTo(out, name);
@@ -499,7 +528,7 @@ public final class SourceMapGeneratorV3Test extends SourceMapTestCase {
     mapper.addExtension("x_google_foo", new JsonObject());
     mapper.addExtension("x_google_test", parseJsonObject("{\"number\" : 1}"));
     mapper.addExtension("x_google_array", new JsonArray());
-    mapper.addExtension("x_google_int", new Integer(2));
+    mapper.addExtension("x_google_int", 2);
     mapper.addExtension("x_google_str", "Some text");
 
     mapper.removeExtension("x_google_foo");
@@ -535,7 +564,7 @@ public final class SourceMapGeneratorV3Test extends SourceMapTestCase {
 
     assertThat(mapper.hasExtension("x_company_foo")).isFalse();
 
-    mapper.addExtension("x_company_baz", new Integer(2));
+    mapper.addExtension("x_company_baz", 2);
 
     mapper.mergeMapSection(0, 0,
         "{\n" +
@@ -588,7 +617,8 @@ public final class SourceMapGeneratorV3Test extends SourceMapTestCase {
   }
 
   FilePosition count(String js) {
-    int line = 0, column = 0;
+    int line = 0;
+    int column = 0;
     for (int i = 0; i < js.length(); i++) {
       if (js.charAt(i) == '\n') {
         line++;
@@ -605,7 +635,7 @@ public final class SourceMapGeneratorV3Test extends SourceMapTestCase {
     return count(js);
   }
 
-  private JsonObject parseJsonObject(String json) {
+  private static JsonObject parseJsonObject(String json) {
     return new Gson().fromJson(json, JsonObject.class);
   }
 }

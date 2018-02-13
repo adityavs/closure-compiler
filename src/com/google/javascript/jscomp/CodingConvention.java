@@ -15,16 +15,18 @@
  */
 package com.google.javascript.jscomp;
 
+import com.google.common.base.Preconditions;
+import com.google.errorprone.annotations.Immutable;
 import com.google.javascript.jscomp.newtypes.DeclaredTypeRegistry;
 import com.google.javascript.jscomp.newtypes.JSType;
+import com.google.javascript.rhino.FunctionTypeI;
 import com.google.javascript.rhino.Node;
+import com.google.javascript.rhino.NominalTypeBuilder;
+import com.google.javascript.rhino.ObjectTypeI;
 import com.google.javascript.rhino.StaticSourceFile;
-import com.google.javascript.rhino.jstype.FunctionType;
+import com.google.javascript.rhino.TypeIRegistry;
 import com.google.javascript.rhino.jstype.JSTypeNative;
 import com.google.javascript.rhino.jstype.JSTypeRegistry;
-import com.google.javascript.rhino.jstype.ObjectType;
-import com.google.javascript.rhino.jstype.StaticTypedScope;
-
 import java.io.Serializable;
 import java.util.Collection;
 import java.util.List;
@@ -35,6 +37,7 @@ import java.util.Map;
  * Compiler for a specific team/company.
  *
  */
+@Immutable
 public interface CodingConvention extends Serializable {
 
   /**
@@ -108,6 +111,18 @@ public interface CodingConvention extends Serializable {
   public boolean isExported(String name);
 
   /**
+   * Check whether the property name is eligible for renaming.
+   *
+   * This method will not block removal or collapsing
+   * of the property; it will just block renaming if the
+   * property is not optimized away.
+   *
+   * @param name A property name.
+   * @return {@code true} if the name can not be renamed.
+   */
+  public boolean blockRenamingForProperty(String name);
+
+  /**
    * @return the package name for the given source file, or null if
    *     no package name is known.
    */
@@ -126,6 +141,11 @@ public interface CodingConvention extends Serializable {
   public boolean isPrivate(String name);
 
   /**
+   * Whether this CodingConvention includes a convention for what private names should look like.
+   */
+  public boolean hasPrivacyConvention();
+
+  /**
    * Checks if the given method defines a subclass relationship,
    * and if it does, returns information on that relationship. By default,
    * always returns null. Meant to be overridden by subclasses.
@@ -133,6 +153,14 @@ public interface CodingConvention extends Serializable {
    * @param callNode A CALL node.
    */
   public SubclassRelationship getClassesDefinedByCall(Node callNode);
+
+  /**
+   * Checks if the given method is a call to a class factory, such a factory returns a
+   * unique class.
+   *
+   * @param callNode A CALL node.
+   */
+  public boolean isClassFactoryCall(Node callNode);
 
   /**
    * Returns true if passed a string referring to the superclass.  The string
@@ -184,8 +212,8 @@ public interface CodingConvention extends Serializable {
    * In many JS libraries, the function that produces inheritance also
    * adds properties to the superclass and/or subclass.
    */
-  public void applySubclassRelationship(FunctionType parentCtor,
-      FunctionType childCtor, SubclassType type);
+  public void applySubclassRelationship(
+      NominalTypeBuilder parent, NominalTypeBuilder child, SubclassType type);
 
   /**
    * Function name for abstract methods. An abstract method can be assigned to
@@ -213,8 +241,8 @@ public interface CodingConvention extends Serializable {
    * In many JS libraries, the function that adds a singleton getter to a class
    * adds properties to the class.
    */
-  public void applySingletonGetter(FunctionType functionType,
-      FunctionType getterType, ObjectType objectType);
+  public void applySingletonGetter(
+      NominalTypeBuilder classType, FunctionTypeI getterType);
 
   /**
    * @return Whether the function is inlinable by convention.
@@ -231,9 +259,11 @@ public interface CodingConvention extends Serializable {
    * also adds properties to the delegator and delegate base.
    */
   public void applyDelegateRelationship(
-      ObjectType delegateSuperclass, ObjectType delegateBase,
-      ObjectType delegator, FunctionType delegateProxy,
-      FunctionType findDelegate);
+      NominalTypeBuilder delegateSuperclass,
+      NominalTypeBuilder delegateBase,
+      NominalTypeBuilder delegator,
+      ObjectTypeI delegateProxy,
+      FunctionTypeI findDelegate);
 
   /**
    * @return the name of the delegate superclass.
@@ -241,28 +271,31 @@ public interface CodingConvention extends Serializable {
   public String getDelegateSuperclassName();
 
   /**
-   * Checks for function calls that set the calling conventions on delegate
-   * methods.
+   * Checks for getprops that set the calling conventions on delegate methods.
    */
-  public void checkForCallingConventionDefiningCalls(
-      Node n, Map<String, String> delegateCallingConventions);
+  public void checkForCallingConventionDefinitions(
+      Node getPropNode, Map<String, String> delegateCallingConventions);
 
   /**
    * Defines the delegate proxy prototype properties. Their types depend on
    * properties of the delegate base methods.
    *
-   * @param delegateProxyPrototypes List of delegate proxy prototypes.
+   * @param delegateProxies List of delegate proxy types.
    */
   public void defineDelegateProxyPrototypeProperties(
-      JSTypeRegistry registry,
-      StaticTypedScope<com.google.javascript.rhino.jstype.JSType> scope,
-      List<ObjectType> delegateProxyPrototypes,
+      TypeIRegistry registry,
+      List<NominalTypeBuilder> delegateProxies,
       Map<String, String> delegateCallingConventions);
 
   /**
    * Gets the name of the global object.
    */
   public String getGlobalObject();
+
+  /**
+   * Whether this statement is creating an alias of the global object
+   */
+  public boolean isAliasingGlobalThis(Node n);
 
   /**
    * A Bind instance or null.
@@ -315,8 +348,33 @@ public interface CodingConvention extends Serializable {
         return 0;
       }
       Node paramParent = parameters.getParent();
-      return paramParent.getChildCount() -
-          paramParent.getIndexOfChild(parameters);
+      return paramParent.getChildCount() - paramParent.getIndexOfChild(parameters);
+    }
+  }
+
+  /**
+   * Builds a {@link Cache} instance from the given call node and returns that instance, or null
+   * if the {@link Node} does not resemble a cache utility call.
+   *
+   * <p>This should match calls to a cache utility method. This type of node is specially considered
+   * for side-effects since conventionally storing something on a cache object would be seen as a
+   * side-effect.
+   *
+   */
+  public Cache describeCachingCall(Node node);
+
+  /** Cache class */
+  public static class Cache {
+    final Node cacheObj;
+    final Node key;
+    final Node valueFn;
+    final Node keyFn;
+
+    public Cache(Node cacheObj, Node key, Node valueFn, Node keyFn) {
+      this.cacheObj = cacheObj;
+      this.key = key;
+      this.valueFn = valueFn;
+      this.keyFn = keyFn;
     }
   }
 
@@ -329,6 +387,11 @@ public interface CodingConvention extends Serializable {
    * Whether this GETPROP node is an alias for an object prototype.
    */
   public boolean isPrototypeAlias(Node getProp);
+
+  /**
+   * Whether this CALL function is returning the string name for a property, but allows renaming.
+   */
+  public boolean isPropertyRenameFunction(String name);
 
   /**
    * Checks if the given method performs a object literal cast, and if it does,
@@ -363,8 +426,12 @@ public interface CodingConvention extends Serializable {
     final String subclassName;
     final String superclassName;
 
-    public SubclassRelationship(SubclassType type,
-        Node subclassNode, Node superclassNode) {
+    public SubclassRelationship(
+        SubclassType type, Node subclassNode, Node superclassNode) {
+      Preconditions.checkArgument(
+          subclassNode.isQualifiedName(), "Expected qualified name, found: %s", subclassNode);
+      Preconditions.checkArgument(
+          superclassNode.isQualifiedName(), "Expected qualified name, found: %s", superclassNode);
       this.type = type;
       this.subclassName = subclassNode.getQualifiedName();
       this.superclassName = superclassNode.getQualifiedName();
@@ -419,24 +486,15 @@ public interface CodingConvention extends Serializable {
    */
   public class AssertionFunctionSpec {
     protected final String functionName;
-    // Old type system type
     protected final JSTypeNative assertedType;
-    // New type system type
-    protected final JSType assertedNewType;
 
     @Deprecated
     public AssertionFunctionSpec(String functionName) {
-      this(functionName, JSType.UNKNOWN, null);
+      this(functionName, null);
     }
 
-    public AssertionFunctionSpec(String functionName, JSType assertedNewType) {
-      this(functionName, assertedNewType, null);
-    }
-
-    public AssertionFunctionSpec(String functionName,
-        JSType assertedNewType, JSTypeNative assertedType) {
+    public AssertionFunctionSpec(String functionName, JSTypeNative assertedType) {
       this.functionName = functionName;
-      this.assertedNewType = assertedNewType;
       this.assertedType = assertedType;
     }
 
@@ -468,7 +526,8 @@ public interface CodingConvention extends Serializable {
      * @param call The asserting call
      */
     public JSType getAssertedNewType(Node call, DeclaredTypeRegistry scope) {
-      return assertedNewType;
+      return assertedType != null
+          ? scope.getCommonTypes().getNativeType(assertedType) : null;
     }
   }
 }

@@ -16,13 +16,13 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.jscomp.DefinitionsRemover.Definition;
 import com.google.javascript.rhino.FunctionTypeI;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.TypeI;
-
 import java.util.Collection;
 
 /**
@@ -58,8 +58,7 @@ import java.util.Collection;
  * </pre>
  *
  */
-class DevirtualizePrototypeMethods
-    implements OptimizeCalls.CallGraphCompilerPass, CompilerPass {
+class DevirtualizePrototypeMethods implements CompilerPass {
   private final AbstractCompiler compiler;
 
   DevirtualizePrototypeMethods(AbstractCompiler compiler) {
@@ -68,14 +67,13 @@ class DevirtualizePrototypeMethods
 
   @Override
   public void process(Node externs, Node root) {
-    SimpleDefinitionFinder defFinder = new SimpleDefinitionFinder(compiler);
+    DefinitionUseSiteFinder defFinder = new DefinitionUseSiteFinder(compiler);
     defFinder.process(externs, root);
     process(externs, root, defFinder);
   }
 
-  @Override
   public void process(
-      Node externs, Node root, SimpleDefinitionFinder definitions) {
+      Node externs, Node root, DefinitionUseSiteFinder definitions) {
     for (DefinitionSite defSite : definitions.getDefinitionSites()) {
       rewriteDefinitionIfEligible(defSite, definitions);
     }
@@ -87,6 +85,9 @@ class DevirtualizePrototypeMethods
   private static boolean isCall(UseSite site) {
     Node node = site.node;
     Node parent = node.getParent();
+    if (parent == null) {
+      return false;
+    }
     return (parent.getFirstChild() == node) && parent.isCall();
   }
 
@@ -121,7 +122,7 @@ class DevirtualizePrototypeMethods
       return nameNode.isGetProp() &&
           nameNode.getLastChild().getString().equals("prototype");
     } else if (node.isStringKey()) {
-      Preconditions.checkState(parent.isObjectLit());
+      checkState(parent.isObjectLit());
 
       if (!gramp.isAssign()) {
         return false;
@@ -171,14 +172,14 @@ class DevirtualizePrototypeMethods
    * defined in the global scope exactly once.
    *
    * Definition and use site information is provided by the
-   * {@link SimpleDefinitionFinder} passed in as an argument.
+   * {@link DefinitionUseSiteFinder} passed in as an argument.
    *
    * @param defSite definition site to process.
    * @param defFinder structure that hold Node -> Definition and
    * Definition -> [UseSite] maps.
    */
   private void rewriteDefinitionIfEligible(DefinitionSite defSite,
-                                           SimpleDefinitionFinder defFinder) {
+                                           DefinitionUseSiteFinder defFinder) {
     if (defSite.inExterns ||
         !defSite.inGlobalScope ||
         !isEligibleDefinition(defFinder, defSite)) {
@@ -198,12 +199,8 @@ class DevirtualizePrototypeMethods
       }
     }
 
-    // TODO(user) The code only works if there is a single definition
-    // associated with a property name.  Once this pass starts using
-    // the NameReferenceGraph to disambiguate call sites, it will be
-    // necessary to consider type information when generating static
-    // method names and/or append unique ids to duplicate static
-    // method names.
+    // TODO(user) The code only works if there is a single definition associated with a property
+    // name.
     // Whatever scheme we use should not break stable renaming.
     String newMethodName = getRewrittenMethodName(
         getMethodName(node));
@@ -224,7 +221,7 @@ class DevirtualizePrototypeMethods
    *   choice at each call site.
    * - Definition must happen in a module loaded before the first use.
    */
-  private boolean isEligibleDefinition(SimpleDefinitionFinder defFinder,
+  private boolean isEligibleDefinition(DefinitionUseSiteFinder defFinder,
                                        DefinitionSite definitionSite) {
 
     Definition definition = definitionSite.definition;
@@ -236,7 +233,7 @@ class DevirtualizePrototypeMethods
     Node rValue = definition.getRValue();
     if (rValue == null
         || !rValue.isFunction()
-        || NodeUtil.isVarArgsFunction(rValue)) {
+        || NodeUtil.doesFunctionReferenceOwnArgumentsObject(rValue)) {
       return false;
     }
 
@@ -279,11 +276,11 @@ class DevirtualizePrototypeMethods
       // Multiple definitions prevent rewrite.
       Collection<Definition> singleSiteDefinitions =
           defFinder.getDefinitionsReferencedAt(nameNode);
-      if (singleSiteDefinitions.size() > 1) {
+      if (!allDefinitionsEquivalent(singleSiteDefinitions)) {
         return false;
       }
-      Preconditions.checkState(!singleSiteDefinitions.isEmpty());
-      Preconditions.checkState(singleSiteDefinitions.contains(definition));
+      checkState(!singleSiteDefinitions.isEmpty());
+      checkState(singleSiteDefinitions.contains(definition));
 
       // Accessing the property in a module loaded before the
       // definition module prevents rewrite; accessing a variable
@@ -299,6 +296,30 @@ class DevirtualizePrototypeMethods
     return true;
   }
 
+  /** Given a set of method definitions, verify they are the same. */
+  boolean allDefinitionsEquivalent(Collection<Definition> definitions) {
+    if (definitions.size() <= 1) {
+      return true;
+    }
+
+    Definition first = null;
+    for (Definition definition : definitions) {
+      if (definition.getRValue() == null) {
+        return false; // We can't tell if they're all the same.
+      }
+
+      if (first == null) {
+        first = definition;
+        continue;
+      }
+
+      if (!compiler.areNodesEqualForInlining(first.getRValue(), definition.getRValue())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   /**
    * Rewrites object method call sites as calls to global functions
    * that take "this" as their first argument.
@@ -309,7 +330,7 @@ class DevirtualizePrototypeMethods
    * After:
    *   foo(o, a, b, c)
    */
-  private void rewriteCallSites(SimpleDefinitionFinder defFinder,
+  private void rewriteCallSites(DefinitionUseSiteFinder defFinder,
                                 Definition definition,
                                 String newMethodName) {
     Collection<UseSite> useSites = defFinder.getUseSites(definition);
@@ -321,9 +342,9 @@ class DevirtualizePrototypeMethods
       node.removeChild(objectNode);
       parent.replaceChild(node, objectNode);
       parent.addChildToFront(IR.name(newMethodName).srcref(node));
-      Preconditions.checkState(parent.isCall());
+      checkState(parent.isCall());
       parent.putBooleanProp(Node.FREE_CALL, true);
-      compiler.reportCodeChange();
+      compiler.reportChangeToEnclosingScope(parent);
     }
   }
 
@@ -343,12 +364,12 @@ class DevirtualizePrototypeMethods
     Node parent = node.getParent();
 
     Node refNode = isObjLitDefKey ? node : parent.getFirstChild();
-    Node newNameNode = IR.name(newMethodName).copyInformationFrom(refNode);
-    Node newVarNode = IR.var(newNameNode).copyInformationFrom(refNode);
+    Node newNameNode = IR.name(newMethodName).useSourceInfoIfMissingFrom(refNode);
+    Node newVarNode = IR.var(newNameNode).useSourceInfoIfMissingFrom(refNode);
 
     Node functionNode;
     if (!isObjLitDefKey) {
-      Preconditions.checkState(parent.isAssign());
+      checkState(parent.isAssign());
       functionNode = parent.getLastChild();
       Node expr = parent.getParent();
       Node block = expr.getParent();
@@ -356,7 +377,7 @@ class DevirtualizePrototypeMethods
       newNameNode.addChildToFront(functionNode);
       block.replaceChild(expr, newVarNode);
     } else {
-      Preconditions.checkState(parent.isObjectLit());
+      checkState(parent.isObjectLit());
       functionNode = node.getFirstChild();
       Node assign = parent.getParent();
       Node expr = assign.getParent();
@@ -367,21 +388,23 @@ class DevirtualizePrototypeMethods
       newNameNode.addChildToFront(functionNode);
       block.addChildAfter(newVarNode, expr);
     }
+    compiler.reportChangeToEnclosingScope(newVarNode);
 
     // add extra argument
     String self = newMethodName + "$self";
-    Node argList = functionNode.getFirstChild().getNext();
+    Node argList = functionNode.getSecondChild();
     argList.addChildToFront(IR.name(self)
-        .copyInformationFrom(functionNode));
+        .useSourceInfoIfMissingFrom(functionNode));
+    compiler.reportChangeToEnclosingScope(argList);
 
     // rewrite body
     Node body = functionNode.getLastChild();
-    replaceReferencesToThis(body, self);
+    if (replaceReferencesToThis(body, self)) {
+      compiler.reportChangeToEnclosingScope(body);
+    }
 
     // fix type
     fixFunctionType(functionNode);
-
-    compiler.reportCodeChange();
   }
 
   /**
@@ -404,19 +427,23 @@ class DevirtualizePrototypeMethods
    * Replaces references to "this" with references to name.  Do not
    * traverse function boundaries.
    */
-  private static void replaceReferencesToThis(Node node, String name) {
+  private static boolean replaceReferencesToThis(Node node, String name) {
     if (node.isFunction()) {
-      return;
+      return false;
     }
 
+    boolean changed = false;
     for (Node child : node.children()) {
       if (child.isThis()) {
         Node newName = IR.name(name);
         newName.setTypeI(child.getTypeI());
         node.replaceChild(child, newName);
+        changed = true;
       } else {
-        replaceReferencesToThis(child, name);
+        changed |= replaceReferencesToThis(child, name);
       }
     }
+
+    return changed;
   }
 }

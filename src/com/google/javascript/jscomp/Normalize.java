@@ -15,6 +15,9 @@
  */
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.base.Preconditions;
 import com.google.javascript.jscomp.AbstractCompiler.LifeCycleStage;
 import com.google.javascript.jscomp.MakeDeclaredNamesUnique.BoilerplateRenamer;
@@ -24,55 +27,46 @@ import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 /**
- * The goal with this pass is to simplify the other passes,
- * by making less complex statements.
+ * The goal with this pass is to simplify the other passes, by making less complex statements.
  *
- * Starting with statements like:
- *   var a = 0, b = foo();
+ * <p>Starting with statements like: {@code var a = 0, b = foo();}
  *
- * Which become:
- *   var a = 0;
- *   var b = foo();
+ * <p>Which become: {@code var a = 0; var b = foo();}
  *
- * The key here is only to break down things that help the other passes
- * and can be put back together in a form that is at least as small when
- * all is said and done.
+ * <p>The key here is only to break down things that help the other passes and can be put back
+ * together in a form that is at least as small when all is said and done.
  *
- * This pass currently does the following:
- * 1) Simplifies the AST by splitting var statements, moving initializers
- *    out of for loops, and converting whiles to fors.
- * 2) Moves hoisted functions to the top of function scopes.
- * 3) Rewrites unhoisted named function declarations to be var declarations.
- * 4) Makes all variable names globally unique (extern or otherwise) so that
- *    no value is ever shadowed (note: "arguments" may require special
- *    handling).
- * 5) Removes duplicate variable declarations.
- * 6) Marks constants with the IS_CONSTANT_NAME annotation.
- * 7) Finds properties marked @expose, and rewrites them in [] notation.
+ * <p>This pass currently does the following:
+ *
+ * <ol>
+ *   <li>Simplifies the AST by splitting var/let/const statements, moving initializers out of for
+ *       loops, and converting whiles to fors.
+ *   <li>Moves hoisted functions to the top of function scopes.
+ *   <li>Rewrites unhoisted named function declarations to be var declarations.
+ *   <li>Makes all variable names globally unique (extern or otherwise) so that no value is ever
+ *       shadowed (note: "arguments" may require special handling).
+ *   <li>Removes duplicate variable declarations.
+ *   <li>Marks constants with the IS_CONSTANT_NAME annotation.
+ *   <li>Finds properties marked @expose, and rewrites them in [] notation.
+ *   <li>Rewrite body of arrow function as a block.
+ *   <li>Take var statements out from for-loop initializer.
+ *       This: for(var a = 0;a<0;a++) {} becomes: var a = 0; for(var a;a<0;a++) {}
+ * </ol>
  *
  * @author johnlenz@google.com (johnlenz)
  */
-// public for ReplaceDebugStringsTest
 class Normalize implements CompilerPass {
 
   private final AbstractCompiler compiler;
   private final boolean assertOnChange;
-  private static final boolean CONVERT_WHILE_TO_FOR = true;
-  static final boolean MAKE_LOCAL_NAMES_UNIQUE = true;
-
-  public static final DiagnosticType CATCH_BLOCK_VAR_ERROR =
-    DiagnosticType.error(
-        "JSC_CATCH_BLOCK_VAR_ERROR",
-        "The use of scope variable {0} is not allowed within a catch block " +
-        "with a catch exception of the same name.");
-
 
   Normalize(AbstractCompiler compiler, boolean assertOnChange) {
     this.compiler = compiler;
@@ -84,10 +78,11 @@ class Normalize implements CompilerPass {
 
   static void normalizeSyntheticCode(
       AbstractCompiler compiler, Node js, String prefix) {
-    NodeTraversal.traverse(compiler, js,
+    NodeTraversal.traverseEs6(compiler, js,
         new Normalize.NormalizeStatements(compiler, false));
-    NodeTraversal.traverse(
-        compiler, js,
+    NodeTraversal.traverseEs6(
+        compiler,
+        js,
         new MakeDeclaredNamesUnique(
             new BoilerplateRenamer(
                 compiler.getCodingConvention(),
@@ -98,57 +93,50 @@ class Normalize implements CompilerPass {
   static Node parseAndNormalizeTestCode(
       AbstractCompiler compiler, String code) {
     Node js = compiler.parseTestCode(code);
-    NodeTraversal.traverse(compiler, js,
+    NodeTraversal.traverseEs6(compiler, js,
         new Normalize.NormalizeStatements(compiler, false));
     return js;
   }
 
-  private void reportCodeChange(String changeDescription) {
+  private void reportCodeChange(String changeDescription, Node n) {
     if (assertOnChange) {
       throw new IllegalStateException(
           "Normalize constraints violated:\n" + changeDescription);
     }
-    compiler.reportCodeChange();
+    compiler.reportChangeToEnclosingScope(n);
   }
 
   @Override
   public void process(Node externs, Node root) {
-    new NodeTraversal(
-        compiler, new NormalizeStatements(compiler, assertOnChange))
-        .traverseRoots(externs, root);
-    if (MAKE_LOCAL_NAMES_UNIQUE) {
-      MakeDeclaredNamesUnique renamer = new MakeDeclaredNamesUnique();
-      NodeTraversal t = new NodeTraversal(compiler, renamer);
-      t.traverseRoots(externs, root);
-    }
-    // It is important that removeDuplicateDeclarations runs after
-    // MakeDeclaredNamesUnique in order for catch block exception names to be
-    // handled properly. Specifically, catch block exception names are
-    // only valid within the catch block, but our current Scope logic
-    // has no concept of this and includes it in the containing function
-    // (or global scope). MakeDeclaredNamesUnique makes the catch exception
-    // names unique so that removeDuplicateDeclarations() will properly handle
-    // cases where a function scope variable conflict with a exception name:
-    //   function f() {
-    //      try {throw 0;} catch(e) {e; /* catch scope 'e'*/}
-    //      var e = 1; // f scope 'e'
-    //   }
-    // otherwise 'var e = 1' would be rewritten as 'e = 1'.
-    // TODO(johnlenz): Introduce a separate scope for catch nodes.
+    NodeTraversal.traverseEs6(compiler, root, new RemoveEmptyClassMembers());
+    NodeTraversal.traverseRootsEs6(
+        compiler, new NormalizeStatements(compiler, assertOnChange), externs, root);
     removeDuplicateDeclarations(externs, root);
+    MakeDeclaredNamesUnique renamer = new MakeDeclaredNamesUnique();
+    NodeTraversal.traverseRootsEs6(compiler, renamer, externs, root);
     new PropagateConstantAnnotationsOverVars(compiler, assertOnChange)
         .process(externs, root);
 
     FindExposeAnnotations findExposeAnnotations = new FindExposeAnnotations();
-    NodeTraversal.traverse(compiler, root, findExposeAnnotations);
+    NodeTraversal.traverseEs6(compiler, root, findExposeAnnotations);
     if (!findExposeAnnotations.exposedProperties.isEmpty()) {
-      NodeTraversal.traverse(compiler, root,
+      NodeTraversal.traverseEs6(compiler, root,
           new RewriteExposedProperties(
               findExposeAnnotations.exposedProperties));
     }
 
     if (!compiler.getLifeCycleStage().isNormalized()) {
       compiler.setLifeCycleStage(LifeCycleStage.NORMALIZED);
+    }
+  }
+
+  private class RemoveEmptyClassMembers extends AbstractPostOrderCallback {
+    @Override
+    public void visit(NodeTraversal t, Node n, Node parent) {
+      if (n.isEmpty() && parent.isClassMembers()) {
+        reportCodeChange("empty member in class", n);
+        n.detach();
+      }
     }
   }
 
@@ -190,20 +178,23 @@ class Normalize implements CompilerPass {
       this.exposedProperties = exposedProperties;
     }
 
-    @Override public void visit(NodeTraversal t, Node n, Node parent) {
+    @Override
+    public void visit(NodeTraversal t, Node n, Node parent) {
       if (n.isGetProp()) {
         String propName = n.getLastChild().getString();
         if (exposedProperties.contains(propName)) {
           Node obj = n.removeFirstChild();
           Node prop = n.removeFirstChild();
-          n.getParent().replaceChild(n, IR.getelem(obj, prop));
-          compiler.reportCodeChange();
+          compiler.reportChangeToEnclosingScope(n);
+          n.replaceWith(IR.getelem(obj, prop));
         }
       } else if (n.isStringKey()) {
         String propName = n.getString();
         if (exposedProperties.contains(propName)) {
-          n.setQuotedString();
-          compiler.reportCodeChange();
+          if (!n.isQuotedString()) {
+            compiler.reportChangeToEnclosingScope(n);
+            n.setQuotedString();
+          }
         }
       }
     }
@@ -226,13 +217,13 @@ class Normalize implements CompilerPass {
 
     @Override
     public void process(Node externs, Node root) {
-      new NodeTraversal(compiler, this).traverseRoots(externs, root);
+      NodeTraversal.traverseRootsEs6(compiler, this, externs, root);
     }
 
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
       // Note: Constant properties annotations are not propagated.
-      if (n.isName()) {
+      if (n.isName() || n.isStringKey()) {
         if (n.getString().isEmpty()) {
           return;
         }
@@ -245,16 +236,16 @@ class Normalize implements CompilerPass {
         }
 
         boolean shouldBeConstant =
-            (info != null && info.isConstant()) ||
-            NodeUtil.isConstantByConvention(compiler.getCodingConvention(), n);
+            (info != null && info.isConstant())
+            || NodeUtil.isConstantByConvention(compiler.getCodingConvention(), n);
         boolean isMarkedConstant = n.getBooleanProp(Node.IS_CONSTANT_NAME);
         if (shouldBeConstant && !isMarkedConstant) {
           if (assertOnChange) {
             String name = n.getString();
             throw new IllegalStateException(
-                "Unexpected const change.\n" +
-                "  name: "+ name + "\n" +
-                "  parent:" + n.getParent().toStringTree());
+                "Unexpected const change.\n"
+                + "  name: " + name + "\n"
+                + "  parent:" + n.getParent().toStringTree());
           }
           n.putBooleanProp(Node.IS_CONSTANT_NAME, true);
         }
@@ -268,8 +259,8 @@ class Normalize implements CompilerPass {
   static class VerifyConstants extends AbstractPostOrderCallback
       implements CompilerPass {
 
-    final private AbstractCompiler compiler;
-    final private boolean checkUserDeclarations;
+    private final AbstractCompiler compiler;
+    private final boolean checkUserDeclarations;
 
     VerifyConstants(AbstractCompiler compiler, boolean checkUserDeclarations) {
       this.compiler = compiler;
@@ -279,12 +270,12 @@ class Normalize implements CompilerPass {
     @Override
     public void process(Node externs, Node root) {
       Node externsAndJs = root.getParent();
-      Preconditions.checkState(externsAndJs != null);
-      Preconditions.checkState(externsAndJs.hasChild(externs));
-      NodeTraversal.traverseRoots(compiler, this, externs, root);
+      checkState(externsAndJs != null);
+      checkState(externsAndJs.hasChild(externs));
+      NodeTraversal.traverseRootsEs6(compiler, this, externs, root);
     }
 
-    private Map<String, Boolean> constantMap = new HashMap<>();
+    private final Map<String, Boolean> constantMap = new HashMap<>();
 
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
@@ -356,12 +347,13 @@ class Normalize implements CompilerPass {
       this.assertOnChange = assertOnChange;
     }
 
-    private void reportCodeChange(String changeDescription) {
+
+    private void reportCodeChange(String changeDescription, Node n) {
       if (assertOnChange) {
         throw new IllegalStateException(
             "Normalize constraints violated:\n" + changeDescription);
       }
-      compiler.reportCodeChange();
+      compiler.reportChangeToEnclosingScope(n);
     }
 
     @Override
@@ -373,37 +365,40 @@ class Normalize implements CompilerPass {
 
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
-      switch (n.getType()) {
-        case Token.WHILE:
-          if (CONVERT_WHILE_TO_FOR) {
-            Node expr = n.getFirstChild();
-            n.setType(Token.FOR);
-            Node empty = IR.empty();
-            empty.copyInformationFrom(n);
-            n.addChildBefore(empty, expr);
-            n.addChildAfter(empty.cloneNode(), expr);
-            reportCodeChange("WHILE node");
+      switch (n.getToken()) {
+        case WHILE:
+          Node expr = n.getFirstChild();
+          n.setToken(Token.FOR);
+          Node empty = IR.empty();
+          empty.useSourceInfoIfMissingFrom(n);
+          n.addChildBefore(empty, expr);
+          n.addChildAfter(empty.cloneNode(), expr);
+          reportCodeChange("WHILE node", n);
+          break;
+
+        case FUNCTION:
+          if (visitFunction(n, compiler)) {
+            reportCodeChange("Function declaration", n);
           }
           break;
 
-        case Token.FUNCTION:
-          if (maybeNormalizeFunctionDeclaration(n)) {
-            reportCodeChange("Function declaration");
-          }
+        case EXPORT:
+          splitExportDeclaration(n);
           break;
 
-        case Token.NAME:
-        case Token.STRING:
-        case Token.STRING_KEY:
-        case Token.GETTER_DEF:
-        case Token.SETTER_DEF:
-          if (!compiler.getLifeCycleStage().isNormalizedObfuscated()) {
-            annotateConstantsByConvention(n, parent);
-          }
+        case NAME:
+        case STRING:
+        case GETTER_DEF:
+        case SETTER_DEF:
+          annotateConstantsByConvention(n, parent);
           break;
 
-        case Token.CAST:
+        case CAST:
+          compiler.reportChangeToEnclosingScope(n);
           parent.replaceChild(n, n.removeFirstChild());
+          break;
+
+        default:
           break;
       }
     }
@@ -412,34 +407,75 @@ class Normalize implements CompilerPass {
      * Mark names and properties that are constants by convention.
      */
     private void annotateConstantsByConvention(Node n, Node parent) {
-      Preconditions.checkState(
-          n.isName()
-          || n.isString()
-          || n.isStringKey()
-          || n.isGetterDef()
-          || n.isSetterDef());
+      checkState(
+          n.isName() || n.isString() || n.isStringKey() || n.isGetterDef() || n.isSetterDef());
+
+      // Need to check that variables have not been renamed, to determine whether
+      // coding conventions still apply.
+      if (compiler.getLifeCycleStage().isNormalizedObfuscated()) {
+        return;
+      }
 
       // There are only two cases where a string token
       // may be a variable reference: The right side of a GETPROP
       // or an OBJECTLIT key.
       boolean isObjLitKey = NodeUtil.isObjectLitKey(n);
-      boolean isProperty = isObjLitKey ||
-          (parent.isGetProp() &&
-           parent.getLastChild() == n);
+      boolean isProperty = isObjLitKey || (parent.isGetProp() && parent.getLastChild() == n);
       if (n.isName() || isProperty) {
         boolean isMarkedConstant = n.getBooleanProp(Node.IS_CONSTANT_NAME);
-        if (!isMarkedConstant &&
-            NodeUtil.isConstantByConvention(
-                compiler.getCodingConvention(), n)) {
+        if (!isMarkedConstant
+            && NodeUtil.isConstantByConvention(compiler.getCodingConvention(), n)) {
           if (assertOnChange) {
             String name = n.getString();
             throw new IllegalStateException(
-                "Unexpected const change.\n" +
-                "  name: "+ name + "\n" +
-                "  parent:" + n.getParent().toStringTree());
+                "Unexpected const change.\n"
+                    + "  name: "
+                    + name
+                    + "\n"
+                    + "  parent:"
+                    + n.getParent().toStringTree());
           }
           n.putBooleanProp(Node.IS_CONSTANT_NAME, true);
         }
+      }
+    }
+
+    /**
+     * Splits ES6 export combined with a variable or function declaration.
+     *
+     */
+    private void splitExportDeclaration(Node n) {
+      if (n.getBooleanProp(Node.EXPORT_DEFAULT)) {
+        return;
+      }
+      Node c = n.getFirstChild();
+      if (NodeUtil.isDeclaration(c)) {
+        n.removeChild(c);
+
+        Node exportSpecs = new Node(Token.EXPORT_SPECS).srcref(n);
+        n.addChildToFront(exportSpecs);
+        Iterable<Node> names;
+        if (c.isClass() || c.isFunction()) {
+          names = Collections.singleton(c.getFirstChild());
+          n.getParent().addChildBefore(c, n);
+        } else {
+          names = NodeUtil.findLhsNodesInNode(c);
+          // Split up var declarations onto separate lines.
+          for (Node child : c.children()) {
+            c.removeChild(child);
+            Node newDeclaration = new Node(c.getToken(), child).srcref(n);
+            n.getParent().addChildBefore(newDeclaration, n);
+          }
+        }
+
+        for (Node name : names) {
+          Node exportSpec = new Node(Token.EXPORT_SPEC).srcref(name);
+          exportSpec.addChildToFront(name.cloneNode());
+          exportSpec.addChildToFront(name.cloneNode());
+          exportSpecs.addChildToBack(exportSpec);
+        }
+
+        compiler.reportChangeToEnclosingScope(n.getParent());
       }
     }
 
@@ -456,14 +492,19 @@ class Normalize implements CompilerPass {
      * semantics, but the semantics are also not well-defined
      * cross-browser.
      *
-     * @see https://github.com/google/closure-compiler/pull/429
+     * See <a href="https://github.com/google/closure-compiler/pull/429">#429</a>
      */
-    static boolean maybeNormalizeFunctionDeclaration(Node n) {
-      Preconditions.checkState(n.isFunction());
-      if (!NodeUtil.isFunctionExpression(n)
-          && !NodeUtil.isHoistedFunctionDeclaration(n)) {
-        rewriteFunctionDeclaration(n);
+    static boolean visitFunction(Node n, AbstractCompiler compiler) {
+      checkState(n.isFunction(), n);
+      if (NodeUtil.isFunctionDeclaration(n) && !NodeUtil.isHoistedFunctionDeclaration(n)) {
+        rewriteFunctionDeclaration(n, compiler);
         return true;
+      } else if (n.isFunction() && !NodeUtil.getFunctionBody(n).isNormalBlock()) {
+        Node returnValue = NodeUtil.getFunctionBody(n);
+        Node body = IR.block(IR.returnNode(returnValue.detach()));
+        body.useSourceInfoIfMissingFromForTree(returnValue);
+        n.addChildToBack(body);
+        compiler.reportChangeToEnclosingScope(body);
       }
       return false;
     }
@@ -472,19 +513,19 @@ class Normalize implements CompilerPass {
      * Rewrite the function declaration from:
      *   function x() {}
      *   FUNCTION
-     *     NAME
-     *     LP
+     *     NAME x
+     *     PARAM_LIST
      *     BLOCK
      * to:
      *   var x = function() {};
      *   VAR
-     *     NAME
+     *     NAME x
      *       FUNCTION
      *         NAME (w/ empty string)
-     *         LP
+     *         PARAM_LIST
      *         BLOCK
      */
-    private static void rewriteFunctionDeclaration(Node n) {
+    private static void rewriteFunctionDeclaration(Node n, AbstractCompiler compiler) {
       // Prepare a spot for the function.
       Node oldNameNode = n.getFirstChild();
       Node fnNameNode = oldNameNode.cloneNode();
@@ -492,15 +533,13 @@ class Normalize implements CompilerPass {
 
       // Prepare the function
       oldNameNode.setString("");
+      compiler.reportChangeToEnclosingScope(oldNameNode);
 
-      // Move the function if it's not the child of a label node
+      // Move the function to the front of the parent
       Node parent = n.getParent();
-      if (parent.isLabel()) {
-        parent.replaceChild(n, var);
-      } else {
-        parent.removeChild(n);
-        parent.addChildToFront(var);
-      }
+      parent.removeChild(n);
+      parent.addChildToFront(var);
+      compiler.reportChangeToEnclosingScope(var);
       fnNameNode.addChildToFront(n);
     }
 
@@ -527,6 +566,10 @@ class Normalize implements CompilerPass {
       if (n.isFunction()) {
         moveNamedFunctions(n.getLastChild());
       }
+
+      if (NodeUtil.isCompoundAssignmentOp(n)) {
+        normalizeAssignShorthand(n);
+      }
     }
 
     // TODO(johnlenz): Move this to NodeTypeNormalizer once the unit tests are
@@ -537,23 +580,25 @@ class Normalize implements CompilerPass {
      * place as the named continues are not allowed for labeled blocks.
      */
     private void normalizeLabels(Node n) {
-      Preconditions.checkArgument(n.isLabel());
+      checkArgument(n.isLabel());
 
       Node last = n.getLastChild();
       // TODO(moz): Avoid adding blocks for cases like "label: let x;"
-      switch (last.getType()) {
-        case Token.LABEL:
-        case Token.BLOCK:
-        case Token.FOR:
-        case Token.WHILE:
-        case Token.DO:
+      switch (last.getToken()) {
+        case LABEL:
+        case BLOCK:
+        case FOR:
+        case FOR_IN:
+        case FOR_OF:
+        case WHILE:
+        case DO:
           return;
         default:
           Node block = IR.block();
-          block.copyInformationFrom(last);
+          block.useSourceInfoIfMissingFrom(last);
           n.replaceChild(last, block);
           block.addChildToFront(last);
-          reportCodeChange("LABEL normalization");
+          reportCodeChange("LABEL normalization", n);
           return;
       }
     }
@@ -576,14 +621,36 @@ class Normalize implements CompilerPass {
         next = c.getNext();
         Node insertBefore = (before == null) ? c : before;
         Node insertBeforeParent = (before == null) ? n : beforeParent;
-        switch (c.getType()) {
-          case Token.LABEL:
+        switch (c.getToken()) {
+          case LABEL:
             extractForInitializer(c, insertBefore, insertBeforeParent);
             break;
-          case Token.FOR:
-            if (NodeUtil.isForIn(c)) {
-              Node first = c.getFirstChild();
-              if (first.isVar()) {
+          case FOR_IN:
+          case FOR_OF:
+            Node first = c.getFirstChild();
+            if (first.isVar()) {
+              Node lhs = first.getFirstChild();
+              if (lhs.isDestructuringLhs()) {
+                // Transform:
+                //    for (var [a, b = 3] in c) {}
+                // to:
+                //    var a; var b; for ([a, b = 3] in c) {}
+                List<Node> lhsNodes = NodeUtil.findLhsNodesInNode(lhs);
+                for (Node name : lhsNodes) {
+                  // Add a declaration outside the for loop for the given name.
+                  checkState(
+                      name.isName(),
+                      "lhs in destructuring declaration should be a simple name.",
+                      name);
+                  Node newName = IR.name(name.getString()).srcref(name);
+                  Node newVar = IR.var(newName).srcref(name);
+                  insertBeforeParent.addChildBefore(newVar, insertBefore);
+                }
+
+                // Transform for (var [a, b]... ) to for ([a, b]...
+                Node destructuringPattern = lhs.removeFirstChild();
+                c.replaceChild(first, destructuringPattern);
+              } else {
                 // Transform:
                 //    for (var a = 1 in b) {}
                 // to:
@@ -591,14 +658,22 @@ class Normalize implements CompilerPass {
                 Node newStatement = first;
                 // Clone just the node, to remove any initialization.
                 Node name = newStatement.getFirstChild().cloneNode();
-                first.getParent().replaceChild(first, name);
+                first.replaceWith(name);
                 insertBeforeParent.addChildBefore(newStatement, insertBefore);
-                reportCodeChange("FOR-IN var declaration");
               }
-            } else if (!c.getFirstChild().isEmpty()) {
+              reportCodeChange("FOR-IN var declaration", n);
+            }
+            break;
+          case FOR:
+            if (!c.getFirstChild().isEmpty()) {
               Node init = c.getFirstChild();
+
+              if (init.isLet() || init.isConst() || init.isClass() || init.isFunction()) {
+                return;
+              }
+
               Node empty = IR.empty();
-              empty.copyInformationFrom(c);
+              empty.useSourceInfoIfMissingFrom(c);
               c.replaceChild(init, empty);
 
               Node newStatement;
@@ -611,15 +686,17 @@ class Normalize implements CompilerPass {
               }
 
               insertBeforeParent.addChildBefore(newStatement, insertBefore);
-              reportCodeChange("FOR initializer");
+              reportCodeChange("FOR initializer", n);
             }
+            break;
+          default:
             break;
         }
       }
     }
 
     /**
-     * Split a var node such as:
+     * Split a var (or let or const) node such as:
      *   var a, b;
      * into individual statements:
      *   var a;
@@ -629,7 +706,7 @@ class Normalize implements CompilerPass {
     private void splitVarDeclarations(Node n) {
       for (Node next, c = n.getFirstChild(); c != null; c = next) {
         next = c.getNext();
-        if (c.isVar()) {
+        if (NodeUtil.isNameDeclaration(c)) {
           if (assertOnChange && !c.hasChildren()) {
             throw new IllegalStateException("Empty VAR node.");
           }
@@ -637,9 +714,9 @@ class Normalize implements CompilerPass {
           while (c.getFirstChild() != c.getLastChild()) {
             Node name = c.getFirstChild();
             c.removeChild(name);
-            Node newVar = IR.var(name).srcref(n);
+            Node newVar = new Node(c.getToken(), name).srcref(n);
             n.addChildBefore(newVar, c);
-            reportCodeChange("VAR with multiple children");
+            reportCodeChange("VAR with multiple children", n);
           }
         }
       }
@@ -650,36 +727,46 @@ class Normalize implements CompilerPass {
      * statement of the function to the beginning of the function definition.
      */
     private void moveNamedFunctions(Node functionBody) {
-      Preconditions.checkState(
-          functionBody.getParent().isFunction());
-      Node previous = null;
+      checkState(functionBody.getParent().isFunction());
+      Node insertAfter = null;
       Node current = functionBody.getFirstChild();
       // Skip any declarations at the beginning of the function body, they
       // are already in the right place.
       while (current != null && NodeUtil.isFunctionDeclaration(current)) {
-        previous = current;
+        insertAfter = current;
         current = current.getNext();
       }
 
       // Find any remaining declarations and move them.
-      Node insertAfter = previous;
       while (current != null) {
         // Save off the next node as the current node maybe removed.
         Node next = current.getNext();
         if (NodeUtil.isFunctionDeclaration(current)) {
           // Remove the declaration from the body.
-          Preconditions.checkNotNull(previous);
-          functionBody.removeChildAfter(previous);
+          functionBody.removeChild(current);
 
           // Read the function at the top of the function body (after any
           // previous declarations).
           insertAfter = addToFront(functionBody, current, insertAfter);
-          reportCodeChange("Move function declaration not at top of function");
-        } else {
-          // Update the previous only if the current node hasn't been moved.
-          previous = current;
+          reportCodeChange("Move function declaration not at top of function", functionBody);
         }
         current = next;
+      }
+    }
+
+    private void normalizeAssignShorthand(Node shorthand) {
+      if (shorthand.getFirstChild().isName()) {
+        Node name = shorthand.getFirstChild();
+        shorthand.setToken(NodeUtil.getOpFromAssignmentOp(shorthand));
+        Node parent = shorthand.getParent();
+        Node insertPoint = IR.empty();
+        parent.replaceChild(shorthand, insertPoint);
+        Node assign = IR.assign(name.cloneNode().useSourceInfoFrom(name), shorthand)
+            .useSourceInfoFrom(shorthand);
+        assign.setJSDocInfo(shorthand.getJSDocInfo());
+        shorthand.setJSDocInfo(null);
+        parent.replaceChild(insertPoint, assign);
+        compiler.reportChangeToEnclosingScope(assign);
       }
     }
 
@@ -703,8 +790,8 @@ class Normalize implements CompilerPass {
    */
   private void removeDuplicateDeclarations(Node externs, Node root) {
     Callback tickler = new ScopeTicklingCallback();
-    ScopeCreator scopeCreator =  SyntacticScopeCreator.makeUntypedWithRedeclHandler(
-        compiler, new DuplicateDeclarationHandler());
+    ScopeCreator scopeCreator =
+        new Es6SyntacticScopeCreator(compiler, new DuplicateDeclarationHandler());
     NodeTraversal t = new NodeTraversal(compiler, tickler, scopeCreator);
     t.traverseRoots(externs, root);
   }
@@ -713,22 +800,20 @@ class Normalize implements CompilerPass {
    * ScopeCreator duplicate declaration handler.
    */
   private final class DuplicateDeclarationHandler implements
-      SyntacticScopeCreator.RedeclarationHandler {
+      Es6SyntacticScopeCreator.RedeclarationHandler {
 
-    private Set<Var> hasOkDuplicateDeclaration = new HashSet<>();
+    private final Set<Var> hasOkDuplicateDeclaration = new HashSet<>();
 
     /**
-     * Remove duplicate VAR declarations encountered discovered during
-     * scope creation.
+     * Remove duplicate VAR declarations discovered during scope creation.
      */
     @Override
-    public void onRedeclaration(
-        Scope s, String name, Node n, CompilerInput input) {
-      Preconditions.checkState(n.isName());
+    public void onRedeclaration(Scope s, String name, Node n, CompilerInput input) {
+      checkState(n.isName());
       Node parent = n.getParent();
       Var v = s.getVar(name);
 
-      if (v != null && s.isGlobal()) {
+      if (s.isGlobal()) {
         // We allow variables to be duplicate declared if one
         // declaration appears in source and the other in externs.
         // This deals with issues where a browser built-in is declared
@@ -740,27 +825,7 @@ class Normalize implements CompilerPass {
         }
       }
 
-      // If name is "arguments", Var maybe null.
-      if (v != null && v.getParentNode().isCatch()) {
-        // Redeclaration of a catch expression variable is hard to model
-        // without support for "with" expressions.
-        // The ECMAScript spec (section 12.14), declares that a catch
-        // "catch (e) {}" is handled like "with ({'e': e}) {}" so that
-        // "var e" would refer to the scope variable, but any following
-        // reference would still refer to "e" of the catch expression.
-        // Until we have support for this disallow it.
-        // Currently the Scope object adds the catch expression to the
-        // function scope, which is technically not true but a good
-        // approximation for most uses.
-
-        // TODO(johnlenz): Consider improving how scope handles catch
-        // expression.
-
-        // Use the name of the var before it was made unique.
-        name = MakeDeclaredNamesUnique.ContextualRenameInverter.getOriginalName(
-            name);
-        compiler.report(JSError.make(n, CATCH_BLOCK_VAR_ERROR, name));
-      } else if (v != null && parent.isFunction()) {
+      if (parent.isFunction()) {
         if (v.getParentNode().isVar()) {
           s.undeclare(v);
           s.declare(name, n, v.input);
@@ -768,7 +833,7 @@ class Normalize implements CompilerPass {
               v.getParentNode().getParent());
         }
       } else if (parent.isVar()) {
-        Preconditions.checkState(parent.hasOneChild());
+        checkState(parent.hasOneChild());
 
         replaceVarWithAssignment(n, parent, parent.getParent());
       }
@@ -799,34 +864,34 @@ class Normalize implements CompilerPass {
         n.removeChild(value);
         Node replacement = IR.assign(n, value);
         replacement.setJSDocInfo(parent.getJSDocInfo());
-        replacement.copyInformationFrom(parent);
-        grandparent.replaceChild(parent, NodeUtil.newExpr(replacement));
+        replacement.useSourceInfoIfMissingFrom(parent);
+        Node statement = NodeUtil.newExpr(replacement);
+        grandparent.replaceChild(parent, statement);
+        reportCodeChange("Duplicate VAR declaration", statement);
       } else {
         // It is an empty reference remove it.
         if (NodeUtil.isStatementBlock(grandparent)) {
           grandparent.removeChild(parent);
-        } else if (grandparent.isFor()) {
+        } else if (grandparent.isForIn() || grandparent.isForOf()) {
           // This is the "for (var a in b)..." case.  We don't need to worry
           // about initializers in "for (var a;;)..." as those are moved out
           // as part of the other normalizations.
           parent.removeChild(n);
           grandparent.replaceChild(parent, n);
         } else {
-          Preconditions.checkState(grandparent.isLabel());
           // We should never get here. LABELs with a single VAR statement should
           // already have been normalized to have a BLOCK.
-          throw new IllegalStateException("Unexpected LABEL");
+          checkState(grandparent.isLabel(), grandparent);
         }
+        reportCodeChange("Duplicate VAR declaration", grandparent);
       }
-      reportCodeChange("Duplicate VAR declaration");
     }
   }
 
   /**
    * A simple class that causes scope to be created.
    */
-  private static final class ScopeTicklingCallback
-      implements NodeTraversal.ScopedCallback {
+  private static final class ScopeTicklingCallback implements NodeTraversal.ScopedCallback {
     @Override
     public void enterScope(NodeTraversal t) {
       // Cause the scope to be created, which will cause duplicate
@@ -840,8 +905,7 @@ class Normalize implements CompilerPass {
     }
 
     @Override
-    public boolean shouldTraverse(
-        NodeTraversal nodeTraversal, Node n, Node parent) {
+    public boolean shouldTraverse(NodeTraversal nodeTraversal, Node n, Node parent) {
       return true;
     }
 

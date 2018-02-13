@@ -13,31 +13,36 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.google.javascript.jscomp;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+import static com.google.javascript.jscomp.parsing.parser.FeatureSet.ES8_MODULES;
 
+import com.google.common.annotations.GwtIncompatible;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Function;
-import com.google.common.base.Preconditions;
+import com.google.common.base.Joiner;
+import com.google.common.base.Splitter;
 import com.google.common.base.Supplier;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
-import com.google.common.io.CharStreams;
+import com.google.debugging.sourcemap.SourceMapConsumerV3;
 import com.google.debugging.sourcemap.proto.Mapping.OriginalMapping;
 import com.google.javascript.jscomp.CompilerOptions.DevMode;
-import com.google.javascript.jscomp.JSModuleGraph.MissingModuleException;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.ReferenceCollection;
-import com.google.javascript.jscomp.TypeValidator.TypeMismatch;
-import com.google.javascript.jscomp.deps.SortedDependencies;
-import com.google.javascript.jscomp.deps.SortedDependencies.CircularDependencyException;
+import com.google.javascript.jscomp.CoverageInstrumentationPass.CoverageReach;
+import com.google.javascript.jscomp.CoverageInstrumentationPass.InstrumentOption;
+import com.google.javascript.jscomp.WarningsGuard.DiagnosticGroupState;
+import com.google.javascript.jscomp.deps.JsFileParser;
+import com.google.javascript.jscomp.deps.ModuleLoader;
 import com.google.javascript.jscomp.deps.SortedDependencies.MissingProvideException;
+import com.google.javascript.jscomp.ijs.CheckTypeSummaryWarningsGuard;
 import com.google.javascript.jscomp.parsing.Config;
 import com.google.javascript.jscomp.parsing.ParserRunner;
+import com.google.javascript.jscomp.parsing.parser.FeatureSet;
+import com.google.javascript.jscomp.parsing.parser.FeatureSet.Feature;
 import com.google.javascript.jscomp.parsing.parser.trees.Comment;
+import com.google.javascript.jscomp.resources.ResourceLoader;
 import com.google.javascript.jscomp.type.ChainableReverseAbstractInterpreter;
 import com.google.javascript.jscomp.type.ClosureReverseAbstractInterpreter;
 import com.google.javascript.jscomp.type.ReverseAbstractInterpreter;
@@ -46,36 +51,37 @@ import com.google.javascript.rhino.ErrorReporter;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.InputId;
 import com.google.javascript.rhino.JSDocInfo;
+import com.google.javascript.rhino.JSDocInfoBuilder;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.TypeIRegistry;
 import com.google.javascript.rhino.jstype.JSTypeRegistry;
-
+import java.io.File;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.OutputStream;
 import java.io.PrintStream;
-import java.nio.file.FileSystems;
+import java.io.Serializable;
+import java.util.AbstractSet;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.ResourceBundle;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
+import javax.annotation.Nullable;
 
 /**
  * Compiler (and the other classes in this package) does the following:
@@ -92,7 +98,9 @@ import java.util.regex.Matcher;
  * window, document.
  *
  */
-public class Compiler extends AbstractCompiler {
+// TODO(tbreisacher): Rename Compiler to JsCompiler and remove this suppression.
+@SuppressWarnings("JavaLangClash")
+public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFileMapping {
   static final String SINGLETON_MODULE_NAME = "$singleton$";
 
   static final DiagnosticType MODULE_DEPENDENCY_ERROR =
@@ -105,14 +113,13 @@ public class Compiler extends AbstractCompiler {
       "required entry point \"{0}\" never provided");
 
   static final DiagnosticType MISSING_MODULE_ERROR = DiagnosticType.error(
-      "JSC_MISSING_ENTRY_ERROR",
+      "JSC_MISSING_MODULE_ERROR",
       "unknown module \"{0}\" specified in entry point spec");
 
-  // Used in PerformanceTracker
-  static final String PARSING_PASS_NAME = "parseInputs";
-  static final String CROSS_MODULE_CODE_MOTION_NAME = "crossModuleCodeMotion";
-  static final String CROSS_MODULE_METHOD_MOTION_NAME =
-      "crossModuleMethodMotion";
+  static final DiagnosticType INCONSISTENT_MODULE_DEFINITIONS = DiagnosticType.error(
+      "JSC_INCONSISTENT_MODULE_DEFINITIONS",
+      "Serialized module definitions are not consistent with the module definitions supplied in "
+          + "the command line");
 
   private static final String CONFIG_RESOURCE =
       "com.google.javascript.jscomp.parsing.ParserConfig";
@@ -127,12 +134,16 @@ public class Compiler extends AbstractCompiler {
   // The JS source modules
   private List<JSModule> modules;
 
-  // The graph of the JS source modules. Must be null if there are less than
-  // 2 modules, because we use this as a signal for which passes to run.
   private JSModuleGraph moduleGraph;
+
+  // The module loader for resolving paths into module URIs.
+  private ModuleLoader moduleLoader;
 
   // The JS source inputs
   private List<CompilerInput> inputs;
+
+  // Map of module names to module types - used for module rewriting
+  private final Map<String, CompilerInput.ModuleType> moduleTypesByName;
 
   // error manager to which error management is delegated
   private ErrorManager errorManager;
@@ -144,32 +155,45 @@ public class Compiler extends AbstractCompiler {
   // the library, so code can be inserted after.
   private final Map<String, Node> injectedLibraries = new LinkedHashMap<>();
 
+  // Node of the final injected library. Future libraries will be injected
+  // after this node.
+  private Node lastInjectedLibrary;
+
   // Parse tree root nodes
   Node externsRoot;
   Node jsRoot;
   Node externAndJsRoot;
 
-  /** @see #getLanguageMode() */
-  private CompilerOptions.LanguageMode languageMode =
-      CompilerOptions.LanguageMode.ECMASCRIPT3;
+  // Used for debugging; to see the compiled code between passes
+  private String lastJsSource = null;
 
-  private Map<InputId, CompilerInput> inputsById;
+  private FeatureSet featureSet;
 
-  // Function to load source files from disk or memory.
-  private Function<String, SourceFile> originalSourcesLoader =
-      new Function<String, SourceFile>() {
-        @Override
-        public SourceFile apply(String filename) {
-          return SourceFile.fromFile(filename);
-        }
-      };
+  private final Map<InputId, CompilerInput> inputsById = new ConcurrentHashMap<>();
+
+  private transient IncrementalScopeCreator scopeCreator = null;
+
+  private ImmutableMap<String, String> inputPathByWebpackId;
+
+  /**
+   * Subclasses are responsible for loading sources that were not provided as explicit inputs to the
+   * compiler. For example, looking up sources referenced within sourcemaps.
+   */
+  public static class ExternalSourceLoader {
+    public SourceFile loadSource(String filename) {
+      throw new RuntimeException("Cannot load without a valid loader.");
+    }
+  }
 
   // Original sources referenced by the source maps.
-  private ConcurrentHashMap<String, SourceFile> sourceMapOriginalSources
-      = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, SourceFile> sourceMapOriginalSources =
+      new ConcurrentHashMap<>();
+
+  /** Configured {@link SourceMapInput}s, plus any source maps discovered in source files. */
+  ConcurrentHashMap<String, SourceMapInput> inputSourceMaps = new ConcurrentHashMap<>();
 
   // Map from filenames to lists of all the comments in each file.
-  private Map<String, List<Comment>> commentsPerFile = new HashMap<>();
+  private Map<String, List<Comment>> commentsPerFile = new ConcurrentHashMap<>();
 
   /** The source code map */
   private SourceMap sourceMap;
@@ -183,8 +207,6 @@ public class Compiler extends AbstractCompiler {
    */
   private int uniqueNameId = 0;
 
-  private int timeout = 0;
-
   /**
    * Whether to assume there are references to the RegExp Global object
    * properties.
@@ -194,15 +216,12 @@ public class Compiler extends AbstractCompiler {
   /** The function information map */
   private FunctionInformationMap functionInformationMap;
 
-  /** Debugging information */
-  private final StringBuilder debugLog = new StringBuilder();
-
   /** Detects Google-specific coding conventions. */
   CodingConvention defaultCodingConvention = new ClosureCodingConvention();
 
   private JSTypeRegistry typeRegistry;
-  private Config parserConfig = null;
-  private Config externsParserConfig = null;
+  private volatile Config parserConfig = null;
+  private volatile Config externsParserConfig = null;
 
   private ReverseAbstractInterpreter abstractInterpreter;
   private TypeValidator typeValidator;
@@ -212,15 +231,16 @@ public class Compiler extends AbstractCompiler {
 
   public PerformanceTracker tracker;
 
-  // For use by the new type inference
-  private GlobalTypeInfo symbolTable;
+  // Types that have been forward declared
+  private Set<String> forwardDeclaredTypes = new HashSet<>();
 
-  // The oldErrorReporter exists so we can get errors from the JSTypeRegistry.
-  private final com.google.javascript.rhino.ErrorReporter oldErrorReporter =
-      RhinoErrorReporter.forOldRhino(this);
+  // Type registry used by new type inference.
+  private GlobalTypeInfo globalTypeInfo;
 
-  // This error reporter gets the messages from the current Rhino parser.
-  private final ErrorReporter defaultErrorReporter =
+  private MostRecentTypechecker mostRecentTypechecker = MostRecentTypechecker.NONE;
+
+  // This error reporter gets the messages from the current Rhino parser or TypeRegistry.
+  private final ErrorReporter oldErrorReporter =
       RhinoErrorReporter.forOldRhino(this);
 
   /** Error strings used for reporting JSErrors */
@@ -228,43 +248,17 @@ public class Compiler extends AbstractCompiler {
       "JSC_OPTIMIZE_LOOP_ERROR",
       "Exceeded max number of optimization iterations: {0}");
   public static final DiagnosticType MOTION_ITERATIONS_ERROR =
-      DiagnosticType.error("JSC_OPTIMIZE_LOOP_ERROR",
+      DiagnosticType.error("JSC_MOTION_ITERATIONS_ERROR",
           "Exceeded max number of code motion iterations: {0}");
 
-  // We use many recursive algorithms that use O(d) memory in the depth
-  // of the tree.
-  private static final long COMPILER_STACK_SIZE = (1 << 21); // About 2MB
-
-  /**
-   * Under JRE 1.6, the JS Compiler overflows the stack when running on some
-   * large or complex JS code. When threads are available, we run all compile
-   * jobs on a separate thread with a larger stack.
-   *
-   * That way, we don't have to increase the stack size for *every* thread
-   * (which is what -Xss does).
-   */
-  private static final ExecutorService compilerExecutor =
-      Executors.newCachedThreadPool(new ThreadFactory() {
-    @Override public Thread newThread(Runnable r) {
-      return new Thread(null, r, "jscompiler", COMPILER_STACK_SIZE);
-    }
-  });
-
-  /**
-   * Use a dedicated compiler thread per Compiler instance.
-   */
-  private Thread compilerThread = null;
-
-  /** Whether to use threads. */
-  private boolean useThreads = true;
-
+  private final CompilerExecutor compilerExecutor = createCompilerExecutor();
 
   /**
    * Logger for the whole com.google.javascript.jscomp domain -
    * setting configuration for this logger affects all loggers
-   *  in other classes within the compiler.
+   * in other classes within the compiler.
    */
-  private static final Logger logger =
+  public static final Logger logger =
       Logger.getLogger("com.google.javascript.jscomp");
 
   private final PrintStream outStream;
@@ -276,6 +270,17 @@ public class Compiler extends AbstractCompiler {
 
   private Set<String> externProperties = null;
 
+  private static final Joiner pathJoiner = Joiner.on(File.separator);
+
+  // Starts at 0, increases as "interesting" things happen.
+  // Nothing happens at time START_TIME, the first pass starts at time 1.
+  // The correctness of scope-change tracking relies on Node/getIntProp
+  // returning 0 if the custom attribute on a node hasn't been set.
+  private int changeStamp = 1;
+
+  private final Timeline<Node> changeTimeline = new Timeline<>();
+  private final Timeline<Node> deleteTimeline = new Timeline<>();
+
   /**
    * Creates a Compiler that reports errors and warnings to its logger.
    */
@@ -286,9 +291,10 @@ public class Compiler extends AbstractCompiler {
   /**
    * Creates a Compiler that reports errors and warnings to an output stream.
    */
-  public Compiler(PrintStream stream) {
+  public Compiler(PrintStream outStream) {
     addChangeHandler(recentChange);
-    outStream = stream;
+    this.outStream = outStream;
+    this.moduleTypesByName = new HashMap<>();
   }
 
   /**
@@ -305,9 +311,8 @@ public class Compiler extends AbstractCompiler {
    * @param errorManager the error manager, it cannot be {@code null}
    */
   public void setErrorManager(ErrorManager errorManager) {
-    Preconditions.checkNotNull(
-        errorManager, "the error manager cannot be null");
-    this.errorManager = errorManager;
+    checkNotNull(errorManager, "the error manager cannot be null");
+    this.errorManager = new ThreadSafeDelegatingErrorManager(errorManager);
   }
 
   /**
@@ -319,44 +324,92 @@ public class Compiler extends AbstractCompiler {
     return options.errorFormat.toFormatter(this, colorize);
   }
 
-  @VisibleForTesting
-  void setOriginalSourcesLoader(
-      Function<String, SourceFile> originalSourcesLoader) {
-    this.originalSourcesLoader = originalSourcesLoader;
-  }
-
   /**
-   * Initialize the compiler options. Only necessary if you're not doing
-   * a normal compile() job.
+   * Initializes the compiler options. It's called as part of a normal compile() job.
+   * Public for the callers that are not doing a normal compile() job.
    */
   public void initOptions(CompilerOptions options) {
     this.options = options;
-    this.languageMode = options.getLanguageIn();
+    this.setFeatureSet(options.getLanguageIn().toFeatureSet());
     if (errorManager == null) {
-      if (outStream == null) {
+      if (this.outStream == null) {
         setErrorManager(
             new LoggerErrorManager(createMessageFormatter(), logger));
       } else {
         PrintStreamErrorManager printer =
-            new PrintStreamErrorManager(createMessageFormatter(), outStream);
+            new PrintStreamErrorManager(createMessageFormatter(), this.outStream);
         printer.setSummaryDetailLevel(options.summaryDetailLevel);
         setErrorManager(printer);
       }
     }
 
+    moduleLoader = ModuleLoader.EMPTY;
+
     reconcileOptionsWithGuards();
 
-    // Initialize the warnings guard.
-    this.warningsGuard =
-        new ComposeWarningsGuard(
-            new SuppressDocWarningsGuard(getDiagnosticGroups().getRegisteredGroups()),
-            options.getWarningsGuard());
+    // TODO(johnlenz): generally, the compiler should not be changing the options object
+    // provided by the user.  This should be handled a different way.
+
+    // Turn off type-based optimizations when type checking is off
+    if (!options.isTypecheckingEnabled()) {
+      options.setUseTypesForLocalOptimization(false);
+      options.setUseTypesForOptimization(false);
+    }
+
+    if (options.legacyCodeCompile) {
+      options.setDisambiguateProperties(false);
+      options.setAmbiguateProperties(false);
+      options.useNonStrictWarningsGuard();
+    }
+
+    if (options.assumeForwardDeclaredForMissingTypes) {
+      this.forwardDeclaredTypes =
+          new AbstractSet<String>() {
+            @Override
+            public boolean contains(Object o) {
+              return true; // Report all types as forward declared types.
+            }
+
+            @Override
+            public boolean add(String e) {
+              return false;
+            }
+
+            @Override
+            public Iterator<String> iterator() {
+              return Collections.<String>emptySet().iterator();
+            }
+
+            @Override
+            public int size() {
+              return 0;
+            }
+          };
+    }
+
+    initWarningsGuard(options.getWarningsGuard());
   }
 
-  /**
-   * When the CompilerOptions and its WarningsGuard overlap, reconcile
-   * any discrepencies.
-   */
+  public void printConfig(PrintStream printStream) {
+    printStream.println("==== Externs ====");
+    printStream.println(externs);
+    printStream.println("==== Inputs ====");
+    printStream.println(inputs);
+    printStream.println("==== CompilerOptions ====");
+    printStream.println(options);
+    printStream.println("==== WarningsGuard ====");
+    printStream.println(warningsGuard);
+  }
+
+  void initWarningsGuard(WarningsGuard warningsGuard) {
+    this.warningsGuard =
+        new ComposeWarningsGuard(
+            new SuppressDocWarningsGuard(this, getDiagnosticGroups().getRegisteredGroups()),
+            new CheckTypeSummaryWarningsGuard(this),
+            warningsGuard);
+  }
+
+  /** When the CompilerOptions and its WarningsGuard overlap, reconcile any discrepancies. */
   protected void reconcileOptionsWithGuards() {
     // DiagnosticGroups override the plain checkTypes option.
     if (options.enables(DiagnosticGroups.CHECK_TYPES)) {
@@ -372,15 +425,43 @@ public class Compiler extends AbstractCompiler {
               RhinoErrorReporter.TYPE_PARSE_ERROR),
           CheckLevel.OFF);
     }
+    DiagnosticGroupState ntiState =
+        options.getWarningsGuard().enablesExplicitly(DiagnosticGroups.NEW_CHECK_TYPES);
+    if (ntiState == DiagnosticGroupState.ON) {
+      options.setNewTypeInference(true);
+    } else if (ntiState == DiagnosticGroupState.OFF) {
+      options.setNewTypeInference(false);
+    }
+    if (options.getNewTypeInference()) {
+      // Suppress the const checks of CheckAccessControls; NTI performs these checks better.
+      options.setWarningLevel(DiagnosticGroups.ACCESS_CONTROLS_CONST, CheckLevel.OFF);
+    }
+    // When running OTI after NTI, turn off the warnings from OTI.
+    if (options.getNewTypeInference() && options.getRunOTIafterNTI()) {
+      options.checkTypes = true;
+      if (!options.reportOTIErrorsUnderNTI) {
+        options.setWarningLevel(
+            DiagnosticGroups.OLD_CHECK_TYPES,
+            CheckLevel.OFF);
+        options.setWarningLevel(
+            DiagnosticGroups.OLD_REPORT_UNKNOWN_TYPES,
+            CheckLevel.OFF);
+        options.setWarningLevel(
+            FunctionTypeBuilder.ALL_DIAGNOSTICS,
+            CheckLevel.OFF);
+      }
+      options.setWarningLevel(
+          DiagnosticGroup.forType(RhinoErrorReporter.TYPE_PARSE_ERROR),
+          CheckLevel.WARNING);
+    }
 
-    if (options.checkGlobalThisLevel.isOn() &&
-        !options.disables(DiagnosticGroups.GLOBAL_THIS)) {
+    if (options.checkGlobalThisLevel.isOn() && !options.disables(DiagnosticGroups.GLOBAL_THIS)) {
       options.setWarningLevel(
           DiagnosticGroups.GLOBAL_THIS,
           options.checkGlobalThisLevel);
     }
 
-    if (options.getLanguageIn().isStrict()) {
+    if (options.expectStrictModeInput()) {
       options.setWarningLevel(
           DiagnosticGroups.ES5_STRICT,
           CheckLevel.ERROR);
@@ -391,28 +472,34 @@ public class Compiler extends AbstractCompiler {
     // checks the externs file for validity. If you don't want to warn
     // about missing variable declarations, we shut that specific
     // error off.
-    if (!options.checkSymbols &&
-        !options.enables(DiagnosticGroups.CHECK_VARIABLES)) {
-      options.setWarningLevel(
-          DiagnosticGroups.CHECK_VARIABLES, CheckLevel.OFF);
+    if (!options.checkSymbols && !options.enables(DiagnosticGroups.CHECK_VARIABLES)) {
+      options.setWarningLevel(DiagnosticGroups.CHECK_VARIABLES, CheckLevel.OFF);
+    }
+
+    // If we're in transpile-only mode, we don't need to do checks for suspicious var usages.
+    // Since we still have to run VariableReferenceCheck before transpilation to check block-scoped
+    // variables, though, we disable the unnecessary warnings it produces relating to vars here.
+    if (options.skipNonTranspilationPasses && !options.enables(DiagnosticGroups.CHECK_VARIABLES)) {
+      options.setWarningLevel(DiagnosticGroups.CHECK_VARIABLES, CheckLevel.OFF);
     }
   }
 
-  /**
-   * Initializes the instance state needed for a compile job.
-   */
-  public <T1 extends SourceFile, T2 extends SourceFile> void init(
-      List<T1> externs,
-      List<T2> inputs,
-      CompilerOptions options) {
+  /** Initializes the instance state needed for a compile job. */
+  public final <T1 extends SourceFile, T2 extends SourceFile> void init(
+      List<T1> externs, List<T2> sources, CompilerOptions options) {
     JSModule module = new JSModule(SINGLETON_MODULE_NAME);
-    for (SourceFile input : inputs) {
-      module.add(input);
+    for (SourceFile source : sources) {
+      if (this.getPersistentInputStore() != null) {
+        module.add(this.getPersistentInputStore().getCachedCompilerInput(source));
+      } else {
+        module.add(new CompilerInput(source));
+      }
     }
 
     List<JSModule> modules = new ArrayList<>(1);
     modules.add(module);
     initModules(externs, modules, options);
+    addFilesToSourceMap(sources);
   }
 
   /**
@@ -426,26 +513,23 @@ public class Compiler extends AbstractCompiler {
     checkFirstModule(modules);
     fillEmptyModules(modules);
 
-    this.externs = makeCompilerInput(externs, true);
+    this.externs = makeExternInputs(externs);
 
     // Generate the module graph, and report any errors in the module
     // specification as errors.
     this.modules = modules;
-    if (modules.size() > 1) {
-      try {
-        this.moduleGraph = new JSModuleGraph(modules);
-      } catch (JSModuleGraph.ModuleDependenceException e) {
-        // problems with the module format.  Report as an error.  The
-        // message gives all details.
-        report(JSError.make(MODULE_DEPENDENCY_ERROR,
-                e.getModule().getName(), e.getDependentModule().getName()));
-        return;
-      }
-    } else {
-      this.moduleGraph = null;
+    try {
+      this.moduleGraph = new JSModuleGraph(modules);
+    } catch (JSModuleGraph.ModuleDependenceException e) {
+      // problems with the module format.  Report as an error.  The
+      // message gives all details.
+      report(JSError.make(MODULE_DEPENDENCY_ERROR,
+          e.getModule().getName(), e.getDependentModule().getName()));
+      return;
     }
 
     this.inputs = getAllInputsFromModules(modules);
+    this.commentsPerFile = new ConcurrentHashMap<>(inputs.size());
     initBasedOnOptions();
 
     initInputsByIdMap();
@@ -454,21 +538,34 @@ public class Compiler extends AbstractCompiler {
   }
 
   /**
+   * Exists only for some tests that want to reuse JSModules.
+   * @deprecated Fix those tests.
+   */
+  @Deprecated
+  public void breakThisCompilerSoItsModulesCanBeReused() {
+    moduleGraph.breakThisGraphSoItsModulesCanBeReused();
+    moduleGraph = null;
+  }
+
+  /**
    * Do any initialization that is dependent on the compiler options.
    */
-  private void initBasedOnOptions() {
+  public void initBasedOnOptions() {
+    inputSourceMaps.putAll(options.inputSourceMaps);
     // Create the source map if necessary.
     if (options.sourceMapOutputPath != null) {
       sourceMap = options.sourceMapFormat.getInstance();
       sourceMap.setPrefixMappings(options.sourceMapLocationMappings);
+      if (options.applyInputSourceMaps) {
+        sourceMap.setSourceFileMapping(this);
+      }
     }
   }
 
-  private <T extends SourceFile> List<CompilerInput> makeCompilerInput(
-      List<T> files, boolean isExtern) {
-    List<CompilerInput> inputs = new ArrayList<>(files.size());
-    for (T file : files) {
-      inputs.add(new CompilerInput(file, isExtern));
+  private <T extends SourceFile> List<CompilerInput> makeExternInputs(List<T> externSources) {
+    List<CompilerInput> inputs = new ArrayList<>(externSources.size());
+    for (SourceFile file : externSources) {
+      inputs.add(new CompilerInput(file, /* isExtern= */ true));
     }
     return inputs;
   }
@@ -479,7 +576,7 @@ public class Compiler extends AbstractCompiler {
 
   private static final DiagnosticType EMPTY_ROOT_MODULE_ERROR =
       DiagnosticType.error("JSC_EMPTY_ROOT_MODULE_ERROR",
-          "Root module '{0}' must contain at least one source code input");
+          "Root module ''{0}'' must contain at least one source code input");
 
   /**
    * Verifies that at least one module has been provided and that the first one
@@ -501,6 +598,13 @@ public class Compiler extends AbstractCompiler {
    */
   static String createFillFileName(String moduleName) {
     return moduleName + "$fillFile";
+  }
+
+  /**
+   * Creates an OS specific path string from parts
+   */
+  public static String joinPathParts(String... pathParts) {
+    return pathJoiner.join(pathParts);
   }
 
   /**
@@ -533,17 +637,11 @@ public class Compiler extends AbstractCompiler {
   private static List<CompilerInput> getAllInputsFromModules(
       List<JSModule> modules) {
     List<CompilerInput> inputs = new ArrayList<>();
-    Map<String, JSModule> inputMap = new HashMap<>();
     for (JSModule module : modules) {
-      for (CompilerInput input : module.getInputs()) {
-        String inputName = input.getName();
-
-        // NOTE(nicksantos): If an input is in more than one module,
-        // it will show up twice in the inputs list, and then we
-        // will get an error down the line.
-        inputs.add(input);
-        inputMap.put(inputName, module);
-      }
+      // NOTE(nicksantos): If an input is in more than one module,
+      // it will show up twice in the inputs list, and then we
+      // will get an error down the line.
+      inputs.addAll(module.getInputs());
     }
     return inputs;
   }
@@ -555,23 +653,11 @@ public class Compiler extends AbstractCompiler {
           "Duplicate extern input: {0}");
 
   /**
-   * Returns the relative path, resolved relative to the base path, where the
-   * base path is interpreted as a filename rather than a directory. E.g.:
-   *   getRelativeTo("../foo/bar.js", "baz/bam/qux.js") --> "baz/foo/bar.js"
-   */
-  private String getRelativeTo(String relative, String base) {
-    return FileSystems.getDefault().getPath(base)
-        .resolveSibling(relative)
-        .normalize()
-        .toString();
-  }
-
-  /**
    * Creates a map to make looking up an input by name fast. Also checks for
    * duplicate inputs.
    */
   void initInputsByIdMap() {
-    inputsById = new HashMap<>();
+    inputsById.clear();
     for (CompilerInput input : externs) {
       InputId id = input.getInputId();
       CompilerInput previous = putCompilerInput(id, input);
@@ -592,71 +678,162 @@ public class Compiler extends AbstractCompiler {
    * Sets up the skeleton of the AST (the externs and root).
    */
   private void initAST() {
-    jsRoot = IR.block();
-    jsRoot.setIsSyntheticBlock(true);
-
-    externsRoot = IR.block();
-    externsRoot.setIsSyntheticBlock(true);
-
-    externAndJsRoot = IR.block(externsRoot, jsRoot);
-    externAndJsRoot.setIsSyntheticBlock(true);
+    jsRoot = IR.root();
+    externsRoot = IR.root();
+    externAndJsRoot = IR.root(externsRoot, jsRoot);
   }
 
-  public Result compile(
-      SourceFile extern, SourceFile input, CompilerOptions options) {
+  /** Compiles a single source file and a single externs file. */
+  public Result compile(SourceFile extern, SourceFile input, CompilerOptions options) {
     return compile(ImmutableList.of(extern), ImmutableList.of(input), options);
   }
 
   /**
    * Compiles a list of inputs.
+   *
+   * <p>This is a convenience method to wrap up all the work of compilation, including
+   * generating the error and warning report.
+   *
+   * <p>NOTE: All methods called here must be public, because client code must be able to replicate
+   * and customize this.
    */
   public <T1 extends SourceFile, T2 extends SourceFile> Result compile(
       List<T1> externs, List<T2> inputs, CompilerOptions options) {
     // The compile method should only be called once.
-    Preconditions.checkState(jsRoot == null);
+    checkState(jsRoot == null);
 
     try {
       init(externs, inputs, options);
-      if (hasErrors()) {
-        return getResult();
+      if (options.printConfig) {
+        printConfig(System.err);
       }
-      return compile();
+      if (!hasErrors()) {
+        parseForCompilation();
+      }
+      if (!hasErrors()) {
+        if (options.getInstrumentForCoverageOnly()) {
+          // TODO(bradfordcsmith): The option to instrument for coverage only should belong to the
+          //     runner, not the compiler.
+          instrumentForCoverage();
+        } else {
+          stage1Passes();
+          if (!hasErrors()) {
+            stage2Passes();
+          }
+        }
+        performPostCompilationTasks();
+      }
     } finally {
-      Tracer t = newTracer("generateReport");
-      errorManager.generateReport();
-      stopTracer(t, "generateReport");
+      generateReport();
     }
+    return getResult();
+  }
+
+  /**
+   * Generates a report of all warnings and errors found during compilation to stderr.
+   *
+   * <p>Client code must call this method explicitly if it doesn't use one of the convenience
+   * methods that do so automatically.
+   * <p>Always call this method, even if the compiler throws an exception. The report will include
+   * information about the exception.
+   */
+  public void generateReport() {
+    Tracer t = newTracer("generateReport");
+    errorManager.generateReport();
+    stopTracer(t, "generateReport");
   }
 
   /**
    * Compiles a list of modules.
+   *
+   * <p>This is a convenience method to wrap up all the work of compilation, including
+   * generating the error and warning report.
+   *
+   * <p>NOTE: All methods called here must be public, because client code must be able to replicate
+   * and customize this.
    */
-  public <T extends SourceFile> Result compileModules(List<T> externs,
-      List<JSModule> modules, CompilerOptions options) {
+  public <T extends SourceFile> Result compileModules(
+      List<T> externs, List<JSModule> modules, CompilerOptions options) {
     // The compile method should only be called once.
-    Preconditions.checkState(jsRoot == null);
+    checkState(jsRoot == null);
 
     try {
       initModules(externs, modules, options);
-      if (hasErrors()) {
-        return getResult();
+      if (options.printConfig) {
+        printConfig(System.err);
       }
-      return compile();
+      if (!hasErrors()) {
+        parseForCompilation();
+      }
+      if (!hasErrors()) {
+        // TODO(bradfordcsmith): The option to instrument for coverage only should belong to the
+        //     runner, not the compiler.
+        if (options.getInstrumentForCoverageOnly()) {
+          instrumentForCoverage();
+        } else {
+          stage1Passes();
+          if (!hasErrors()) {
+            stage2Passes();
+          }
+        }
+        performPostCompilationTasks();
+      }
     } finally {
-      Tracer t = newTracer("generateReport");
-      errorManager.generateReport();
-      stopTracer(t, "generateReport");
+      generateReport();
     }
+    return getResult();
   }
 
-  private Result compile() {
-    return runInCompilerThread(new Callable<Result>() {
-      @Override
-      public Result call() throws Exception {
-        compileInternal();
-        return getResult();
-      }
-    });
+  /**
+   * Perform compiler passes for stage 1 of compilation.
+   *
+   * <p>Stage 1 consists primarily of error and type checking passes.
+   *
+   * <p>{@code parseForCompilation()} must be called before this method is called.
+   *
+   * <p>The caller is responsible for also calling {@code generateReport()} to generate a report of
+   * warnings and errors to stderr. See the invocation in {@link #compile} for a good example.
+   */
+  public void stage1Passes() {
+    checkState(
+        inputs != null && !inputs.isEmpty(), "No inputs. Did you call init() or initModules()?");
+    checkState(!hasErrors());
+    checkState(!options.getInstrumentForCoverageOnly());
+    runInCompilerThread(
+        new Callable<Void>() {
+          @Override
+          public Void call() throws Exception {
+            performChecksAndTranspilation();
+            return null;
+          }
+        });
+  }
+
+  /**
+   * Perform compiler passes for stage 2 of compilation.
+   *
+   * <p>Stage 2 consists primarily of optimization passes.
+   *
+   * <p>{@code stage1Passes()} must be called before this method is called.
+   *
+   * <p>The caller is responsible for also calling {@code generateReport()} to generate a report of
+   * warnings and errors to stderr. See the invocation in {@link #compile} for a good example.
+   */
+  public void stage2Passes() {
+    checkState(
+        inputs != null && !inputs.isEmpty(), "No inputs. Did you call init() or initModules()?");
+    checkState(!hasErrors());
+    checkState(!options.getInstrumentForCoverageOnly());
+    runInCompilerThread(
+        new Callable<Void>() {
+          @Override
+          public Void call() throws Exception {
+            if (options.shouldOptimize()) {
+              performOptimizations();
+            }
+            return null;
+          }
+        });
   }
 
   /**
@@ -664,7 +841,7 @@ public class Compiler extends AbstractCompiler {
    * don't have threads.
    */
   public void disableThreads() {
-    useThreads = false;
+    compilerExecutor.disableThreads();
   }
 
   /**
@@ -672,115 +849,154 @@ public class Compiler extends AbstractCompiler {
    * @param timeout seconds to wait before timeout
    */
   public void setTimeout(int timeout) {
-    this.timeout = timeout;
+    compilerExecutor.setTimeout(timeout);
   }
 
-  @SuppressWarnings("unchecked")
-  <T> T runInCompilerThread(final Callable<T> callable) {
-    T result = null;
-    final Throwable[] exception = new Throwable[1];
+  /**
+   * The primary purpose of this method is to run the provided code with a larger than standard
+   * stack.
+   */
+  <T> T runInCompilerThread(Callable<T> callable) {
+    return compilerExecutor.runInCompilerThread(
+        callable, options != null && options.getTracerMode().isOn());
+  }
 
-    Preconditions.checkState(
-        compilerThread == null || compilerThread == Thread.currentThread(),
-        "Please do not share the Compiler across threads");
-
-    // If the compiler thread is available, use it.
-    if (useThreads && compilerThread == null) {
-      try {
-        final boolean dumpTraceReport =
-            options != null && options.tracer.isOn();
-        Callable<T> bootCompilerThread = new Callable<T>() {
-          @Override
-          public T call() {
-            try {
-              compilerThread = Thread.currentThread();
-              if (dumpTraceReport) {
-                Tracer.initCurrentThreadTrace();
-              }
-              return callable.call();
-            } catch (Throwable e) {
-              exception[0] = e;
-            } finally {
-              compilerThread = null;
-              if (dumpTraceReport) {
-                Tracer.logCurrentThreadTrace();
-              }
-              Tracer.clearCurrentThreadTrace();
-            }
-            return null;
-          }
-        };
-
-        Future<T> future = compilerExecutor.submit(bootCompilerThread);
-        if (timeout > 0) {
-          result = future.get(timeout, TimeUnit.SECONDS);
-        } else {
-          result = future.get();
-        }
-      } catch (InterruptedException | TimeoutException | ExecutionException e) {
-        throw Throwables.propagate(e);
+  private void performChecksAndTranspilation() {
+    if (options.skipNonTranspilationPasses) {
+      // i.e. whitespace-only mode, which will not work with goog.module without:
+      whitespaceOnlyPasses();
+      if (options.needsTranspilationFrom(FeatureSet.ES6)) {
+        transpileAndDontCheck();
       }
     } else {
-      try {
-        result = callable.call();
-      } catch (Exception e) {
-        exception[0] = e;
-      } finally {
-        Tracer.clearCurrentThreadTrace();
-      }
+      check(); // check() also includes transpilation
     }
-
-    // Pass on any exception caught by the runnable object.
-    if (exception[0] != null) {
-      Throwables.propagate(exception[0]);
-    }
-
-    return result;
   }
 
-  private void compileInternal() {
-    setProgress(0.0, null);
-    CompilerOptionsPreprocessor.preprocess(options);
-    parse();
-    // 15 percent of the work is assumed to be for parsing (based on some
-    // minimal analysis on big JS projects, of course this depends on options)
-    setProgress(0.15, "parse");
-    if (hasErrors()) {
-      return;
-    }
+  /**
+   * Performs all the bookkeeping required at the end of a compilation.
+   *
+   * <p>This method must be called if the compilation makes it as far as doing checks.
+   * <p> DON'T call it if the compiler threw an exception.
+   * <p> DO call it even when {@code hasErrors()} returns true.
+   */
+  public void performPostCompilationTasks() {
+    runInCompilerThread(new Callable<Void>() {
 
-    if (!precheck()) {
-      return;
-    }
-
-    if (!options.skipNonTranspilationPasses || options.lowerFromEs6()) {
-      check();
-      if (hasErrors()) {
-        return;
+      @Override
+      public Void call() throws Exception {
+        performPostCompilationTasksInternal();
+        return null;
       }
 
-      // IDE-mode is defined to stop here, before the heavy rewriting begins.
-      if (!options.checksOnly && !options.ideMode) {
-        optimize();
-      }
-    }
+    });
+  }
 
+  /**
+   * Performs all the bookkeeping required at the end of a compilation.
+   */
+  private void performPostCompilationTasksInternal() {
     if (options.recordFunctionInformation) {
       recordFunctionInformation();
     }
 
     if (options.devMode == DevMode.START_AND_END) {
-      runSanityCheck();
+      runValidityCheck();
     }
     setProgress(1.0, "recordFunctionInformation");
 
     if (tracker != null) {
-      tracker.outputTracerReport(outStream == null ? System.out : outStream);
+      tracker.outputTracerReport();
     }
   }
 
+  /**
+   * Instrument code for coverage.
+   *
+   * <p>{@code parseForCompilation()} must be called before this method is called.
+   *
+   * <p>The caller is responsible for also calling {@code generateReport()} to generate a report of
+   * warnings and errors to stderr. See the invocation in {@link #compile} for a good example.
+   *
+   * <p>This method is mutually exclusive with stage1Passes() and stage2Passes().
+   * Either call those two methods or this one, but not both.
+   */
+  public void instrumentForCoverage() {
+    checkState(
+        inputs != null && !inputs.isEmpty(), "No inputs. Did you call init() or initModules()?");
+    checkState(!hasErrors());
+    runInCompilerThread(
+        new Callable<Void>() {
+          @Override
+          public Void call() throws Exception {
+            checkState(options.getInstrumentForCoverageOnly());
+            checkState(!hasErrors());
+            instrumentForCoverageInternal(options.instrumentBranchCoverage);
+            return null;
+          }
+        });
+  }
+
+  private void instrumentForCoverageInternal(boolean instrumentBranchCoverage) {
+    Tracer tracer = newTracer("instrumentationPass");
+    InstrumentOption instrumentOption = InstrumentOption.LINE_ONLY;
+    if (instrumentBranchCoverage) {
+      instrumentOption = InstrumentOption.BRANCH_ONLY;
+    }
+    process(new CoverageInstrumentationPass(this, CoverageReach.ALL, instrumentOption));
+    stopTracer(tracer, "instrumentationPass");
+  }
+
+  /**
+   * Parses input files in preparation for compilation.
+   *
+   * <p>Either {@code init()} or {@code initModules()} must be called first to set up the input
+   * files to be read.
+   * <p>TODO(bradfordcsmith): Rename this to parse()
+   */
+  public void parseForCompilation() {
+    runInCompilerThread(
+        new Callable<Void>() {
+          @Override
+          public Void call() throws Exception {
+            parseForCompilationInternal();
+            return null;
+          }
+        });
+  }
+
+  /**
+   * Parses input files in preparation for compilation.
+   *
+   * <p>Either {@code init()} or {@code initModules()} must be called first to set up the input
+   * files to be read.
+   *
+   * <p>TODO(bradfordcsmith): Rename this to parse()
+   */
+  private void parseForCompilationInternal() {
+    setProgress(0.0, null);
+    CompilerOptionsPreprocessor.preprocess(options);
+    maybeSetTracker();
+    parseInputs();
+    // Guesstimate.
+    setProgress(0.15, "parse");
+  }
+
+  /**
+   * Parses input files without doing progress tracking that is part of a full compile.
+   *
+   * <p>Either {@code init()} or {@code initModules()} must be called first to set up the input
+   * files to be read.
+   * <p>TODO(bradfordcsmith): Rename this to parseIndependentOfCompilation() or similar.
+   */
   public void parse() {
     parseInputs();
+  }
+
+  public Node parse(SourceFile file) {
+    initCompilerOptionsIfTesting();
+    logger.finest("Parsing: " + file.getName());
+    return new JsAst(file).getAstRoot(this);
   }
 
   PassConfig getPassConfig() {
@@ -809,63 +1025,69 @@ public class Compiler extends AbstractCompiler {
     // new PassConfig object and use that, which is probably not what
     // the client wanted since they probably meant to use their
     // own PassConfig object.
-    Preconditions.checkNotNull(passes);
-    Preconditions.checkState(this.passes == null, "setPassConfig was already called");
+    checkNotNull(passes);
+    checkState(this.passes == null, "setPassConfig was already called");
     this.passes = passes;
   }
 
-  /**
-   * Carry out any special checks or procedures that need to be done before
-   * proceeding with rest of the compilation process.
-   *
-   * @return true, to continue with compilation
-   */
-  boolean precheck() {
-    return true;
-  }
-
-  public void check() {
+  public void whitespaceOnlyPasses() {
     runCustomPasses(CustomPassExecutionTime.BEFORE_CHECKS);
 
-    // We are currently only interested in check-passes for progress reporting
-    // as it is used for IDEs, that's why the maximum progress is set to 1.0.
-    phaseOptimizer = new PhaseOptimizer(this, tracker,
-        new PhaseOptimizer.ProgressRange(getProgress(), 1.0));
+    Tracer t = newTracer("runWhitespaceOnlyPasses");
+    try {
+      for (PassFactory pf : getPassConfig().getWhitespaceOnlyPasses()) {
+        pf.create(this).process(externsRoot, jsRoot);
+      }
+    } finally {
+      stopTracer(t, "runWhitespaceOnlyPasses");
+    }
+  }
+
+  public void transpileAndDontCheck() {
+    Tracer t = newTracer("runTranspileOnlyPasses");
+    try {
+      for (PassFactory pf : getPassConfig().getTranspileOnlyPasses()) {
+        if (hasErrors()) {
+          return;
+        }
+        pf.create(this).process(externsRoot, jsRoot);
+      }
+    } finally {
+      stopTracer(t, "runTranspileOnlyPasses");
+    }
+  }
+
+  private PhaseOptimizer createPhaseOptimizer() {
+    PhaseOptimizer phaseOptimizer = new PhaseOptimizer(this, tracker);
     if (options.devMode == DevMode.EVERY_PASS) {
-      phaseOptimizer.setSanityCheck(sanityCheck);
+      phaseOptimizer.setValidityCheck(validityCheck);
     }
     if (options.getCheckDeterminism()) {
       phaseOptimizer.setPrintAstHashcodes(true);
     }
+    return phaseOptimizer;
+  }
+
+  void check() {
+    runCustomPasses(CustomPassExecutionTime.BEFORE_CHECKS);
+
+    // We are currently only interested in check-passes for progress reporting
+    // as it is used for IDEs, that's why the maximum progress is set to 1.0.
+    phaseOptimizer = createPhaseOptimizer().withProgress(
+        new PhaseOptimizer.ProgressRange(getProgress(), 1.0));
     phaseOptimizer.consume(getPassConfig().getChecks());
     phaseOptimizer.process(externsRoot, jsRoot);
     if (hasErrors()) {
       return;
     }
 
-    if (options.getTweakProcessing().shouldStrip() ||
-        !options.stripTypes.isEmpty() ||
-        !options.stripNameSuffixes.isEmpty() ||
-        !options.stripTypePrefixes.isEmpty() ||
-        !options.stripNamePrefixes.isEmpty()) {
-      stripCode(options.stripTypes, options.stripNameSuffixes,
-          options.stripTypePrefixes, options.stripNamePrefixes);
-    }
-
     runCustomPasses(CustomPassExecutionTime.BEFORE_OPTIMIZATIONS);
     phaseOptimizer = null;
   }
 
-  private void externExports() {
-    logger.fine("Creating extern file for exports");
-    startPass("externExports");
-
-    ExternExportsPass pass = new ExternExportsPass(this);
-    process(pass);
-
-    externExports = pass.getGeneratedExterns();
-
-    endPass();
+  @Override
+  void setExternExports(String externExports) {
+    this.externExports = externExports;
   }
 
   @Override
@@ -873,39 +1095,26 @@ public class Compiler extends AbstractCompiler {
     p.process(externsRoot, jsRoot);
   }
 
-  private final PassFactory sanityCheck =
-      new PassFactory("sanityCheck", false) {
+  private final PassFactory validityCheck = new PassFactory("validityCheck", false) {
     @Override
     protected CompilerPass create(AbstractCompiler compiler) {
-      return new SanityCheck(compiler);
+      return new ValidityCheck(compiler);
+    }
+
+    @Override
+    protected FeatureSet featureSet() {
+      return ES8_MODULES;
     }
   };
 
-  private void maybeSanityCheck() {
+  private void maybeRunValidityCheck() {
     if (options.devMode == DevMode.EVERY_PASS) {
-      runSanityCheck();
+      runValidityCheck();
     }
   }
 
-  private void runSanityCheck() {
-    sanityCheck.create(this).process(externsRoot, jsRoot);
-  }
-
-  /**
-   * Strips code for smaller compiled code. This is useful for removing debug
-   * statements to prevent leaking them publicly.
-   */
-  void stripCode(Set<String> stripTypes, Set<String> stripNameSuffixes,
-      Set<String> stripTypePrefixes, Set<String> stripNamePrefixes) {
-    logger.fine("Strip code");
-    startPass("stripCode");
-    StripCode r = new StripCode(this, stripTypes, stripNameSuffixes,
-        stripTypePrefixes, stripNamePrefixes);
-    if (options.getTweakProcessing().shouldStrip()) {
-      r.enableTweakStripping();
-    }
-    process(r);
-    endPass();
+  private void runValidityCheck() {
+    validityCheck.create(this).process(externsRoot, jsRoot);
   }
 
   /**
@@ -931,22 +1140,105 @@ public class Compiler extends AbstractCompiler {
    * Marks the beginning of a pass.
    */
   void startPass(String passName) {
-    Preconditions.checkState(currentTracer == null);
+    checkState(currentTracer == null);
     currentPassName = passName;
     currentTracer = newTracer(passName);
+    beforePass(passName);
   }
 
   /**
    * Marks the end of a pass.
    */
-  void endPass() {
-    Preconditions.checkState(currentTracer != null,
-        "Tracer should not be null at the end of a pass.");
+  void endPass(String passName) {
+    checkState(currentTracer != null, "Tracer should not be null at the end of a pass.");
     stopTracer(currentTracer, currentPassName);
+    afterPass(passName);
     currentPassName = null;
     currentTracer = null;
 
-    maybeSanityCheck();
+    maybeRunValidityCheck();
+  }
+
+  @Override
+  final void beforePass(String passName) {
+    // does nothing for now
+  }
+
+  @Override
+  final void afterPass(String passName) {
+    if (options.printSourceAfterEachPass) {
+      String currentJsSource = getCurrentJsSource();
+      if (!currentJsSource.equals(this.lastJsSource)) {
+        System.out.println();
+        System.out.println("// " + passName + " yields:");
+        System.out.println("// ************************************");
+        System.out.println(currentJsSource);
+        System.out.println("// ************************************");
+        lastJsSource = currentJsSource;
+      }
+    }
+  }
+
+  final String getCurrentJsSource() {
+    SourceMap sourceMap = getSourceMap();
+    if (sourceMap != null) {
+      sourceMap.reset();
+    }
+
+    List<String> fileNameRegexList = options.filesToPrintAfterEachPassRegexList;
+    List<String> moduleNameRegexList = options.modulesToPrintAfterEachPassRegexList;
+    StringBuilder builder = new StringBuilder();
+
+    if (fileNameRegexList.isEmpty() && moduleNameRegexList.isEmpty()) {
+      return toSource();
+    }
+    if (!fileNameRegexList.isEmpty()) {
+      checkNotNull(jsRoot);
+      for (Node fileNode : jsRoot.children()) {
+        String fileName = fileNode.getSourceFileName();
+        for (String regex : fileNameRegexList) {
+          if (fileName.matches(regex)) {
+            String source = "// " + fileName + "\n" + toSource(fileNode);
+            builder.append(source);
+            break;
+          }
+        }
+      }
+      if (builder.toString().isEmpty()) {
+        throw new RuntimeException("No files matched any of: " + fileNameRegexList);
+      }
+    }
+    if (!moduleNameRegexList.isEmpty()) {
+      for (JSModule jsModule : modules) {
+        for (String regex : moduleNameRegexList) {
+          if (jsModule.getName().matches(regex)) {
+            String source = "// module '" + jsModule.getName() + "'\n" + toSource(jsModule);
+            builder.append(source);
+            break;
+          }
+        }
+      }
+      if (builder.toString().isEmpty()) {
+        throw new RuntimeException("No modules matched any of: " + moduleNameRegexList);
+      }
+    }
+    return builder.toString();
+
+  }
+
+  @Override
+  @Nullable
+  final Node getScriptNode(String filename) {
+    checkNotNull(filename);
+    if (jsRoot == null) {
+      return null;
+    }
+    for (Node file : Iterables.concat(externsRoot.children(), jsRoot.children())) {
+      if (file.getSourceFileName() != null && file.getSourceFileName().endsWith(filename)) {
+        return file;
+      }
+    }
+    return null;
   }
 
   /**
@@ -955,7 +1247,7 @@ public class Compiler extends AbstractCompiler {
   Tracer newTracer(String passName) {
     String comment = passName
         + (recentChange.hasCodeChanged() ? " on recently changed AST" : "");
-    if (options.tracer.isOn()) {
+    if (options.getTracerMode().isOn() && tracker != null) {
       tracker.recordPassStart(passName, true);
     }
     return new Tracer("Compiler", comment);
@@ -963,7 +1255,7 @@ public class Compiler extends AbstractCompiler {
 
   void stopTracer(Tracer t, String passName) {
     long result = t.stop();
-    if (options.tracer.isOn()) {
+    if (options.getTracerMode().isOn() && tracker != null) {
       tracker.recordPassStop(passName, result);
     }
   }
@@ -972,11 +1264,18 @@ public class Compiler extends AbstractCompiler {
    * Returns the result of the compilation.
    */
   public Result getResult() {
-    PassConfig.State state = getPassConfig().getIntermediateState();
-    return new Result(getErrors(), getWarnings(), debugLog.toString(),
-        state.variableMap, state.propertyMap,
-        state.anonymousFunctionNameMap, state.stringMap, functionInformationMap,
-        sourceMap, externExports, state.cssNames, state.idGeneratorMap);
+    Set<SourceFile> transpiledFiles = new HashSet<>();
+    if (jsRoot != null) {
+      for (Node scriptNode : jsRoot.children()) {
+        if (scriptNode.getBooleanProp(Node.TRANSPILED)) {
+          transpiledFiles.add(getSourceFileByName(scriptNode.getSourceFileName()));
+        }
+      }
+    }
+    return new Result(getErrors(), getWarnings(),
+        this.variableMap, this.propertyMap,
+        this.anonymousFunctionNameMap, this.stringMap, this.functionInformationMap,
+        this.sourceMap, this.externExports, this.cssNames, this.idGeneratorMap, transpiledFiles);
   }
 
   /**
@@ -1005,13 +1304,13 @@ public class Compiler extends AbstractCompiler {
   }
 
   @Override
-  CompilerOptions.LanguageMode getLanguageMode() {
-    return languageMode;
+  FeatureSet getFeatureSet() {
+    return featureSet;
   }
 
   @Override
-  void setLanguageMode(CompilerOptions.LanguageMode mode) {
-    languageMode = mode;
+  void setFeatureSet(FeatureSet fs) {
+    featureSet = fs;
   }
 
   /**
@@ -1031,19 +1330,17 @@ public class Compiler extends AbstractCompiler {
 
   @Override
   Supplier<String> getUniqueNameIdSupplier() {
-    final Compiler self = this;
     return new Supplier<String>() {
       @Override
       public String get() {
-        return String.valueOf(self.nextUniqueNameId());
+        return String.valueOf(Compiler.this.nextUniqueNameId());
       }
     };
   }
 
   @Override
   boolean areNodesEqualForInlining(Node n1, Node n2) {
-    if (options.ambiguateProperties ||
-        options.disambiguateProperties) {
+    if (options.shouldAmbiguateProperties() || options.shouldDisambiguateProperties()) {
       // The type based optimizations require that type information is preserved
       // during other optimizations.
       return n1.isEquivalentToTyped(n2);
@@ -1061,6 +1358,11 @@ public class Compiler extends AbstractCompiler {
 
   @Override
   public CompilerInput getInput(InputId id) {
+    // TODO(bradfordcsmith): Allowing null id is less ideal. Add checkNotNull(id) here and fix
+    // call sites that break.
+    if (id == null) {
+      return null;
+    }
     return inputsById.get(id);
   }
 
@@ -1073,32 +1375,39 @@ public class Compiler extends AbstractCompiler {
     if (input == null) {
       return;
     }
-    Preconditions.checkState(input.isExtern(), "Not an extern input: %s", input.getName());
+    checkState(input.isExtern(), "Not an extern input: %s", input.getName());
     inputsById.remove(id);
     externs.remove(input);
     Node root = input.getAstRoot(this);
     if (root != null) {
-      root.detachFromParent();
+      root.detach();
     }
   }
 
-  @Override
-  public CompilerInput newExternInput(String name) {
+  // Where to put a new synthetic externs file.
+  private static enum SyntheticExternsPosition {
+    START,
+    END
+  }
+
+  CompilerInput newExternInput(String name, SyntheticExternsPosition pos) {
     SourceAst ast = new SyntheticAst(name);
     if (inputsById.containsKey(ast.getInputId())) {
       throw new IllegalArgumentException("Conflicting externs name: " + name);
     }
     CompilerInput input = new CompilerInput(ast, true);
     putCompilerInput(input.getInputId(), input);
-    externsRoot.addChildToFront(ast.getAstRoot(this));
-    externs.add(0, input);
+    if (pos == SyntheticExternsPosition.START) {
+      externsRoot.addChildToFront(ast.getAstRoot(this));
+      externs.add(0, input);
+    } else {
+      externsRoot.addChildToBack(ast.getAstRoot(this));
+      externs.add(input);
+    }
     return input;
   }
 
   CompilerInput putCompilerInput(InputId id, CompilerInput input) {
-    if (inputsById == null) {
-      inputsById = new HashMap<>();
-    }
     input.setCompiler(this);
     return inputsById.put(id, input);
   }
@@ -1114,7 +1423,7 @@ public class Compiler extends AbstractCompiler {
    */
   boolean replaceIncrementalSourceAst(JsAst ast) {
     CompilerInput oldInput = getInput(ast.getInputId());
-    Preconditions.checkNotNull(oldInput, "No input to replace: %s", ast.getInputId().getIdName());
+    checkNotNull(oldInput, "No input to replace: %s", ast.getInputId().getIdName());
     Node newRoot = ast.getAstRoot(this);
     if (newRoot == null) {
       return false;
@@ -1122,7 +1431,7 @@ public class Compiler extends AbstractCompiler {
 
     Node oldRoot = oldInput.getAstRoot(this);
     if (oldRoot != null) {
-      oldRoot.getParent().replaceChild(oldRoot, newRoot);
+      oldRoot.replaceWith(newRoot);
     } else {
       getRoot().getLastChild().addChildToBack(newRoot);
     }
@@ -1137,10 +1446,9 @@ public class Compiler extends AbstractCompiler {
     }
 
     // Verify the input id is set properly.
-    Preconditions.checkState(
-        newInput.getInputId().equals(oldInput.getInputId()));
+    checkState(newInput.getInputId().equals(oldInput.getInputId()));
     InputId inputIdOnAst = newInput.getAstRoot(this).getInputId();
-    Preconditions.checkState(newInput.getInputId().equals(inputIdOnAst));
+    checkState(newInput.getInputId().equals(inputIdOnAst));
 
     inputs.remove(oldInput);
     return true;
@@ -1182,9 +1490,27 @@ public class Compiler extends AbstractCompiler {
     return true;
   }
 
+  /**
+   * The graph of the JS source modules.
+   *
+   * <p>Must return null if there are less than 2 modules,
+   * because we use this as a signal for which passes to run.
+   * TODO(bradfordcsmith): Just check for a single module instead of null.
+   */
   @Override
   JSModuleGraph getModuleGraph() {
-    return moduleGraph;
+    if (moduleGraph != null && modules.size() > 1) {
+      return moduleGraph;
+    } else {
+      return null;
+    }
+  }
+
+  /**
+   * Gets the list of modules.
+   */
+  public List<JSModule> getModules() {
+    return modules;
   }
 
   /**
@@ -1192,45 +1518,101 @@ public class Compiler extends AbstractCompiler {
    * in the degenerate case when there's only one module.
    */
   JSModuleGraph getDegenerateModuleGraph() {
-    return moduleGraph == null ? new JSModuleGraph(modules) : moduleGraph;
+    return moduleGraph;
   }
 
   @Override
   public TypeIRegistry getTypeIRegistry() {
-    return getTypeRegistry();
+    switch (mostRecentTypechecker) {
+      case NONE:
+        // Even in compiles where typechecking is not enabled, some passes ask for the
+        // type registry, eg, GatherExternProperties does. Also, in CheckAccessControls,
+        // the constructor asks for a type registry, and this may happen before type checking
+        // runs. So, in the NONE case, if NTI is enabled, return a new registry, since NTI is
+        // the relevant type checker. If NTI is not enabled, return an old registry.
+        return options.getNewTypeInference() ? getGlobalTypeInfo() : getTypeRegistry();
+      case OTI:
+        return getTypeRegistry();
+      case NTI:
+        return getGlobalTypeInfo();
+      default:
+        throw new RuntimeException("Unhandled typechecker " + mostRecentTypechecker);
+    }
+  }
+
+  @Override
+  public void clearTypeIRegistry() {
+    switch (mostRecentTypechecker) {
+      case OTI:
+        typeRegistry = null;
+        return;
+      case NTI:
+        globalTypeInfo = null;
+        return;
+      case NONE:
+        return;
+      default:
+        throw new RuntimeException("Unhandled typechecker " + mostRecentTypechecker);
+    }
   }
 
   @Override
   public JSTypeRegistry getTypeRegistry() {
     if (typeRegistry == null) {
-      typeRegistry = new JSTypeRegistry(oldErrorReporter);
+      typeRegistry = new JSTypeRegistry(oldErrorReporter, forwardDeclaredTypes);
     }
     return typeRegistry;
   }
 
   @Override
+  void forwardDeclareType(String typeName) {
+    forwardDeclaredTypes.add(typeName);
+  }
+
+  @Override
+  void setMostRecentTypechecker(MostRecentTypechecker lastRun) {
+    this.mostRecentTypechecker = lastRun;
+  }
+
+  @Override
+  MostRecentTypechecker getMostRecentTypechecker() {
+    return this.mostRecentTypechecker;
+  }
+
+  @Override
   // Only used by jsdev
-  public MemoizedScopeCreator getTypedScopeCreator() {
+  public MemoizedTypedScopeCreator getTypedScopeCreator() {
     return getPassConfig().getTypedScopeCreator();
+  }
+
+  @Override
+  IncrementalScopeCreator getScopeCreator() {
+    return this.scopeCreator;
+  }
+
+  @Override
+  void putScopeCreator(IncrementalScopeCreator creator) {
+    this.scopeCreator = creator;
   }
 
   @SuppressWarnings("unchecked")
   DefaultPassConfig ensureDefaultPassConfig() {
     PassConfig passes = getPassConfig().getBasePassConfig();
-    Preconditions.checkState(passes instanceof DefaultPassConfig,
+    checkState(
+        passes instanceof DefaultPassConfig,
         "PassConfigs must eventually delegate to the DefaultPassConfig");
     return (DefaultPassConfig) passes;
   }
 
   public SymbolTable buildKnownSymbolTable() {
-    SymbolTable symbolTable = new SymbolTable(getTypeRegistry());
+    SymbolTable symbolTable = new SymbolTable(this, getTypeRegistry());
 
-    MemoizedScopeCreator typedScopeCreator = getTypedScopeCreator();
+    MemoizedTypedScopeCreator typedScopeCreator = getTypedScopeCreator();
     if (typedScopeCreator != null) {
       symbolTable.addScopes(typedScopeCreator.getAllMemoizedScopes());
       symbolTable.addSymbolsFrom(typedScopeCreator);
     } else {
-      symbolTable.findScopes(this, externsRoot, jsRoot);
+      symbolTable.findScopes(externsRoot, jsRoot);
     }
 
     GlobalNamespace globalNamespace =
@@ -1241,8 +1623,10 @@ public class Compiler extends AbstractCompiler {
 
     ReferenceCollectingCallback refCollector =
         new ReferenceCollectingCallback(
-            this, ReferenceCollectingCallback.DO_NOTHING_BEHAVIOR);
-    NodeTraversal.traverse(this, getRoot(), refCollector);
+            this,
+            ReferenceCollectingCallback.DO_NOTHING_BEHAVIOR,
+            SyntacticScopeCreator.makeUntyped(this));
+    refCollector.process(getRoot());
     symbolTable.addSymbolsFrom(refCollector);
 
     PreprocessorSymbolTable preprocessorSymbolTable =
@@ -1253,10 +1637,11 @@ public class Compiler extends AbstractCompiler {
 
     symbolTable.fillNamespaceReferences();
     symbolTable.fillPropertyScopes();
-    symbolTable.fillThisReferences(this, externsRoot, jsRoot);
-    symbolTable.fillPropertySymbols(this, externsRoot, jsRoot);
-    symbolTable.fillJSDocInfo(this, externsRoot, jsRoot);
-    symbolTable.fillSymbolVisibility(this, externsRoot, jsRoot);
+    symbolTable.fillThisReferences(externsRoot, jsRoot);
+    symbolTable.fillPropertySymbols(externsRoot, jsRoot);
+    symbolTable.fillJSDocInfo(externsRoot, jsRoot);
+    symbolTable.fillSymbolVisibility(externsRoot, jsRoot);
+    symbolTable.removeGeneratedSymbols();
 
     return symbolTable;
   }
@@ -1291,24 +1676,43 @@ public class Compiler extends AbstractCompiler {
 
   @Override
   Iterable<TypeMismatch> getTypeMismatches() {
-    return getTypeValidator().getMismatches();
+    switch (this.mostRecentTypechecker) {
+      case OTI:
+        return getTypeValidator().getMismatches();
+      case NTI:
+        return getGlobalTypeInfo().getMismatches();
+      default:
+        throw new RuntimeException("Can't ask for type mismatches before type checking.");
+    }
   }
 
   @Override
   Iterable<TypeMismatch> getImplicitInterfaceUses() {
-    return getTypeValidator().getImplicitStructuralInterfaceUses();
+    switch (this.mostRecentTypechecker) {
+      case OTI:
+        return getTypeValidator().getImplicitInterfaceUses();
+      case NTI:
+        return getGlobalTypeInfo().getImplicitInterfaceUses();
+      default:
+        throw new RuntimeException("Can't ask for type mismatches before type checking.");
+    }
   }
 
   @Override
-  GlobalTypeInfo getSymbolTable() {
-    GlobalTypeInfo gti = symbolTable;
-    symbolTable = null; // GC this after type inference
-    return gti;
+  GlobalTypeInfo getGlobalTypeInfo() {
+    if (this.globalTypeInfo == null) {
+      this.globalTypeInfo = new GlobalTypeInfo(this, forwardDeclaredTypes);
+    }
+    return this.globalTypeInfo;
   }
 
-  @Override
-  void setSymbolTable(GlobalTypeInfo symbolTable) {
-    this.symbolTable = symbolTable;
+  public void maybeSetTracker() {
+    if (options.getTracerMode().isOn()) {
+      PrintStream tracerOutput =
+          options.getTracerOutput() == null ? this.outStream : options.getTracerOutput();
+      tracker = new PerformanceTracker(externsRoot, jsRoot, options.getTracerMode(), tracerOutput);
+      addChangeHandler(tracker.getCodeChangeHandler());
+    }
   }
 
   //------------------------------------------------------------------------
@@ -1329,16 +1733,14 @@ public class Compiler extends AbstractCompiler {
     externsRoot.detachChildren();
     jsRoot.detachChildren();
 
-    if (options.tracer.isOn()) {
-      tracker = new PerformanceTracker(jsRoot, options.tracer);
-      addChangeHandler(tracker.getCodeChangeHandler());
-    }
-
-    Tracer tracer = newTracer(PARSING_PASS_NAME);
-    beforePass(PARSING_PASS_NAME);
+    Tracer tracer = newTracer(PassNames.PARSE_INPUTS);
+    beforePass(PassNames.PARSE_INPUTS);
 
     try {
       // Parse externs sources.
+      if (options.numParallelThreads > 1) {
+        new PrebuildAst(this, options.numParallelThreads).prebuild(externs);
+      }
       for (CompilerInput input : externs) {
         Node n = input.getAstRoot(this);
         if (hasErrors()) {
@@ -1347,57 +1749,93 @@ public class Compiler extends AbstractCompiler {
         externsRoot.addChildToBack(n);
       }
 
-      if (options.lowerFromEs6()) {
-        processEs6Modules();
+      if (options.transformAMDToCJSModules) {
+        processAMDModules();
       }
 
-      // Modules inferred in ProcessCommonJS pass.
-      if (options.transformAMDToCJSModules || options.processCommonJSModules) {
-        processAMDAndCommonJSModules();
+      if (options.getLanguageIn().toFeatureSet().has(FeatureSet.Feature.MODULES)
+          || options.processCommonJSModules) {
+
+        this.moduleLoader =
+            new ModuleLoader(
+                null,
+                options.moduleRoots,
+                inputs,
+                ModuleLoader.PathResolver.RELATIVE,
+                options.moduleResolutionMode,
+                inputPathByWebpackId);
+
+        if (options.moduleResolutionMode == ModuleLoader.ResolutionMode.NODE) {
+          // processJsonInputs requires a module loader to already be defined
+          // so we redefine it afterwards with the package.json inputs
+          this.moduleLoader =
+              new ModuleLoader(
+                  null,
+                  options.moduleRoots,
+                  inputs,
+                  ModuleLoader.PathResolver.RELATIVE,
+                  options.moduleResolutionMode,
+                  processJsonInputs(inputs));
+        }
+      } else {
+        // Use an empty module loader if we're not actually dealing with modules.
+        this.moduleLoader = ModuleLoader.EMPTY;
       }
 
-      hoistExterns();
+      if (options.getDependencyOptions().needsManagement()) {
+        findDependenciesFromEntryPoints(
+            options.getLanguageIn().toFeatureSet().has(Feature.MODULES),
+            options.processCommonJSModules);
+      } else if (options.needsTranspilationFrom(FeatureSet.ES6_MODULES)
+          || options.processCommonJSModules) {
+        if (options.getLanguageIn().toFeatureSet().has(Feature.MODULES)) {
+          parsePotentialModules(inputs);
+        }
 
-      // Check if the sources need to be re-ordered.
-      boolean staleInputs = false;
-      if (options.dependencyOptions.needsManagement()) {
+        // Build a map of module identifiers for any input which provides no namespace.
+        // These files could be imported modules which have no exports, but do have side effects.
+        Map<String, CompilerInput> inputModuleIdentifiers = new HashMap<>();
         for (CompilerInput input : inputs) {
-          // Forward-declare all the provided types, so that they
-          // are not flagged even if they are dropped from the process.
-          for (String provide : input.getProvides()) {
-            getTypeRegistry().forwardDeclareType(provide);
+          if (input.getKnownProvides().isEmpty()) {
+            ModuleLoader.ModulePath modPath =
+                moduleLoader.resolve(input.getSourceFile().getOriginalPath());
+            inputModuleIdentifiers.put(modPath.toModuleName(), input);
           }
         }
 
-        try {
-          inputs =
-              (moduleGraph == null ? new JSModuleGraph(modules) : moduleGraph)
-              .manageDependencies(options.dependencyOptions, inputs);
-          staleInputs = true;
-        } catch (CircularDependencyException e) {
-          report(JSError.make(
-              JSModule.CIRCULAR_DEPENDENCY_ERROR, e.getMessage()));
-        } catch (MissingProvideException e) {
-          report(JSError.make(
-              MISSING_ENTRY_ERROR, e.getMessage()));
-        } catch (JSModuleGraph.MissingModuleException e) {
-          report(JSError.make(
-              MISSING_MODULE_ERROR, e.getMessage()));
+        // Find out if any input attempted to import a module that had no exports.
+        // In this case we must force module rewriting to occur on the imported file
+        Map<String, CompilerInput> inputsToRewrite = new HashMap<>();
+        for (CompilerInput input : inputs) {
+          for (String require : input.getKnownRequires()) {
+            if (inputModuleIdentifiers.containsKey(require)
+                && !inputsToRewrite.containsKey(require)) {
+              inputsToRewrite.put(require, inputModuleIdentifiers.get(require));
+            }
+          }
         }
 
-        // If in IDE mode, we ignore the error and keep going.
-        if (hasErrors()) {
-          return null;
+        for (CompilerInput input : inputsToRewrite.values()) {
+          input.setJsModuleType(CompilerInput.ModuleType.IMPORTED_SCRIPT);
         }
       }
 
-      hoistNoCompileFiles();
+      if (this.moduleLoader != null) {
+        this.moduleLoader.setErrorHandler(this);
+      }
 
-      if (staleInputs) {
-        repartitionInputs();
+      orderInputs();
+
+      // If in IDE mode, we ignore the error and keep going.
+      if (hasErrors()) {
+        return null;
       }
 
       // Build the AST.
+      if (options.numParallelThreads > 1) {
+        new PrebuildAst(this, options.numParallelThreads).prebuild(inputs);
+      }
+
       for (CompilerInput input : inputs) {
         Node n = input.getAstRoot(this);
         if (n == null) {
@@ -1405,7 +1843,7 @@ public class Compiler extends AbstractCompiler {
         }
 
         if (devMode) {
-          runSanityCheck();
+          runValidityCheck();
           if (hasErrors()) {
             return null;
           }
@@ -1413,21 +1851,25 @@ public class Compiler extends AbstractCompiler {
 
         // TODO(johnlenz): we shouldn't need to check both isExternExportsEnabled and
         // externExportsPath.
-        if (options.sourceMapOutputPath != null ||
-            options.nameReferenceReportPath != null ||
-            options.isExternExportsEnabled() ||
-            options.externExportsPath != null ||
-            !options.replaceStringsFunctionDescriptions.isEmpty()) {
+        if (options.sourceMapOutputPath != null
+            || options.isExternExportsEnabled()
+            || options.externExportsPath != null
+            || !options.replaceStringsFunctionDescriptions.isEmpty()) {
 
           // Annotate the nodes in the tree with information from the
           // input file. This information is used to construct the SourceMap.
           SourceInformationAnnotator sia =
               new SourceInformationAnnotator(
                   input.getName(), options.devMode != DevMode.OFF);
-          NodeTraversal.traverse(this, n, sia);
+          NodeTraversal.traverseEs6(this, n, sia);
         }
 
-        jsRoot.addChildToBack(n);
+        if (NodeUtil.isFromTypeSummary(n)) {
+          input.setIsExtern(true);
+          externsRoot.addChildToBack(n);
+        } else {
+          jsRoot.addChildToBack(n);
+        }
       }
 
       if (hasErrors()) {
@@ -1435,9 +1877,170 @@ public class Compiler extends AbstractCompiler {
       }
       return externAndJsRoot;
     } finally {
-      afterPass(PARSING_PASS_NAME);
-      stopTracer(tracer, PARSING_PASS_NAME);
+      afterPass(PassNames.PARSE_INPUTS);
+      stopTracer(tracer, PassNames.PARSE_INPUTS);
     }
+  }
+
+  void orderInputsWithLargeStack() {
+    runInCompilerThread(new Callable<Void>() {
+      @Override
+      public Void call() throws Exception {
+        Tracer tracer = newTracer("orderInputsWithLargeStack");
+        try {
+          orderInputs();
+        } finally {
+          stopTracer(tracer, "orderInputsWithLargeStack");
+        }
+        return null;
+      }
+    });
+  }
+
+  void orderInputs() {
+    hoistExterns();
+    // Check if the sources need to be re-ordered.
+    boolean staleInputs = false;
+    if (options.dependencyOptions.needsManagement()) {
+      for (CompilerInput input : inputs) {
+        // Forward-declare all the provided types, so that they
+        // are not flagged even if they are dropped from the process.
+        for (String provide : input.getProvides()) {
+          forwardDeclareType(provide);
+        }
+      }
+
+      try {
+        inputs = getDegenerateModuleGraph().manageDependencies(options.dependencyOptions, inputs);
+        staleInputs = true;
+      } catch (MissingProvideException e) {
+        report(JSError.make(
+            MISSING_ENTRY_ERROR, e.getMessage()));
+      } catch (JSModuleGraph.MissingModuleException e) {
+        report(JSError.make(
+            MISSING_MODULE_ERROR, e.getMessage()));
+      }
+    }
+
+    hoistNoCompileFiles();
+
+    if (staleInputs) {
+      repartitionInputs();
+    }
+  }
+
+  /**
+   * Find dependencies by recursively traversing each dependency of an input starting with the entry
+   * points. Causes a full parse of each file, but since the file is reachable by walking the graph,
+   * this would be required in later compilation passes regardless.
+   *
+   * <p>Inputs which are not reachable during graph traversal will be dropped.
+   *
+   * <p>If the dependency mode is set to LOOSE, inputs for which the deps package did not find a
+   * provide statement or detect as a module will be treated as entry points.
+   */
+  void findDependenciesFromEntryPoints(boolean supportEs6Modules, boolean supportCommonJSModules) {
+    hoistExterns();
+    List<CompilerInput> entryPoints = new ArrayList<>();
+    Map<String, CompilerInput> inputsByProvide = new HashMap<>();
+    Map<String, CompilerInput> inputsByIdentifier = new HashMap<>();
+    for (CompilerInput input : inputs) {
+      if (!options.getDependencyOptions().shouldDropMoochers() && input.getProvides().isEmpty()) {
+        entryPoints.add(input);
+      }
+      inputsByIdentifier.put(
+          ModuleIdentifier.forFile(input.getPath().toString()).toString(), input);
+      for (String provide : input.getProvides()) {
+        if (!provide.startsWith("module$")) {
+          inputsByProvide.put(provide, input);
+        }
+      }
+    }
+    for (ModuleIdentifier moduleIdentifier : options.getDependencyOptions().getEntryPoints()) {
+      CompilerInput input = inputsByProvide.get(moduleIdentifier.toString());
+      if (input == null) {
+        input = inputsByIdentifier.get(moduleIdentifier.toString());
+      }
+      if (input != null) {
+        entryPoints.add(input);
+      }
+    }
+
+    Set<CompilerInput> workingInputSet = new HashSet<>(inputs);
+    List<CompilerInput> orderedInputs = new ArrayList<>();
+    for (CompilerInput entryPoint : entryPoints) {
+      orderedInputs.addAll(
+          depthFirstDependenciesFromInput(
+              entryPoint,
+              /* wasImportedByModule = */ false,
+              workingInputSet,
+              inputsByIdentifier,
+              inputsByProvide,
+              supportEs6Modules,
+              supportCommonJSModules));
+    }
+  }
+
+  /** For a given input, order it's dependencies in a depth first traversal */
+  private List<CompilerInput> depthFirstDependenciesFromInput(
+      CompilerInput input,
+      boolean wasImportedByModule,
+      Set<CompilerInput> inputs,
+      Map<String, CompilerInput> inputsByIdentifier,
+      Map<String, CompilerInput> inputsByProvide,
+      boolean supportEs6Modules,
+      boolean supportCommonJSModules) {
+    List<CompilerInput> orderedInputs = new ArrayList<>();
+    if (!inputs.remove(input)) {
+      // It's possible for a module to be included as both a script
+      // and a module in the same compilation. In these cases, it should
+      // be forced to be a module.
+      if (wasImportedByModule && input.getJsModuleType() == CompilerInput.ModuleType.NONE) {
+        input.setJsModuleType(CompilerInput.ModuleType.IMPORTED_SCRIPT);
+      }
+
+      return orderedInputs;
+    }
+
+    FindModuleDependencies findDeps =
+        new FindModuleDependencies(
+            this, supportEs6Modules, supportCommonJSModules, inputPathByWebpackId);
+    findDeps.process(input.getAstRoot(this));
+
+    // If this input was imported by another module, it is itself a module
+    // so we force it to be detected as such.
+    if (wasImportedByModule && input.getJsModuleType() == CompilerInput.ModuleType.NONE) {
+      input.setJsModuleType(CompilerInput.ModuleType.IMPORTED_SCRIPT);
+    }
+    this.moduleTypesByName.put(input.getPath().toModuleName(), input.getJsModuleType());
+
+    ArrayList<String> allDeps = new ArrayList<>();
+    allDeps.addAll(input.getRequires());
+    allDeps.addAll(input.getDynamicRequires());
+    for (String requiredNamespace : allDeps) {
+      CompilerInput requiredInput = null;
+      boolean requiredByModuleImport = false;
+      if (inputsByProvide.containsKey(requiredNamespace)) {
+        requiredInput = inputsByProvide.get(requiredNamespace);
+      } else if (inputsByIdentifier.containsKey(requiredNamespace)) {
+        requiredByModuleImport = true;
+        requiredInput = inputsByIdentifier.get(requiredNamespace);
+      }
+
+      if (requiredInput != null) {
+        orderedInputs.addAll(
+            depthFirstDependenciesFromInput(
+                requiredInput,
+                requiredByModuleImport,
+                inputs,
+                inputsByIdentifier,
+                inputsByProvide,
+                supportEs6Modules,
+                supportCommonJSModules));
+      }
+    }
+    orderedInputs.add(input);
+    return orderedInputs;
   }
 
   /**
@@ -1446,6 +2049,7 @@ public class Compiler extends AbstractCompiler {
   void hoistExterns() {
     boolean staleInputs = false;
     for (CompilerInput input : inputs) {
+      // TODO(b/65450037): Remove this if. All @externs annotated files should be hoisted.
       if (options.dependencyOptions.needsManagement()) {
         // If we're doing scanning dependency info anyway, use that
         // information to skip sources that obviously aren't externs.
@@ -1454,37 +2058,46 @@ public class Compiler extends AbstractCompiler {
         }
       }
 
-      Node n = input.getAstRoot(this);
-
-      // Inputs can have a null AST on a parse error.
-      if (n == null) {
-        continue;
-      }
-
-      JSDocInfo info = n.getJSDocInfo();
-      if (info != null && info.isExterns()) {
-        // If the input file is explicitly marked as an externs file, then
-        // assume the programmer made a mistake and throw it into
-        // the externs pile anyways.
-        externsRoot.addChildToBack(n);
-        input.setIsExtern(true);
-
-        input.getModule().remove(input);
-
-        externs.add(input);
+      if (hoistIfExtern(input)) {
         staleInputs = true;
       }
     }
-
     if (staleInputs) {
       repartitionInputs();
     }
   }
 
   /**
+   * Hoists a compiler input to externs if it contains the @externs annotation.
+   * Return whether or not the given input was hoisted.
+   */
+  private boolean hoistIfExtern(CompilerInput input) {
+    Node n = input.getAstRoot(this);
+
+    // Inputs can have a null AST on a parse error.
+    if (n == null) {
+      return false;
+    }
+
+    JSDocInfo info = n.getJSDocInfo();
+    if (info != null && info.isExterns()) {
+      // If the input file is explicitly marked as an externs file, then move it out of the main
+      // JS root and put it with the other externs.
+      externsRoot.addChildToBack(n);
+      input.setIsExtern(true);
+
+      input.getModule().remove(input);
+
+      externs.add(input);
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Hoists inputs with the @nocompile annotation out of the inputs.
    */
-  private void hoistNoCompileFiles() {
+  void hoistNoCompileFiles() {
     boolean staleInputs = false;
     for (CompilerInput input : inputs) {
       Node n = input.getAstRoot(this);
@@ -1511,126 +2124,68 @@ public class Compiler extends AbstractCompiler {
     rebuildInputsFromModules();
   }
 
-  void processEs6Modules() {
-    ES6ModuleLoader loader = new ES6ModuleLoader(options.moduleRoots, inputs);
-    for (CompilerInput input : inputs) {
-      input.setCompiler(this);
-      Node root = input.getAstRoot(this);
-      if (root == null) {
-        continue;
-      }
-      new ProcessEs6Modules(this, loader, true).processFile(root);
-    }
-  }
-
   /**
-   * Transforms AMD and CJS modules to something closure compiler can
-   * process and creates JSModules and the corresponding dependency tree
-   * on the way.
+   * Transforms JSON files to a module export that closure compiler can process and keeps track of
+   * any "main" entries in package.json files.
    */
-  void processAMDAndCommonJSModules() {
-    Map<String, JSModule> modulesByProvide = new LinkedHashMap<>();
-    Map<CompilerInput, JSModule> modulesByInput = new LinkedHashMap<>();
-    // TODO(nicksantos): Refactor module dependency resolution to work nicely
-    // with multiple ways to express dependencies. Directly support JSModules
-    // that are equivalent to a single file and which express their deps
-    // directly in the source.
-    ES6ModuleLoader loader = new ES6ModuleLoader(options.moduleRoots, inputs);
+  Map<String, String> processJsonInputs(List<CompilerInput> inputsToProcess) {
+    RewriteJsonToModule rewriteJson = new RewriteJsonToModule(this);
+    for (CompilerInput input : inputsToProcess) {
+      if (!input.getSourceFile().getOriginalPath().endsWith(".json")) {
+        continue;
+      }
+
+      input.setCompiler(this);
+      try {
+        // JSON objects need wrapped in parens to parse properly
+        input.getSourceFile().setCode("(" + input.getSourceFile().getCode() + ")");
+      } catch (IOException e) {
+        continue;
+      }
+
+      Node root = input.getAstRoot(this);
+      if (root == null) {
+        continue;
+      }
+      input.setJsModuleType(CompilerInput.ModuleType.JSON);
+      rewriteJson.process(null, root);
+    }
+    return rewriteJson.getPackageJsonMainEntries();
+  }
+
+
+  private List<CompilerInput> parsePotentialModules(List<CompilerInput> inputsToProcess) {
+    List<CompilerInput> filteredInputs = new ArrayList<>();
+    for (CompilerInput input : inputsToProcess) {
+      // Only process files that are detected as ES6 modules
+      if (!options.dependencyOptions.shouldPruneDependencies()
+          || !JsFileParser.isSupported()
+          || "es6".equals(input.getLoadFlags().get("module"))) {
+        filteredInputs.add(input);
+      }
+    }
+    if (options.numParallelThreads > 1) {
+      new PrebuildAst(this, options.numParallelThreads).prebuild(filteredInputs);
+    }
+    for (CompilerInput input : filteredInputs) {
+      input.setCompiler(this);
+      // Call getRequires to force regex-based dependency parsing to happen.
+      input.getRequires();
+      input.setJsModuleType(CompilerInput.ModuleType.ES6);
+    }
+    return filteredInputs;
+  }
+
+  /** Transforms AMD to CJS modules */
+  void processAMDModules() {
     for (CompilerInput input : inputs) {
       input.setCompiler(this);
       Node root = input.getAstRoot(this);
       if (root == null) {
         continue;
       }
-      if (options.transformAMDToCJSModules) {
-        new TransformAMDToCJSModule(this).process(null, root);
-      }
-      if (options.processCommonJSModules) {
-        ProcessCommonJSModules cjs = new ProcessCommonJSModules(this, loader, true);
-        cjs.process(null, root);
-
-        JSModule m = new JSModule(cjs.inputToModuleName(input));
-        m.addAndOverrideModule(input);
-        for (String provide : input.getProvides()) {
-          modulesByProvide.put(provide, m);
-        }
-        modulesByInput.put(input, m);
-      }
+      new TransformAMDToCJSModule(this).process(null, root);
     }
-
-    if (options.processCommonJSModules) {
-      List<JSModule> modules = new ArrayList<>(modulesByProvide.values());
-      if (!modules.isEmpty()) {
-        this.modules = modules;
-        this.moduleGraph = new JSModuleGraph(this.modules);
-      }
-      for (JSModule module : modules) {
-        for (CompilerInput input : module.getInputs()) {
-          for (String require : input.getRequires()) {
-            JSModule dependency = modulesByProvide.get(require);
-            if (dependency == null) {
-              report(JSError.make(MISSING_ENTRY_ERROR, require));
-            } else {
-              module.addDependency(dependency);
-            }
-          }
-        }
-      }
-      try {
-        addCommonJSModulesToGraph(modules, modulesByInput);
-      } catch (Exception e) {
-        Throwables.propagate(e);
-      }
-    }
-  }
-
-  void addCommonJSModulesToGraph(
-      List<JSModule> inputModules,
-      Map<CompilerInput, JSModule> modulesByInput)
-      throws CircularDependencyException, MissingProvideException, MissingModuleException {
-    List<CompilerInput> inputs = new ArrayList<>();
-    for (JSModule module : inputModules) {
-      inputs.addAll(module.getInputs());
-    }
-
-    modules = new ArrayList<>();
-
-    DependencyOptions depOptions = options.dependencyOptions;
-    for (CompilerInput input :
-         this.moduleGraph.manageDependencies(depOptions, inputs)) {
-      modules.add(modulesByInput.get(input));
-    }
-
-    SortedDependencies<JSModule> sorter =
-        new SortedDependencies<>(modules);
-    modules = sorter.getDependenciesOf(modules, true);
-
-    // The compiler expects a module tree, so add a dependency of all modules on
-    // the first one.
-    JSModule firstModule = Iterables.getFirst(modules, null);
-    for (int i = 1; i < modules.size(); i++) {
-      if (!modules.get(i).getDependencies().contains(firstModule)) {
-        modules.get(i).addDependency(firstModule);
-      }
-    }
-
-    this.moduleGraph = new JSModuleGraph(modules);
-  }
-
-  public Node parse(SourceFile file) {
-    initCompilerOptionsIfTesting();
-    addToDebugLog("Parsing: " + file.getName());
-    return new JsAst(file).getAstRoot(this);
-  }
-
-  private int syntheticCodeId = 0;
-
-  @Override
-  Node parseSyntheticCode(String js) {
-    CompilerInput input = new CompilerInput(
-        SourceFile.fromCode(" [synthetic:" + (++syntheticCodeId) + "] ", js));
-    putCompilerInput(input.getInputId(), input);
-    return input.getAstRoot(this);
   }
 
   /**
@@ -1648,27 +2203,38 @@ public class Compiler extends AbstractCompiler {
     }
   }
 
+  private int syntheticCodeId = 0;
+
   @Override
-  Node parseSyntheticCode(String fileName, String js) {
-    initCompilerOptionsIfTesting();
-    return parse(SourceFile.fromCode(fileName, js));
+  Node parseSyntheticCode(String js) {
+    return parseSyntheticCode(" [synthetic:" + (++syntheticCodeId) + "] ", js);
   }
 
   @Override
+  Node parseSyntheticCode(String fileName, String js) {
+    initCompilerOptionsIfTesting();
+    SourceFile source = SourceFile.fromCode(fileName, js);
+    addFilesToSourceMap(ImmutableList.of(source));
+    return parseCodeHelper(source);
+  }
+
+  @Override
+  @VisibleForTesting
   Node parseTestCode(String js) {
     initCompilerOptionsIfTesting();
-    CompilerInput input = new CompilerInput(
-        SourceFile.fromCode("[testcode]", js));
-    if (inputsById == null) {
-      inputsById = new HashMap<>();
-    }
+    initBasedOnOptions();
+    return parseCodeHelper(SourceFile.fromCode("[testcode]", js));
+  }
+
+  private Node parseCodeHelper(SourceFile src) {
+    CompilerInput input = new CompilerInput(src);
     putCompilerInput(input.getInputId(), input);
     return input.getAstRoot(this);
   }
 
   @Override
   ErrorReporter getDefaultErrorReporter() {
-    return defaultErrorReporter;
+    return oldErrorReporter;
   }
 
   //------------------------------------------------------------------------
@@ -1678,53 +2244,36 @@ public class Compiler extends AbstractCompiler {
   /**
    * Converts the main parse tree back to JS code.
    */
+  @Override
   public String toSource() {
-    return runInCompilerThread(new Callable<String>() {
-      @Override
-      public String call() throws Exception {
-        Tracer tracer = newTracer("toSource");
-        try {
-          CodeBuilder cb = new CodeBuilder();
-          if (jsRoot != null) {
-            int i = 0;
-            for (Node scriptNode = jsRoot.getFirstChild();
-                 scriptNode != null;
-                 scriptNode = scriptNode.getNext()) {
-              toSource(cb, i++, scriptNode);
+    return runInCompilerThread(
+        new Callable<String>() {
+          @Override
+          public String call() throws Exception {
+            Tracer tracer = newTracer("toSource");
+            try {
+              CodeBuilder cb = new CodeBuilder();
+              if (jsRoot != null) {
+                int i = 0;
+                if (options.shouldPrintExterns()) {
+                  for (Node scriptNode = externsRoot.getFirstChild();
+                      scriptNode != null;
+                      scriptNode = scriptNode.getNext()) {
+                    toSource(cb, i++, scriptNode);
+                  }
+                }
+                for (Node scriptNode = jsRoot.getFirstChild();
+                    scriptNode != null;
+                    scriptNode = scriptNode.getNext()) {
+                  toSource(cb, i++, scriptNode);
+                }
+              }
+              return cb.toString();
+            } finally {
+              stopTracer(tracer, "toSource");
             }
           }
-          return cb.toString();
-        } finally {
-          stopTracer(tracer, "toSource");
-        }
-      }
-    });
-  }
-
-  /**
-   * Converts the parse tree for each input back to JS code.
-   */
-  public String[] toSourceArray() {
-    return runInCompilerThread(new Callable<String[]>() {
-      @Override
-      public String[] call() throws Exception {
-        Tracer tracer = newTracer("toSourceArray");
-        try {
-          int numInputs = inputs.size();
-          String[] sources = new String[numInputs];
-          CodeBuilder cb = new CodeBuilder();
-          for (int i = 0; i < numInputs; i++) {
-            Node scriptNode = inputs.get(i).getAstRoot(Compiler.this);
-            cb.reset();
-            toSource(cb, i, scriptNode);
-            sources[i] = cb.toString();
-          }
-          return sources;
-        } finally {
-          stopTracer(tracer, "toSourceArray");
-        }
-      }
-    });
+        });
   }
 
   /**
@@ -1753,6 +2302,125 @@ public class Compiler extends AbstractCompiler {
     });
   }
 
+  /**
+   * Writes out JS code from a root node. If printing input delimiters, this
+   * method will attach a comment to the start of the text indicating which
+   * input the output derived from. If there were any preserve annotations
+   * within the root's source, they will also be printed in a block comment
+   * at the beginning of the output.
+   */
+  public void toSource(final CodeBuilder cb,
+                       final int inputSeqNum,
+                       final Node root) {
+    runInCompilerThread(
+        new Callable<Void>() {
+          @Override
+          public Void call() throws Exception {
+            if (options.printInputDelimiter) {
+              if ((cb.getLength() > 0) && !cb.endsWith("\n")) {
+                cb.append("\n"); // Make sure that the label starts on a new line
+              }
+              checkState(root.isScript());
+
+              String delimiter = options.inputDelimiter;
+
+              String inputName = root.getInputId().getIdName();
+              String sourceName = root.getSourceFileName();
+              checkState(sourceName != null);
+              checkState(!sourceName.isEmpty());
+
+              delimiter =
+                  delimiter
+                      .replace("%name%", Matcher.quoteReplacement(inputName))
+                      .replace("%num%", String.valueOf(inputSeqNum))
+                      .replace("%n%", "\n");
+
+              cb.append(delimiter).append("\n");
+            }
+            if (root.getJSDocInfo() != null) {
+              String license = root.getJSDocInfo().getLicense();
+              if (license != null && cb.addLicense(license)) {
+                cb.append("/*\n").append(license).append("*/\n");
+              }
+            }
+
+            // If there is a valid source map, then indicate to it that the current
+            // root node's mappings are offset by the given string builder buffer.
+            if (options.sourceMapOutputPath != null) {
+              sourceMap.setStartingPosition(cb.getLineIndex(), cb.getColumnIndex());
+            }
+
+            // if LanguageMode is strict, only print 'use strict'
+            // for the first input file
+            String code = toSource(root, sourceMap, inputSeqNum == 0);
+            if (!code.isEmpty()) {
+              cb.append(code);
+
+              // In order to avoid parse ambiguity when files are concatenated
+              // together, all files should end in a semi-colon. Do a quick
+              // heuristic check if there's an obvious semi-colon already there.
+              int length = code.length();
+              char lastChar = code.charAt(length - 1);
+              char secondLastChar = length >= 2 ? code.charAt(length - 2) : '\0';
+              boolean hasSemiColon = lastChar == ';' || (lastChar == '\n' && secondLastChar == ';');
+              if (!hasSemiColon) {
+                cb.append(";");
+              }
+            }
+            return null;
+          }
+        });
+  }
+
+  /**
+   * Generates JavaScript source code for an AST, doesn't generate source
+   * map info.
+   */
+  @Override
+  public String toSource(Node n) {
+    initCompilerOptionsIfTesting();
+    return toSource(n, null, true);
+  }
+
+  /**
+   * Generates JavaScript source code for an AST.
+   */
+  private String toSource(Node n, SourceMap sourceMap, boolean firstOutput) {
+    CodePrinter.Builder builder = new CodePrinter.Builder(n);
+    builder.setTypeRegistry(getTypeIRegistry());
+    builder.setCompilerOptions(options);
+    builder.setSourceMap(sourceMap);
+    builder.setTagAsExterns(n.isFromExterns());
+    builder.setTagAsTypeSummary(!n.isFromExterns() && options.shouldGenerateTypedExterns());
+    builder.setTagAsStrict(firstOutput && options.shouldEmitUseStrict());
+    return builder.build();
+  }
+
+  /**
+   * Converts the parse tree for each input back to JS code.
+   */
+  public String[] toSourceArray() {
+    return runInCompilerThread(new Callable<String[]>() {
+      @Override
+      public String[] call() throws Exception {
+        Tracer tracer = newTracer("toSourceArray");
+        try {
+          int numInputs = inputs.size();
+          String[] sources = new String[numInputs];
+          CodeBuilder cb = new CodeBuilder();
+          for (int i = 0; i < numInputs; i++) {
+            Node scriptNode = inputs.get(i).getAstRoot(Compiler.this);
+            cb.reset();
+            toSource(cb, i, scriptNode);
+            sources[i] = cb.toString();
+          }
+          return sources;
+        } finally {
+          stopTracer(tracer, "toSourceArray");
+        }
+      }
+    });
+  }
 
   /**
    * Converts the parse tree for each input in a module back to JS code.
@@ -1783,100 +2451,6 @@ public class Compiler extends AbstractCompiler {
         return sources;
       }
     });
-  }
-
-  /**
-   * Writes out JS code from a root node. If printing input delimiters, this
-   * method will attach a comment to the start of the text indicating which
-   * input the output derived from. If there were any preserve annotations
-   * within the root's source, they will also be printed in a block comment
-   * at the beginning of the output.
-   */
-  public void toSource(final CodeBuilder cb,
-                       final int inputSeqNum,
-                       final Node root) {
-    runInCompilerThread(new Callable<Void>() {
-      @Override
-      public Void call() throws Exception {
-        if (options.printInputDelimiter) {
-          if ((cb.getLength() > 0) && !cb.endsWith("\n")) {
-            cb.append("\n");  // Make sure that the label starts on a new line
-          }
-          Preconditions.checkState(root.isScript());
-
-          String delimiter = options.inputDelimiter;
-
-          String inputName = root.getInputId().getIdName();
-          String sourceName = root.getSourceFileName();
-          Preconditions.checkState(sourceName != null);
-          Preconditions.checkState(!sourceName.isEmpty());
-
-          delimiter = delimiter
-              .replaceAll("%name%", Matcher.quoteReplacement(inputName))
-              .replaceAll("%num%", String.valueOf(inputSeqNum));
-
-          cb.append(delimiter)
-            .append("\n");
-        }
-        if (root.getJSDocInfo() != null) {
-          String license = root.getJSDocInfo().getLicense();
-          if (license != null && cb.addLicense(license)) {
-            cb.append("/*\n")
-              .append(license)
-              .append("*/\n");
-          }
-        }
-
-        // If there is a valid source map, then indicate to it that the current
-        // root node's mappings are offset by the given string builder buffer.
-        if (options.sourceMapOutputPath != null) {
-          sourceMap.setStartingPosition(
-              cb.getLineIndex(), cb.getColumnIndex());
-        }
-
-        // if LanguageMode is strict, only print 'use strict'
-        // for the first input file
-        String code = toSource(root, sourceMap, inputSeqNum == 0);
-        if (!code.isEmpty()) {
-          cb.append(code);
-
-          // In order to avoid parse ambiguity when files are concatenated
-          // together, all files should end in a semi-colon. Do a quick
-          // heuristic check if there's an obvious semi-colon already there.
-          int length = code.length();
-          char lastChar = code.charAt(length - 1);
-          char secondLastChar = length >= 2 ?
-              code.charAt(length - 2) : '\0';
-          boolean hasSemiColon = lastChar == ';' ||
-              (lastChar == '\n' && secondLastChar == ';');
-          if (!hasSemiColon) {
-            cb.append(";");
-          }
-        }
-        return null;
-      }
-    });
-  }
-
-  /**
-   * Generates JavaScript source code for an AST, doesn't generate source
-   * map info.
-   */
-  @Override
-  public String toSource(Node n) {
-    initCompilerOptionsIfTesting();
-    return toSource(n, null, true);
-  }
-
-  /**
-   * Generates JavaScript source code for an AST.
-   */
-  private String toSource(Node n, SourceMap sourceMap, boolean firstOutput) {
-    CodePrinter.Builder builder = new CodePrinter.Builder(n);
-    builder.setCompilerOptions(options);
-    builder.setSourceMap(sourceMap);
-    builder.setTagAsStrict(firstOutput && options.getLanguageOut().isStrict());
-    return builder.build();
   }
 
   /**
@@ -1953,32 +2527,14 @@ public class Compiler extends AbstractCompiler {
   // Optimizations
   //------------------------------------------------------------------------
 
-  public void optimize() {
+  void performOptimizations() {
+    checkState(options.shouldOptimize());
     List<PassFactory> optimizations = getPassConfig().getOptimizations();
     if (optimizations.isEmpty()) {
       return;
     }
 
-    // Ideally, this pass should be the first pass run, however:
-    // 1) VariableReferenceCheck reports unexpected warnings if Normalize
-    // is done first.
-    // 2) ReplaceMessages, stripCode, and potentially custom passes rely on
-    // unmodified local names.
-    normalize();
-
-    // Create extern exports after the normalize because externExports depends on unique names.
-    if (options.isExternExportsEnabled()
-        || options.externExportsPath != null) {
-      externExports();
-    }
-
-    phaseOptimizer = new PhaseOptimizer(this, tracker, null);
-    if (options.devMode == DevMode.EVERY_PASS) {
-      phaseOptimizer.setSanityCheck(sanityCheck);
-    }
-    if (options.getCheckDeterminism()) {
-      phaseOptimizer.setPrintAstHashcodes(true);
-    }
+    phaseOptimizer = createPhaseOptimizer();
     phaseOptimizer.consume(optimizations);
     phaseOptimizer.process(externsRoot, jsRoot);
     phaseOptimizer = null;
@@ -2004,13 +2560,6 @@ public class Compiler extends AbstractCompiler {
     return cfa.getCfg();
   }
 
-  public void normalize() {
-    logger.fine("Normalizing");
-    startPass("normalize");
-    process(new Normalize(this, false));
-    endPass();
-  }
-
   @Override
   void prepareAst(Node root) {
     CompilerPass pass = new PrepareAst(this);
@@ -2021,20 +2570,28 @@ public class Compiler extends AbstractCompiler {
     logger.fine("Recording function information");
     startPass("recordFunctionInformation");
     RecordFunctionInformation recordFunctionInfoPass =
-        new RecordFunctionInformation(
-            this, getPassConfig().getIntermediateState().functionNames);
+        new RecordFunctionInformation(this, this.functionNames);
     process(recordFunctionInfoPass);
     functionInformationMap = recordFunctionInfoPass.getMap();
-    endPass();
+    endPass("recordFunctionInformation");
   }
 
   protected final RecentChange recentChange = new RecentChange();
   private final List<CodeChangeHandler> codeChangeHandlers = new ArrayList<>();
+  private final Map<Class<?>, IndexProvider<?>> indexProvidersByType =
+      new LinkedHashMap<>();
 
   /** Name of the synthetic input that holds synthesized externs. */
   static final String SYNTHETIC_EXTERNS = "{SyntheticVarsDeclar}";
 
+  /**
+   * Name of the synthetic input that holds synthesized externs which
+   * must be at the end of the externs AST.
+   */
+  static final String SYNTHETIC_EXTERNS_AT_END = "{SyntheticVarsAtEnd}";
+
   private CompilerInput synthesizedExternsInput = null;
+  private CompilerInput synthesizedExternsInputAtEnd = null;
 
   private ImmutableMap<String, Node> defaultDefineValues = ImmutableMap.of();
 
@@ -2049,35 +2606,31 @@ public class Compiler extends AbstractCompiler {
   }
 
   @Override
-  void setScope(Node n) {
-    if (phaseOptimizer != null) {
-      phaseOptimizer.setScope(n);
+  void addIndexProvider(IndexProvider<?> indexProvider) {
+    Class<?> type = indexProvider.getType();
+    if (indexProvidersByType.put(type, indexProvider) != null) {
+      throw new IllegalStateException(
+          "A provider is already registered for index of type " + type.getSimpleName());
     }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Override
+  <T> T getIndex(Class<T> key) {
+    IndexProvider<T> indexProvider = (IndexProvider<T>) indexProvidersByType.get(key);
+    if (indexProvider == null) {
+      return null;
+    }
+    return indexProvider.get();
+  }
+
+  Node getExternsRoot() {
+    return externsRoot;
   }
 
   @Override
   Node getJsRoot() {
     return jsRoot;
-  }
-
-  @Override
-  boolean hasScopeChanged(Node n) {
-    if (!analyzeChangedScopesOnly || phaseOptimizer == null) {
-      return true;
-    }
-    return phaseOptimizer.hasScopeChanged(n);
-  }
-
-  @Override
-  void reportChangeToEnclosingScope(Node n) {
-    if (phaseOptimizer != null) {
-      phaseOptimizer.reportChangeToEnclosingScope(n);
-      phaseOptimizer.startCrossScopeReporting();
-      reportCodeChange();
-      phaseOptimizer.endCrossScopeReporting();
-    } else {
-      reportCodeChange();
-    }
   }
 
   /**
@@ -2091,7 +2644,95 @@ public class Compiler extends AbstractCompiler {
   }
 
   @Override
-  public void reportCodeChange() {
+  public int getChangeStamp() {
+    return changeStamp;
+  }
+
+  @Override
+  List<Node> getChangedScopeNodesForPass(String passName) {
+    List<Node> changedScopeNodes = changeTimeline.getSince(passName);
+    changeTimeline.mark(passName);
+    return changedScopeNodes;
+  }
+
+  @Override
+  List<Node> getDeletedScopeNodesForPass(String passName) {
+    List<Node> deletedScopeNodes = deleteTimeline.getSince(passName);
+    deleteTimeline.mark(passName);
+    return deletedScopeNodes;
+  }
+
+  @Override
+  public void incrementChangeStamp() {
+    changeStamp++;
+  }
+
+  private Node getChangeScopeForNode(Node n) {
+    /**
+     * Compiler change reporting usually occurs after the AST change has already occurred. In the
+     * case of node removals those nodes are already removed from the tree and so have no parent
+     * chain to walk. In these situations changes are reported instead against what (used to be)
+     * their parent. If that parent is itself a script node then it's important to be able to
+     * recognize it as the enclosing scope without first stepping to its parent as well.
+     */
+    if (n.isScript()) {
+      return n;
+    }
+
+    Node enclosingScopeNode = NodeUtil.getEnclosingChangeScopeRoot(n.getParent());
+    if (enclosingScopeNode == null) {
+      throw new IllegalStateException(
+          "An enclosing scope is required for change reports but node " + n + " doesn't have one.");
+    }
+    return enclosingScopeNode;
+  }
+
+  private void recordChange(Node n) {
+    if (n.isDeleted()) {
+      // Some complicated passes (like SmartNameRemoval) might both change and delete a scope in
+      // the same pass, and they might even perform the change after the deletion because of
+      // internal queueing. Just ignore the spurious attempt to mark changed after already marking
+      // deleted. There's no danger of deleted nodes persisting in the AST since this is enforced
+      // separately in ChangeVerifier.
+      return;
+    }
+
+    n.setChangeTime(changeStamp);
+    // Every code change happens at a different time
+    changeStamp++;
+    changeTimeline.add(n);
+  }
+
+  @Override
+  boolean hasScopeChanged(Node n) {
+    if (phaseOptimizer == null) {
+      return true;
+    }
+    return phaseOptimizer.hasScopeChanged(n);
+  }
+
+  @Override
+  public void reportChangeToChangeScope(Node changeScopeRoot) {
+    checkState(changeScopeRoot.isScript() || changeScopeRoot.isFunction());
+    recordChange(changeScopeRoot);
+    notifyChangeHandlers();
+  }
+
+  @Override
+  public void reportFunctionDeleted(Node n) {
+    checkState(n.isFunction());
+    n.setDeleted(true);
+    changeTimeline.remove(n);
+    deleteTimeline.add(n);
+  }
+
+  @Override
+  public void reportChangeToEnclosingScope(Node n) {
+    recordChange(getChangeScopeForNode(n));
+    notifyChangeHandlers();
+  }
+
+  private void notifyChangeHandlers() {
     for (CodeChangeHandler handler : codeChangeHandlers) {
       handler.reportChange();
     }
@@ -2104,58 +2745,46 @@ public class Compiler extends AbstractCompiler {
     return convention;
   }
 
-  @Override
-  public boolean isIdeMode() {
-    return options.ideMode;
+  private Config.LanguageMode getParserConfigLanguageMode(
+      CompilerOptions.LanguageMode languageMode) {
+    switch (languageMode) {
+      case ECMASCRIPT3:
+        return Config.LanguageMode.ECMASCRIPT3;
+      case ECMASCRIPT5:
+      case ECMASCRIPT5_STRICT:
+        return Config.LanguageMode.ECMASCRIPT5;
+      case ECMASCRIPT_2015:
+        return Config.LanguageMode.ECMASCRIPT6;
+      case ECMASCRIPT6_TYPED:
+        return Config.LanguageMode.TYPESCRIPT;
+      case ECMASCRIPT_2016:
+        return Config.LanguageMode.ECMASCRIPT7;
+      case ECMASCRIPT_2017:
+        return Config.LanguageMode.ECMASCRIPT8;
+      case ECMASCRIPT_NEXT:
+        return Config.LanguageMode.ES_NEXT;
+      default:
+        throw new IllegalStateException("Unexpected language mode: "
+            + options.getLanguageIn());
+    }
   }
 
   @Override
-  public boolean acceptEcmaScript5() {
-    switch (options.getLanguageIn()) {
-      case ECMASCRIPT5:
-      case ECMASCRIPT5_STRICT:
-      case ECMASCRIPT6:
-      case ECMASCRIPT6_STRICT:
-      case ECMASCRIPT6_TYPED:
-        return true;
-      case ECMASCRIPT3:
-        return false;
-      default:
-        throw new IllegalStateException(
-            "unexpected language mode: " + options.getLanguageIn());
-    }
-  }
-  @Override
   Config getParserConfig(ConfigContext context) {
-    if (parserConfig == null) {
-      switch (options.getLanguageIn()) {
-        case ECMASCRIPT3:
-          parserConfig = createConfig(Config.LanguageMode.ECMASCRIPT3);
-          externsParserConfig = createConfig(Config.LanguageMode.ECMASCRIPT5);
-          break;
-        case ECMASCRIPT5:
-          parserConfig = createConfig(Config.LanguageMode.ECMASCRIPT5);
-          externsParserConfig = parserConfig;
-          break;
-        case ECMASCRIPT5_STRICT:
-          parserConfig = createConfig(Config.LanguageMode.ECMASCRIPT5_STRICT);
-          externsParserConfig = parserConfig;
-          break;
-        case ECMASCRIPT6:
-          parserConfig = createConfig(Config.LanguageMode.ECMASCRIPT6);
-          externsParserConfig = parserConfig;
-          break;
-        case ECMASCRIPT6_STRICT:
-          parserConfig = createConfig(Config.LanguageMode.ECMASCRIPT6_STRICT);
-          externsParserConfig = parserConfig;
-          break;
-        case ECMASCRIPT6_TYPED:
-          parserConfig = createConfig(Config.LanguageMode.ECMASCRIPT6_TYPED);
-          externsParserConfig = parserConfig;
-          break;
-        default:
-          throw new IllegalStateException("unexpected language mode: "
-              + options.getLanguageIn());
+    if (parserConfig == null || externsParserConfig == null) {
+      synchronized (this) {
+        if (parserConfig == null) {
+          Config.LanguageMode configLanguageMode = getParserConfigLanguageMode(
+              options.getLanguageIn());
+          Config.StrictMode strictMode =
+              options.expectStrictModeInput() ? Config.StrictMode.STRICT : Config.StrictMode.SLOPPY;
+          parserConfig = createConfig(configLanguageMode, strictMode);
+          // Externs must always be parsed with at least ES5 language mode.
+          externsParserConfig =
+              configLanguageMode.equals(Config.LanguageMode.ECMASCRIPT3)
+                  ? createConfig(Config.LanguageMode.ECMASCRIPT5, strictMode)
+                  : parserConfig;
+        }
       }
     }
     switch (context) {
@@ -2166,12 +2795,18 @@ public class Compiler extends AbstractCompiler {
     }
   }
 
-  protected Config createConfig(Config.LanguageMode mode) {
-    return ParserRunner.createConfig(
-        isIdeMode(),
-        options.isParseJsDocDocumentation(),
-        mode,
-        options.extraAnnotationNames);
+  protected Config createConfig(Config.LanguageMode mode, Config.StrictMode strictMode) {
+    Config config =
+        ParserRunner.createConfig(
+            mode,
+            options.isParseJsDocDocumentation(),
+            options.canContinueAfterErrors()
+                ? Config.RunMode.KEEP_GOING
+                : Config.RunMode.STOP_AFTER_ERROR,
+            options.extraAnnotationNames,
+            options.parseInlineSourceMaps,
+            strictMode);
+    return config;
   }
 
   //------------------------------------------------------------------------
@@ -2206,8 +2841,13 @@ public class Compiler extends AbstractCompiler {
   }
 
   @Override
+  public void report(CheckLevel ignoredLevel, JSError error) {
+    report(error);
+  }
+
+  @Override
   public CheckLevel getErrorLevel(JSError error) {
-    Preconditions.checkNotNull(options);
+    checkNotNull(options);
     return warningsGuard.level(error);
   }
 
@@ -2215,10 +2855,8 @@ public class Compiler extends AbstractCompiler {
    * Report an internal error.
    */
   @Override
-  void throwInternalError(String message, Exception cause) {
-    String finalMessage =
-      "INTERNAL COMPILER ERROR.\n" +
-      "Please report this problem.\n\n" + message;
+  void throwInternalError(String message, Throwable cause) {
+    String finalMessage = "INTERNAL COMPILER ERROR.\nPlease report this problem.\n\n" + message;
 
     RuntimeException e = new RuntimeException(finalMessage, cause);
     if (cause != null) {
@@ -2244,14 +2882,14 @@ public class Compiler extends AbstractCompiler {
 
   @Override
   boolean hasHaltingErrors() {
-    return !isIdeMode() && getErrorCount() > 0;
+    return !getOptions().canContinueAfterErrors() && getErrorCount() > 0;
   }
 
   /**
    * Consults the {@link ErrorManager} to see if we've encountered errors
    * that should halt compilation. <p>
    *
-   * If {@link CompilerOptions#ideMode} is {@code true}, this function
+   * If {@link CompilerOptions#canContinueAfterErrors} is {@code true}, this function
    * always returns {@code false} without consulting the error manager. The
    * error manager will continue to be told about new errors and warnings, but
    * the compiler will complete compilation of all inputs.<p>
@@ -2260,20 +2898,10 @@ public class Compiler extends AbstractCompiler {
     return hasHaltingErrors();
   }
 
-  /** Called from the compiler passes, adds debug info */
-  @Override
-  void addToDebugLog(String str) {
-    if (options.useDebugLog) {
-      debugLog.append(str);
-      debugLog.append('\n');
-      logger.fine(str);
-    }
-  }
-
   @Override
   SourceFile getSourceFileByName(String sourceName) {
     // Here we assume that the source name is the input name, this
-    // is try of JavaScript parsed from source.
+    // is true of JavaScript parsed from source.
     if (sourceName != null) {
       CompilerInput input = inputsById.get(new InputId(sourceName));
       if (input != null) {
@@ -2287,31 +2915,55 @@ public class Compiler extends AbstractCompiler {
     return null;
   }
 
+  public CharSequence getSourceFileContentByName(String sourceName) {
+    SourceFile file = getSourceFileByName(sourceName);
+    checkNotNull(file);
+    try {
+      return file.getCode();
+    } catch (IOException e) {
+      return null;
+    }
+  }
+
   @Override
-  public OriginalMapping getSourceMapping(String sourceName, int lineNumber,
-      int columnNumber) {
-    SourceMapInput sourceMap = options.inputSourceMaps.get(sourceName);
+  public void addInputSourceMap(String sourceFileName, SourceMapInput inputSourceMap) {
+    inputSourceMaps.put(sourceFileName, inputSourceMap);
+  }
+
+  @Override
+  @Nullable
+  public OriginalMapping getSourceMapping(String sourceName, int lineNumber, int columnNumber) {
+    if (sourceName == null) {
+      return null;
+    }
+    SourceMapInput sourceMap = inputSourceMaps.get(sourceName);
     if (sourceMap == null) {
       return null;
     }
 
-    // JSCompiler uses 1-indexing for lineNumber and 0-indexing for
-    // columnNumber.
-    // SourceMap uses 1-indexing for both.
-    OriginalMapping result = sourceMap.getSourceMap()
-        .getMappingForLine(lineNumber, columnNumber + 1);
+    // JSCompiler uses 1-indexing for lineNumber and 0-indexing for columnNumber.
+    // Sourcemaps use 1-indexing for both.
+    SourceMapConsumerV3 consumer = sourceMap.getSourceMap(errorManager);
+    if (consumer == null) {
+      return null;
+    }
+    OriginalMapping result = consumer.getMappingForLine(lineNumber, columnNumber + 1);
     if (result == null) {
       return null;
     }
 
     // The sourcemap will return a path relative to the sourcemap's file.
     // Translate it to one relative to our base directory.
-    String path =
-        getRelativeTo(result.getOriginalFile(), sourceMap.getOriginalPath());
-    sourceMapOriginalSources.putIfAbsent(
-        path, originalSourcesLoader.apply(path));
-    return result.toBuilder()
-        .setOriginalFile(path)
+    SourceFile source =
+        SourceMapResolver.getRelativePath(sourceMap.getOriginalPath(), result.getOriginalFile());
+    if (source == null) {
+      return null;
+    }
+    String originalPath = source.getOriginalPath();
+    sourceMapOriginalSources.putIfAbsent(originalPath, source);
+    return result
+        .toBuilder()
+        .setOriginalFile(originalPath)
         .setColumnPosition(result.getColumnPosition() - 1)
         .build();
   }
@@ -2345,7 +2997,7 @@ public class Compiler extends AbstractCompiler {
   //------------------------------------------------------------------------
 
   @Override
-  Node getNodeForCodeInsertion(JSModule module) {
+  Node getNodeForCodeInsertion(@Nullable JSModule module) {
     if (module == null) {
       if (inputs.isEmpty()) {
         throw new IllegalStateException("No inputs");
@@ -2365,14 +3017,111 @@ public class Compiler extends AbstractCompiler {
     return sourceMap;
   }
 
+  /**
+   * Ids for cross-module method stubbing, so that each method has
+   * a unique id.
+   */
+  private IdGenerator crossModuleIdGenerator =
+      new IdGenerator();
+
+  /**
+   * Keys are arguments passed to getCssName() found during compilation; values
+   * are the number of times the key appeared as an argument to getCssName().
+   */
+  private Map<String, Integer> cssNames = null;
+
+  /** The variable renaming map */
+  private VariableMap variableMap = null;
+
+  /** The property renaming map */
+  private VariableMap propertyMap = null;
+
+  /** The naming map for anonymous functions */
+  private VariableMap anonymousFunctionNameMap = null;
+
+  /** Fully qualified function names and globally unique ids */
+  private FunctionNames functionNames = null;
+
+  /** String replacement map */
+  private VariableMap stringMap = null;
+
+  /** Id generator map */
+  private String idGeneratorMap = null;
+
+  /** Names exported by goog.exportSymbol. */
+  private final Set<String> exportedNames = new LinkedHashSet<>();
+
+  @Override
+  public void setVariableMap(VariableMap variableMap) {
+    this.variableMap = variableMap;
+  }
+
   VariableMap getVariableMap() {
-    return getPassConfig().getIntermediateState().variableMap;
+    return variableMap;
+  }
+
+  @Override
+  public void setPropertyMap(VariableMap propertyMap) {
+    this.propertyMap = propertyMap;
   }
 
   VariableMap getPropertyMap() {
-    return getPassConfig().getIntermediateState().propertyMap;
+    return this.propertyMap;
   }
 
+  @Override
+  public void setStringMap(VariableMap stringMap) {
+    this.stringMap = stringMap;
+  }
+
+  @Override
+  public void setFunctionNames(FunctionNames functionNames) {
+    this.functionNames = functionNames;
+  }
+
+  @Override
+  public void setCssNames(Map<String, Integer> cssNames) {
+    this.cssNames = cssNames;
+  }
+
+  Map<String, Integer> getCssNames() {
+    return cssNames;
+  }
+
+  @Override
+  public void setIdGeneratorMap(String serializedIdMappings) {
+    this.idGeneratorMap = serializedIdMappings;
+  }
+
+  @Override
+  public IdGenerator getCrossModuleIdGenerator() {
+    return crossModuleIdGenerator;
+  }
+
+  @Override
+  public void setAnonymousFunctionNameMap(VariableMap functionMap) {
+    this.anonymousFunctionNameMap = functionMap;
+  }
+
+  @Override
+  public FunctionNames getFunctionNames() {
+    return functionNames;
+  }
+
+  VariableMap getStringMap() {
+    return this.stringMap;
+  }
+
+
+  @Override
+  public void addExportedNames(Set<String> exportedNames) {
+    this.exportedNames.addAll(exportedNames);
+  }
+
+  @Override
+  public Set<String> getExportedNames() {
+    return exportedNames;
+  }
   @Override
   CompilerOptions getOptions() {
     return options;
@@ -2403,7 +3152,7 @@ public class Compiler extends AbstractCompiler {
   @Override
   public ErrorManager getErrorManager() {
     if (options == null) {
-      initOptions(newCompilerOptions());
+      initOptions(new CompilerOptions());
     }
     return errorManager;
   }
@@ -2411,6 +3160,15 @@ public class Compiler extends AbstractCompiler {
   @Override
   List<CompilerInput> getInputsInOrder() {
     return Collections.unmodifiableList(inputs);
+  }
+
+  @Override
+  int getNumberOfInputs() {
+    // In some testing cases inputs will be null, but obviously there must be at least one input.
+    // The intended use of this method is to allow passes to estimate how much memory they will
+    // need for data structures, so it's not necessary that the returned value be exactly right
+    // in the corner cases where inputs ends up being null.
+    return (inputs != null) ? inputs.size() : 1;
   }
 
   /**
@@ -2450,8 +3208,7 @@ public class Compiler extends AbstractCompiler {
   @Override
   void updateGlobalVarReferences(Map<Var, ReferenceCollection> refMapPatch,
       Node collectionRoot) {
-    Preconditions.checkState(collectionRoot.isScript()
-        || collectionRoot.isBlock());
+    checkState(collectionRoot.isScript() || collectionRoot.isRoot());
     if (globalRefMap == null) {
       globalRefMap = new GlobalVarReferenceMap(getInputsInOrder(),
           getExternsInOrder());
@@ -2467,9 +3224,18 @@ public class Compiler extends AbstractCompiler {
   @Override
   CompilerInput getSynthesizedExternsInput() {
     if (synthesizedExternsInput == null) {
-      synthesizedExternsInput = newExternInput(SYNTHETIC_EXTERNS);
+      synthesizedExternsInput = newExternInput(SYNTHETIC_EXTERNS, SyntheticExternsPosition.START);
     }
     return synthesizedExternsInput;
+  }
+
+  @Override
+  CompilerInput getSynthesizedExternsInputAtEnd() {
+    if (synthesizedExternsInputAtEnd == null) {
+      synthesizedExternsInputAtEnd = newExternInput(
+          SYNTHETIC_EXTERNS_AT_END, SyntheticExternsPosition.END);
+    }
+    return synthesizedExternsInputAtEnd;
   }
 
   @Override
@@ -2540,8 +3306,10 @@ public class Compiler extends AbstractCompiler {
   }
 
   private void processNewScript(JsAst ast, Node originalRoot) {
+    setFeatureSet(options.getLanguageIn().toFeatureSet());
+
     Node js = ast.getAstRoot(this);
-    Preconditions.checkNotNull(js);
+    checkNotNull(js);
 
     runHotSwap(originalRoot, js, this.getCleanupPassConfig());
     // NOTE: If hot swap passes that use GlobalNamespace are added, we will need
@@ -2568,7 +3336,9 @@ public class Compiler extends AbstractCompiler {
       Node originalRoot, Node js, PassFactory passFactory) {
     HotSwapCompilerPass pass = passFactory.getHotSwapPass(this);
     if (pass != null) {
-      logger.info("Performing HotSwap for pass " + passFactory.getName());
+      if (logger.isLoggable(Level.INFO)) {
+        logger.info("Performing HotSwap for pass " + passFactory.getName());
+      }
       pass.hotSwapScript(js, originalRoot);
     }
   }
@@ -2583,64 +3353,90 @@ public class Compiler extends AbstractCompiler {
   }
 
   @Override
-  Node ensureLibraryInjected(String resourceName,
-      boolean normalizeAndUniquifyNames) {
-    if (injectedLibraries.containsKey(resourceName)) {
-      return null;
+  Node ensureLibraryInjected(String resourceName, boolean force) {
+    boolean doNotInject =
+        !force && (options.skipNonTranspilationPasses || options.preventLibraryInjection);
+    if (injectedLibraries.containsKey(resourceName) || doNotInject) {
+      return lastInjectedLibrary;
     }
 
-    // All libraries depend on js/base.js
-    boolean isBase = "base".equals(resourceName);
-    if (!isBase) {
-      ensureLibraryInjected("base", true);
+    // Load/parse the code.
+    String originalCode = ResourceLoader.loadTextResource(
+        Compiler.class, "js/" + resourceName + ".js");
+    Node ast = parseSyntheticCode(" [synthetic:" + resourceName + "] ", originalCode);
+
+    // Look for string literals of the form 'require foo bar' or 'externs baz' or 'normalize'.
+    // As we process each one, remove it from its parent.
+    for (Node node = ast.getFirstChild();
+         node != null && node.isExprResult() && node.getFirstChild().isString();
+         node = ast.getFirstChild()) {
+      String directive = node.getFirstChild().getString();
+      List<String> words = Splitter.on(' ').limit(2).splitToList(directive);
+      switch (words.get(0)) {
+        case "use":
+          // 'use strict' is ignored (and deleted).
+          break;
+        case "require":
+          // 'require lib'; pulls in the named library before this one.
+          ensureLibraryInjected(words.get(1), force);
+          break;
+        case "declare":
+          // 'declare name'; adds the name to the externs (with no type information).
+          // Note that we could simply add the entire externs library, but that leads to
+          // potentially-surprising behavior when the externs that are present depend on
+          // whether or not a polyfill is used.
+          Node var = IR.var(IR.name(words.get(1)));
+          JSDocInfoBuilder jsdoc = new JSDocInfoBuilder(false);
+          // Suppress duplicate-var warning in case this name is already defined in the externs.
+          jsdoc.addSuppression("duplicate");
+          var.setJSDocInfo(jsdoc.build());
+          getSynthesizedExternsInputAtEnd()
+              .getAstRoot(this)
+              .addChildToBack(var);
+          break;
+        default:
+          throw new RuntimeException("Bad directive: " + directive);
+      }
+      ast.removeChild(node);
     }
 
-    Node firstChild = loadLibraryCode(resourceName, normalizeAndUniquifyNames)
-        .removeChildren();
-    Node lastChild = firstChild.getLastSibling();
+    // If we've already started optimizations, then we need to normalize this.
+    if (getLifeCycleStage().isNormalized()) {
+      Normalize.normalizeSyntheticCode(this, ast, "jscomp_" + resourceName + "_");
+    }
 
+    // Insert the code immediately after the last-inserted runtime library.
+    Node lastChild = ast.getLastChild();
+    for (Node child = ast.getFirstChild(); child != null; child = child.getNext()) {
+      NodeUtil.markNewScopesChanged(child, this);
+    }
+    Node firstChild = ast.removeChildren();
+    if (firstChild == null) {
+      // Handle require-only libraries.
+      return lastInjectedLibrary;
+    }
     Node parent = getNodeForCodeInsertion(null);
-    if (isBase) {
+    if (lastInjectedLibrary == null) {
       parent.addChildrenToFront(firstChild);
     } else {
-      parent.addChildrenAfter(
-          firstChild, injectedLibraries.get("base"));
+      parent.addChildrenAfter(firstChild, lastInjectedLibrary);
     }
-    reportCodeChange();
-
+    lastInjectedLibrary = lastChild;
     injectedLibraries.put(resourceName, lastChild);
+
+    reportChangeToEnclosingScope(parent);
     return lastChild;
   }
 
-  /** Load a library as a resource */
-  @VisibleForTesting
-  Node loadLibraryCode(String resourceName, boolean normalizeAndUniquifyNames) {
-    String originalCode;
-    try {
-      originalCode = CharStreams.toString(new InputStreamReader(
-          Compiler.class.getResourceAsStream(
-              String.format("js/%s.js", resourceName)),
-          UTF_8));
-    } catch (IOException e) {
-      throw new RuntimeException(e);
-    }
-
-    Node ast = parseSyntheticCode(originalCode);
-    if (normalizeAndUniquifyNames) {
-      Normalize.normalizeSyntheticCode(
-          this, ast,
-          String.format("jscomp_%s_", resourceName));
-    }
-    return ast;
-  }
-
   /** Returns the compiler version baked into the jar. */
+  @GwtIncompatible("java.util.ResourceBundle")
   public static String getReleaseVersion() {
     ResourceBundle config = ResourceBundle.getBundle(CONFIG_RESOURCE);
     return config.getString("compiler.version");
   }
 
   /** Returns the compiler date baked into the jar. */
+  @GwtIncompatible("java.util.ResourceBundle")
   public static String getReleaseDate() {
     ResourceBundle config = ResourceBundle.getBundle(CONFIG_RESOURCE);
     return config.getString("compiler.date");
@@ -2648,7 +3444,7 @@ public class Compiler extends AbstractCompiler {
 
   @Override
   void addComments(String filename, List<Comment> comments) {
-    if (!isIdeMode()) {
+    if (!getOptions().preservesDetailedSourceInfo()) {
       throw new UnsupportedOperationException(
           "addComments may only be called in IDE mode.");
     }
@@ -2657,7 +3453,7 @@ public class Compiler extends AbstractCompiler {
 
   @Override
   public List<Comment> getComments(String filename) {
-    if (!isIdeMode()) {
+    if (!getOptions().preservesDetailedSourceInfo()) {
       throw new UnsupportedOperationException(
           "getComments may only be called in IDE mode.");
     }
@@ -2672,5 +3468,255 @@ public class Compiler extends AbstractCompiler {
   @Override
   ImmutableMap<String, Node> getDefaultDefineValues() {
     return this.defaultDefineValues;
+  }
+
+  @Override
+  ModuleLoader getModuleLoader() {
+    return moduleLoader;
+  }
+
+  private void addFilesToSourceMap(Iterable<? extends SourceFile> files) {
+    if (getOptions().sourceMapIncludeSourcesContent && getSourceMap() != null) {
+      for (SourceFile file : files) {
+        getSourceMap().addSourceFile(file);
+      }
+    }
+  }
+
+  private void renameModules(List<JSModule> newModules, List<JSModule> deserializedModules) {
+    if (newModules == null) {
+      return;
+    }
+    if (newModules.size() != deserializedModules.size()) {
+      report(JSError.make(INCONSISTENT_MODULE_DEFINITIONS));
+      return;
+    }
+    for (int i = 0; i < deserializedModules.size(); i++) {
+      JSModule deserializedModule = deserializedModules.get(i);
+      JSModule newModule = newModules.get(i);
+      deserializedModule.setName(newModule.getName());
+    }
+    return;
+  }
+
+  void initWebpackMap(ImmutableMap<String, String> inputPathByWebpackId) {
+    this.inputPathByWebpackId = inputPathByWebpackId;
+  }
+
+  protected CompilerExecutor createCompilerExecutor() {
+    return new CompilerExecutor();
+  }
+
+  protected CompilerExecutor getCompilerExecutor() {
+    return compilerExecutor;
+  }
+
+  /**
+   * Serializable state of the compiler.
+   */
+  private static class CompilerState implements Serializable {
+    private final Node externAndJsRoot;
+    private final Node externsRoot;
+    private final Node jsRoot;
+    private final FeatureSet featureSet;
+    private final List<CompilerInput> externs;
+    private final List<CompilerInput> inputs;
+    private final Map<InputId, CompilerInput> inputsById;
+    private final JSTypeRegistry typeRegistry;
+    private final TypeValidator typeValidator;
+    private final MostRecentTypechecker mostRecentTypeChecker;
+    private final CompilerInput synthesizedExternsInput;
+    private final CompilerInput synthesizedExternsInputAtEnd;
+    private final Map<String, Node> injectedLibraries;
+    private final Node lastInjectedLibrary;
+    private final GlobalTypeInfo globalTypeInfo;
+    private final boolean hasRegExpGlobalReferences;
+    private final LifeCycleStage lifeCycleStage;
+    private final Set<String> externProperties;
+    private final JSError[] errors;
+    private final JSError[] warnings;
+    private final JSModuleGraph moduleGraph;
+    private final List<JSModule> modules;
+    private final int uniqueNameId;
+    private final Set<String> exportedNames;
+    private final Map<String, Integer> cssNames;
+    private final VariableMap variableMap;
+    private final VariableMap propertyMap;
+    private final VariableMap anonymousFunctionaMap;
+    private final FunctionNames functioNames;
+    private final VariableMap stringMap;
+    private final String idGeneratorMap;
+    private final IdGenerator crossModuleIdGenerator;
+    private final ImmutableMap<String, Node> defaultDefineValues;
+    private final Map<String, Object> annotationMap;
+    private final ConcurrentHashMap<String, SourceMapInput> inputSourceMaps;
+    private final int changeStamp;
+
+    CompilerState(Compiler compiler) {
+      this.externsRoot = checkNotNull(compiler.externsRoot);
+      this.jsRoot = checkNotNull(compiler.jsRoot);
+      this.externAndJsRoot = checkNotNull(compiler.externAndJsRoot);
+      this.featureSet = checkNotNull(compiler.featureSet);
+      this.typeRegistry = compiler.typeRegistry;
+      this.externs = compiler.externs;
+      this.inputs = checkNotNull(compiler.inputs);
+      this.inputsById = checkNotNull(compiler.inputsById);
+      this.mostRecentTypeChecker = compiler.mostRecentTypechecker;
+      this.synthesizedExternsInput = compiler.synthesizedExternsInput;
+      this.synthesizedExternsInputAtEnd = compiler.synthesizedExternsInputAtEnd;
+      this.injectedLibraries = compiler.injectedLibraries;
+      this.lastInjectedLibrary = compiler.lastInjectedLibrary;
+      this.globalTypeInfo = compiler.globalTypeInfo;
+      this.hasRegExpGlobalReferences = compiler.hasRegExpGlobalReferences;
+      this.typeValidator = compiler.typeValidator;
+      this.lifeCycleStage = compiler.getLifeCycleStage();
+      this.externProperties = compiler.externProperties;
+      this.errors = compiler.errorManager.getErrors();
+      this.warnings = compiler.errorManager.getWarnings();
+      this.moduleGraph = compiler.moduleGraph;
+      this.modules = compiler.modules;
+      this.uniqueNameId = compiler.uniqueNameId;
+      this.exportedNames = compiler.exportedNames;
+      this.cssNames = compiler.cssNames;
+      this.variableMap = compiler.variableMap;
+      this.propertyMap = compiler.propertyMap;
+      this.anonymousFunctionaMap = compiler.anonymousFunctionNameMap;
+      this.functioNames = compiler.functionNames;
+      this.stringMap = compiler.stringMap;
+      this.idGeneratorMap = compiler.idGeneratorMap;
+      this.crossModuleIdGenerator = compiler.crossModuleIdGenerator;
+      this.defaultDefineValues = checkNotNull(compiler.defaultDefineValues);
+      this.annotationMap = checkNotNull(compiler.annotationMap);
+      this.inputSourceMaps = compiler.inputSourceMaps;
+      this.changeStamp = compiler.changeStamp;
+    }
+  }
+
+  @GwtIncompatible("ObjectOutputStream")
+  public void saveState(OutputStream outputStream) throws IOException {
+    // Do not close the outputstream, caller is responsible for closing it.
+    final ObjectOutputStream objectOutputStream = new ObjectOutputStream(outputStream);
+    runInCompilerThread(new Callable<Void>() {
+      @Override
+      public Void call() throws Exception {
+        Tracer tracer = newTracer("serializeCompilerState");
+        objectOutputStream.writeObject(new CompilerState(Compiler.this));
+        if (typeRegistry != null) {
+          typeRegistry.saveContents(objectOutputStream);
+        }
+        stopTracer(tracer, "serializeCompilerState");
+        return null;
+      }
+    });
+  }
+
+  @GwtIncompatible("ObjectInputStream")
+  public void restoreState(InputStream inputStream) throws IOException, ClassNotFoundException  {
+    initWarningsGuard(options.getWarningsGuard());
+    maybeSetTracker();
+
+    List<JSModule> newModules = modules;
+
+    class CompilerObjectInputStream extends ObjectInputStream implements HasCompiler {
+      public CompilerObjectInputStream(InputStream in) throws IOException {
+        super(in);
+      }
+
+      @Override
+      public AbstractCompiler getCompiler() {
+        return Compiler.this;
+      }
+    }
+
+    // Do not close the input stream, caller is responsible for closing it.
+    final ObjectInputStream objectInputStream = new CompilerObjectInputStream(inputStream);
+    CompilerState compilerState =
+        runInCompilerThread(
+            new Callable<CompilerState>() {
+              @Override
+              public CompilerState call() throws Exception {
+                Tracer tracer = newTracer(PassNames.DESERIALIZE_COMPILER_STATE);
+                CompilerState compilerState = (CompilerState) objectInputStream.readObject();
+                if (compilerState.typeRegistry != null) {
+                  compilerState.typeRegistry.restoreContents(objectInputStream);
+                }
+                stopTracer(tracer, PassNames.DESERIALIZE_COMPILER_STATE);
+                return compilerState;
+              }
+            });
+
+    featureSet = compilerState.featureSet;
+    externs = compilerState.externs;
+    inputs = compilerState.inputs;
+    inputsById.clear();
+    inputsById.putAll(compilerState.inputsById);
+    typeRegistry = compilerState.typeRegistry;
+    externAndJsRoot = compilerState.externAndJsRoot;
+    externsRoot = compilerState.externsRoot;
+    jsRoot = compilerState.jsRoot;
+    mostRecentTypechecker = compilerState.mostRecentTypeChecker;
+    synthesizedExternsInput = compilerState.synthesizedExternsInput;
+    synthesizedExternsInputAtEnd = compilerState.synthesizedExternsInputAtEnd;
+    injectedLibraries.clear();
+    injectedLibraries.putAll(compilerState.injectedLibraries);
+    lastInjectedLibrary = compilerState.lastInjectedLibrary;
+    globalTypeInfo = compilerState.globalTypeInfo;
+    hasRegExpGlobalReferences = compilerState.hasRegExpGlobalReferences;
+    typeValidator = compilerState.typeValidator;
+    setLifeCycleStage(compilerState.lifeCycleStage);
+    externProperties = compilerState.externProperties;
+    moduleGraph = compilerState.moduleGraph;
+    modules = compilerState.modules;
+    uniqueNameId = compilerState.uniqueNameId;
+    exportedNames.clear();
+    exportedNames.addAll(compilerState.exportedNames);
+    cssNames = compilerState.cssNames;
+    variableMap = compilerState.variableMap;
+    propertyMap = compilerState.propertyMap;
+    stringMap = compilerState.stringMap;
+    anonymousFunctionNameMap = compilerState.anonymousFunctionaMap;
+    idGeneratorMap = compilerState.idGeneratorMap;
+    crossModuleIdGenerator = compilerState.crossModuleIdGenerator;
+    functionNames = compilerState.functioNames;
+    defaultDefineValues = checkNotNull(compilerState.defaultDefineValues);
+    annotationMap = checkNotNull(compilerState.annotationMap);
+    inputSourceMaps = compilerState.inputSourceMaps;
+    changeStamp = compilerState.changeStamp;
+
+    // Reapply module names to deserialized modules
+    renameModules(newModules, modules);
+
+    // restore errors.
+    if (compilerState.errors != null) {
+      for (JSError error : compilerState.errors) {
+        report(CheckLevel.ERROR, error);
+      }
+    }
+    if (compilerState.warnings != null) {
+      for (JSError warning : compilerState.warnings) {
+        report(CheckLevel.WARNING, warning);
+      }
+    }
+    if (tracker != null) {
+      tracker.updateAfterDeserialize(jsRoot);
+    }
+  }
+
+  public void resetCompilerInput() {
+    for (JSModule module : this.modules) {
+      for (CompilerInput input : module.getInputs()) {
+        input.reset();
+      }
+    }
+    for (CompilerInput input : this.externs) {
+      input.reset();
+    }
+  }
+
+  /** Returns the module type for the provided namespace. */
+  @Override
+  @Nullable
+  CompilerInput.ModuleType getModuleTypeByName(String moduleName) {
+    return moduleTypesByName.get(moduleName);
   }
 }

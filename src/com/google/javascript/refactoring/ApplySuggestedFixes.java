@@ -16,23 +16,32 @@
 
 package com.google.javascript.refactoring;
 
+import static com.google.common.base.Preconditions.checkState;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.base.Function;
+import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.HashMultimap;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSetMultimap;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Multimaps;
 import com.google.common.collect.Ordering;
 import com.google.common.collect.SetMultimap;
 import com.google.common.io.Files;
-
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
+import java.util.function.Predicate;
+import java.util.stream.IntStream;
+import java.util.stream.StreamSupport;
 
 /**
  * Class that applies suggested fixes to code or files.
@@ -48,6 +57,11 @@ public final class ApplySuggestedFixes {
       .compound(Ordering.natural().onResultOf(new Function<CodeReplacement, Integer>() {
         @Override public Integer apply(CodeReplacement replacement) {
           return replacement.getLength();
+        }
+      }))
+      .compound(Ordering.natural().onResultOf(new Function<CodeReplacement, String>() {
+        @Override public String apply(CodeReplacement replacement) {
+          return replacement.getSortKey();
         }
       }));
 
@@ -66,32 +80,67 @@ public final class ApplySuggestedFixes {
 
     Map<String, String> filenameToCodeMap = new HashMap<>();
     for (String filename : filenames) {
-      filenameToCodeMap.put(filename, Files.toString(new File(filename), UTF_8));
+      filenameToCodeMap.put(filename, Files.asCharSource(new File(filename), UTF_8).read());
     }
 
     Map<String, String> newCode = applySuggestedFixesToCode(fixes, filenameToCodeMap);
     for (Map.Entry<String, String> entry : newCode.entrySet()) {
-      Files.write(entry.getValue(), new File(entry.getKey()), UTF_8);
+      Files.asCharSink(new File(entry.getKey()), UTF_8).write(entry.getValue());
     }
   }
 
   /**
-   * Applies the provided set of suggested fixes to the provided code and returns the new code.
-   * The {@code filenameToCodeMap} must contain all the files that the provided fixes apply to.
-   * The fixes can be provided in any order, but they may not have any overlapping modifications
-   * for the same file.
-   * This function will return new code only for the files that have been modified.
+   * Applies all possible options from each {@code SuggestedFixAlternative} to the provided code and
+   * returns the new code. This only makes sense if all the SuggestedFixAlternatives come from the
+   * same checker, i.e. they offer the same number of choices and the same index corresponds to
+   * similar fixes. The {@code filenameToCodeMap} must contain all the files that the provided fixes
+   * apply to. The fixes can be provided in any order, but they may not have any overlapping
+   * modifications for the same file. This function will return new code only for the files that
+   * have been modified.
    */
-  public static Map<String, String> applySuggestedFixesToCode(
-      Iterable<SuggestedFix> fixes, Map<String, String> filenameToCodeMap) {
-    ImmutableSetMultimap.Builder<String, CodeReplacement> builder = ImmutableSetMultimap.builder();
-    for (SuggestedFix fix : fixes) {
-      builder.putAll(fix.getReplacements());
+  public static ImmutableList<ImmutableMap<String, String>> applyAllSuggestedFixChoicesToCode(
+      Iterable<SuggestedFix> fixChoices, Map<String, String> fileNameToCodeMap) {
+    if (Iterables.isEmpty(fixChoices)) {
+      return ImmutableList.of(ImmutableMap.of());
     }
-    SetMultimap<String, CodeReplacement> replacementsMap = builder.build();
+    int alternativeCount = Iterables.getFirst(fixChoices, null).getAlternatives().size();
+    Preconditions.checkArgument(
+        StreamSupport.stream(fixChoices.spliterator(), false)
+            .map(f -> f.getAlternatives().size())
+            .allMatch(Predicate.isEqual(alternativeCount)),
+        "All SuggestedFixAlternatives must offer an equal number of choices for this "
+            + "utility to make sense");
+    return IntStream.range(0, alternativeCount)
+        .mapToObj(i -> applySuggestedFixChoicesToCode(fixChoices, i, fileNameToCodeMap))
+        .collect(ImmutableList.toImmutableList());
+  }
+
+  private static ImmutableMap<String, String> applySuggestedFixChoicesToCode(
+      Iterable<SuggestedFix> fixChoices,
+      final int choiceIndex,
+      Map<String, String> fileNameToCodeMap) {
+    ImmutableList<SuggestedFix> chosenFixes =
+        StreamSupport.stream(fixChoices.spliterator(), false)
+            .map(choices -> choices.getAlternatives().get(choiceIndex))
+            .collect(ImmutableList.toImmutableList());
+    return applySuggestedFixesToCode(chosenFixes, fileNameToCodeMap);
+  }
+
+  /**
+   * Applies the provided set of suggested fixes to the provided code and returns the new code,
+   * ignoring alternative fixes. The {@code filenameToCodeMap} must contain all the files that the
+   * provided fixes apply to. The fixes can be provided in any order, but they may not have any
+   * overlapping modifications for the same file. This function will return new code only for the
+   * files that have been modified.
+   */
+  public static ImmutableMap<String, String> applySuggestedFixesToCode(
+      Iterable<SuggestedFix> fixes, Map<String, String> filenameToCodeMap) {
+    ReplacementMap map = new ReplacementMap();
+    for (SuggestedFix fix : fixes) {
+      map.putIfNoOverlap(fix);
+    }
     ImmutableMap.Builder<String, String> newCodeMap = ImmutableMap.builder();
-    for (Map.Entry<String, Set<CodeReplacement>> entry
-        : Multimaps.asMap(replacementsMap).entrySet()) {
+    for (Map.Entry<String, Set<CodeReplacement>> entry : map.entrySet()) {
       String filename = entry.getKey();
       if (!filenameToCodeMap.containsKey(filename)) {
         throw new IllegalArgumentException("filenameToCodeMap missing code for file: " + filename);
@@ -116,10 +165,10 @@ public final class ApplySuggestedFixes {
     for (CodeReplacement replacement : sortedReplacements) {
       sb.append(code, lastIndex, replacement.getStartPosition());
       sb.append(replacement.getNewContent());
-      lastIndex = replacement.getStartPosition() + replacement.getLength();
+      lastIndex = replacement.getEndPosition();
     }
     if (lastIndex <= code.length()) {
-      sb.append(code.substring(lastIndex));
+      sb.append(code, lastIndex, code.length());
     }
     return sb.toString();
   }
@@ -131,13 +180,57 @@ public final class ApplySuggestedFixes {
    * by ORDER_CODE_REPLACEMENTS.
    */
   private static void validateNoOverlaps(List<CodeReplacement> replacements) {
+    checkState(ORDER_CODE_REPLACEMENTS.isOrdered(replacements));
+    if (containsOverlaps(replacements)) {
+      throw new IllegalArgumentException(
+          "Found overlap between code replacements!\n" + Joiner.on("\n\n").join(replacements));
+    }
+  }
+
+  /**
+   * Checks whether the CodeReplacements have any overlap. The replacements must be provided in
+   * order sorted by start position, as sorted by ORDER_CODE_REPLACEMENTS.
+   */
+  private static boolean containsOverlaps(List<CodeReplacement> replacements) {
+    checkState(ORDER_CODE_REPLACEMENTS.isOrdered(replacements));
     int start = -1;
     for (CodeReplacement replacement : replacements) {
       if (replacement.getStartPosition() < start) {
-        throw new IllegalArgumentException(
-            "Found overlap between code replacements!\n" + replacements);
+        return true;
       }
-      start = Math.max(start, replacement.getStartPosition() + replacement.getLength());
+      start = Math.max(start, replacement.getEndPosition());
+    }
+    return false;
+  }
+
+  private static class ReplacementMap {
+    private final SetMultimap<String, CodeReplacement> map;
+
+    ReplacementMap() {
+      this.map = HashMultimap.create();
+    }
+
+    void putIfNoOverlap(SuggestedFix fix) {
+      if (canPut(fix)) {
+        map.putAll(fix.getReplacements());
+      }
+    }
+
+    private boolean canPut(SuggestedFix fix) {
+      for (String filename : fix.getReplacements().keySet()) {
+        List<CodeReplacement> replacements = new ArrayList<>(map.get(filename));
+        replacements.addAll(fix.getReplacements().get(filename));
+        replacements = ORDER_CODE_REPLACEMENTS.sortedCopy(replacements);
+        if (containsOverlaps(replacements)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    Set<Entry<String, Set<CodeReplacement>>> entrySet() {
+      return Multimaps.asMap(map).entrySet();
     }
   }
+  private ApplySuggestedFixes() {}
 }

@@ -39,8 +39,8 @@
 
 package com.google.javascript.rhino.jstype;
 
+import static com.google.common.base.Preconditions.checkNotNull;
 
-import com.google.common.base.Preconditions;
 import com.google.javascript.rhino.Node;
 
 /**
@@ -58,7 +58,7 @@ class InstanceObjectType extends PrototypeObjectType {
   InstanceObjectType(JSTypeRegistry registry, FunctionType constructor,
                      boolean isNativeType) {
     super(registry, null, null, isNativeType, constructor.getTemplateTypeMap());
-    Preconditions.checkNotNull(constructor);
+    checkNotNull(constructor);
     this.constructor = constructor;
   }
 
@@ -93,12 +93,13 @@ class InstanceObjectType extends PrototypeObjectType {
   }
 
   @Override
-  String toStringHelper(boolean forAnnotations) {
-    if (constructor.hasReferenceName()) {
-      return constructor.getReferenceName();
-    } else {
-      return super.toStringHelper(forAnnotations);
-    }
+  StringBuilder appendTo(StringBuilder sb, boolean forAnnotations) {
+    return constructor.hasReferenceName()
+        ? sb.append(
+            forAnnotations
+                ? constructor.getNormalizedReferenceName()
+                : constructor.getReferenceName())
+        : super.appendTo(sb, forAnnotations);
   }
 
   @Override

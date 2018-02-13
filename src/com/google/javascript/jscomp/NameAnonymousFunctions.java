@@ -17,7 +17,6 @@
 package com.google.javascript.jscomp;
 
 import com.google.javascript.rhino.Node;
-
 import java.util.logging.Logger;
 
 /**
@@ -52,7 +51,7 @@ class NameAnonymousFunctions implements CompilerPass {
   public void process(Node externs, Node root) {
     AnonymousFunctionNamingCallback namingCallback =
         new AnonymousFunctionNamingCallback(new AnonymousFunctionNamer());
-    NodeTraversal.traverse(compiler, root, namingCallback);
+    NodeTraversal.traverseEs6(compiler, root, namingCallback);
     logger.fine("Named " + namedCount + " anon functions using " +
         bytesUsed + " bytes");
   }
@@ -65,7 +64,7 @@ class NameAnonymousFunctions implements CompilerPass {
    */
   private class AnonymousFunctionNamer
       implements AnonymousFunctionNamingCallback.FunctionNamer {
-    private NodeNameExtractor nameExtractor;
+    private final NodeNameExtractor nameExtractor;
 
     AnonymousFunctionNamer() {
       this.nameExtractor = new NodeNameExtractor(DELIMITER);
@@ -89,7 +88,7 @@ class NameAnonymousFunctions implements CompilerPass {
       Node fnNameNode = fnNode.getFirstChild();
       String uniqueName = getLikelyNonConflictingName(name);
       fnNameNode.setString(uniqueName);
-      compiler.reportCodeChange();
+      compiler.reportChangeToEnclosingScope(fnNameNode);
       namedCount++;
       bytesUsed += uniqueName.length();
     }

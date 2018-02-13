@@ -16,18 +16,17 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.base.Predicate;
-import com.google.common.collect.Iterators;
+import com.google.common.collect.Iterables;
+import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
+import com.google.javascript.rhino.TypeIEnv;
 import com.google.javascript.rhino.jstype.JSType;
 import com.google.javascript.rhino.jstype.ObjectType;
 import com.google.javascript.rhino.jstype.StaticTypedScope;
-
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.Map;
+import com.google.javascript.rhino.jstype.StaticTypedSlot;
 
 /**
  * TypedScope contains information about variables and their types.
@@ -46,11 +45,15 @@ import java.util.Map;
  * The reason for this is that we want to shadow methods from the parent class, to avoid calling
  * them accidentally.
  */
-public class TypedScope extends Scope implements StaticTypedScope<JSType> {
-  private final Map<String, TypedVar> vars = new LinkedHashMap<>();
+public class TypedScope extends AbstractScope<TypedScope, TypedVar>
+    implements StaticTypedScope<JSType>, TypeIEnv<JSType> {
+
   private final TypedScope parent;
+  private final int depth;
+
   /** Whether this is a bottom scope for the purposes of type inference. */
   private final boolean isBottom;
+
   // Scope.java contains an arguments field.
   // We haven't added it here because it's unused by the passes that need typed scopes.
 
@@ -66,8 +69,10 @@ public class TypedScope extends Scope implements StaticTypedScope<JSType> {
     };
 
   TypedScope(TypedScope parent, Node rootNode) {
-    super(parent, rootNode);
+    super(rootNode);
+    checkChildScope(parent);
     this.parent = parent;
+    this.depth = parent.depth + 1;
     this.isBottom = false;
   }
 
@@ -79,7 +84,9 @@ public class TypedScope extends Scope implements StaticTypedScope<JSType> {
    */
   private TypedScope(Node rootNode, boolean isBottom) {
     super(rootNode);
+    checkRootScope();
     this.parent = null;
+    this.depth = 0;
     this.isBottom = isBottom;
   }
 
@@ -89,6 +96,11 @@ public class TypedScope extends Scope implements StaticTypedScope<JSType> {
 
   static TypedScope createLatticeBottom(Node rootNode) {
     return new TypedScope(rootNode, true);
+  }
+
+  @Override
+  public TypedScope typed() {
+    return this;
   }
 
   /** Whether this is the bottom of the lattice. */
@@ -102,26 +114,7 @@ public class TypedScope extends Scope implements StaticTypedScope<JSType> {
   }
 
   @Override
-  public Node getRootNode() {
-    return rootNode;
-  }
-
-  @Override
   public TypedScope getParent() {
-    return parent;
-  }
-
-  @Override
-  TypedScope getGlobalScope() {
-    TypedScope result = this;
-    while (result.getParent() != null) {
-      result = result.getParent();
-    }
-    return result;
-  }
-
-  @Override
-  public StaticTypedScope<JSType> getParentScope() {
     return parent;
   }
 
@@ -131,11 +124,11 @@ public class TypedScope extends Scope implements StaticTypedScope<JSType> {
   @Override
   public JSType getTypeOfThis() {
     if (isGlobal()) {
-      return ObjectType.cast(rootNode.getJSType());
+      return ObjectType.cast(getRootNode().getJSType());
     }
 
-    Preconditions.checkState(rootNode.isFunction());
-    JSType nodeType = rootNode.getJSType();
+    checkState(getRootNode().isFunction());
+    JSType nodeType = getRootNode().getJSType();
     if (nodeType != null && nodeType.isFunctionType()) {
       return nodeType.toMaybeFunctionType().getTypeOfThis();
     } else {
@@ -144,105 +137,25 @@ public class TypedScope extends Scope implements StaticTypedScope<JSType> {
     }
   }
 
-  Var declare(String name, Node nameNode, CompilerInput input) {
-    throw new IllegalStateException(
-        "Method declare(untyped) cannot be called on typed scopes.");
-  }
-
   TypedVar declare(String name, Node nameNode, JSType type, CompilerInput input) {
     return declare(name, nameNode, type, input, true);
   }
 
   TypedVar declare(String name, Node nameNode,
       JSType type, CompilerInput input, boolean inferred) {
-    Preconditions.checkState(name != null && !name.isEmpty());
-    TypedVar var = new TypedVar(inferred, name, nameNode, type, this, vars.size(), input);
-    vars.put(name, var);
+    checkState(name != null && !name.isEmpty());
+    TypedVar var = new TypedVar(inferred, name, nameNode, type, this, getVarCount(), input);
+    declareInternal(name, var);
     return var;
   }
 
   @Override
-  void undeclare(Var var) {
-    TypedVar tvar = (TypedVar) var;
-    Preconditions.checkState(tvar.scope == this);
-    Preconditions.checkState(vars.get(tvar.name) == tvar);
-    vars.remove(tvar.name);
+  TypedVar makeArgumentsVar() {
+    return TypedVar.makeArguments(this);
   }
 
-  @Override
-  public TypedVar getSlot(String name) {
-    return getVar(name);
-  }
-
-  @Override
-  public TypedVar getOwnSlot(String name) {
-    return vars.get(name);
-  }
-
-  @Override
-  public TypedVar getVar(String name) {
-    TypedScope scope = this;
-    while (scope != null) {
-      TypedVar var = scope.vars.get(name);
-      if (var != null) {
-        return var;
-      }
-      // Recurse up the parent Scope
-      scope = scope.parent;
-    }
-    return null;
-  }
-
-  public Var getArgumentsVar() {
-    throw new IllegalStateException("Method getArgumentsVar cannot be called on typed scopes.");
-  }
-
-  @Override
-  public boolean isDeclared(String name, boolean recurse) {
-    TypedScope scope = this;
-    while (true) {
-      if (scope.vars.containsKey(name)) {
-        return true;
-      }
-      if (scope.parent != null && recurse) {
-        scope = scope.parent;
-        continue;
-      }
-      return false;
-    }
-  }
-
-  @Override
-  public Iterator<TypedVar> getVars() {
-    return vars.values().iterator();
-  }
-
-  Iterable<Var> getVarIterable() {
-    throw new IllegalStateException("Method getVarIterable cannot be called on typed scopes.");
-  }
-
-  @Override
-  public Iterable<TypedVar> getAllSymbols() {
-    return Collections.unmodifiableCollection(vars.values());
-  }
-
-  @Override
-  public int getVarCount() {
-    return vars.size();
-  }
-
-  @Override
-  public boolean isGlobal() {
-    return parent == null;
-  }
-
-  @Override
-  public boolean isLocal() {
-    return parent != null;
-  }
-
-  public Iterator<TypedVar> getDeclarativelyUnboundVarsWithoutTypes() {
-    return Iterators.filter(getVars(), DECLARATIVELY_UNBOUND_VARS_WITHOUT_TYPES);
+  public Iterable<TypedVar> getDeclarativelyUnboundVarsWithoutTypes() {
+    return Iterables.filter(getVarIterable(), DECLARATIVELY_UNBOUND_VARS_WITHOUT_TYPES);
   }
 
   static interface TypeResolver {
@@ -263,22 +176,16 @@ public class TypedScope extends Scope implements StaticTypedScope<JSType> {
     this.typeResolver = resolver;
   }
 
-  public boolean isBlockScope() {
-    // TypedScope is not ES6 compatible yet, so always return false for now.
-    return false;
+  @SuppressWarnings("unchecked")
+  @Override
+  public JSType getNamespaceOrTypedefType(String typeName) {
+    StaticTypedSlot<JSType> slot = getSlot(typeName);
+    return slot == null ? null : slot.getType();
   }
 
-  public boolean isHoistScope() {
-    throw new IllegalStateException("Method isHoistScope cannot be called on typed scopes.");
-  }
-
-  public boolean isFunctionBlockScope() {
-    throw new IllegalStateException(
-        "Method isFunctionBlockScope cannot be called on typed scopes.");
-  }
-
-  public Scope getClosestHoistScope() {
-    throw new IllegalStateException(
-        "Method getClosestHoistScope cannot be called on typed scopes.");
+  @Override
+  public JSDocInfo getJsdocOfTypeDeclaration(String typeName) {
+    StaticTypedSlot<JSType> slot = getSlot(typeName);
+    return slot == null ? null : slot.getJSDocInfo();
   }
 }

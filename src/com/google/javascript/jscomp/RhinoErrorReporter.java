@@ -19,7 +19,6 @@ package com.google.javascript.jscomp;
 import com.google.common.collect.ImmutableMap;
 import com.google.javascript.rhino.ErrorReporter;
 import com.google.javascript.rhino.SimpleErrorReporter;
-
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.regex.Pattern;
@@ -35,6 +34,9 @@ class RhinoErrorReporter {
 
   static final DiagnosticType TYPE_PARSE_ERROR =
       DiagnosticType.warning("JSC_TYPE_PARSE_ERROR", "{0}");
+
+  static final DiagnosticType UNRECOGNIZED_TYPE_ERROR =
+      DiagnosticType.warning("JSC_UNRECOGNIZED_TYPE_ERROR", "{0}");
 
   // This is separate from TYPE_PARSE_ERROR because there are many instances of this warning
   // and it is unfeasible to fix them all right away.
@@ -61,6 +63,9 @@ class RhinoErrorReporter {
   static final DiagnosticType DUPLICATE_PARAM =
       DiagnosticType.error("JSC_DUPLICATE_PARAM", "Parse error. {0}");
 
+  static final DiagnosticType UNNECESSARY_ESCAPE =
+      DiagnosticType.disabled("JSC_UNNECESSARY_ESCAPE", "Parse error. {0}");
+
   static final DiagnosticType INVALID_PARAM =
       DiagnosticType.warning("JSC_INVALID_PARAM", "Parse error. {0}");
 
@@ -85,15 +90,17 @@ class RhinoErrorReporter {
       DiagnosticType.warning("INVALID_OCTAL_LITERAL",
           "This style of octal literal is not supported in strict mode.");
 
+  static final DiagnosticType STRING_CONTINUATION =
+      DiagnosticType.warning("JSC_STRING_CONTINUATION", "{0}");
+
   static final DiagnosticType ES6_FEATURE =
       DiagnosticType.error("ES6_FEATURE",
           "{0}. Use --language_in=ECMASCRIPT6 or ECMASCRIPT6_STRICT " +
-          "to enable ES6 features.");
+          "or higher to enable ES6 features.");
 
   static final DiagnosticType ES6_TYPED =
       DiagnosticType.error("ES6_TYPED",
-          "{0}. Use --language_in=ECMASCRIPT6_TYPED " +
-          "to enable ES6 typed features.");
+          "{0}. Use --language_in=ECMASCRIPT6_TYPED to enable ES6 typed features.");
 
   static final DiagnosticType MISPLACED_TYPE_SYNTAX =
       DiagnosticType.error("MISPLACED_TYPE_SYNTAX",
@@ -109,7 +116,7 @@ class RhinoErrorReporter {
    * holder {0} with a wild card that matches all possible strings.
    * Also put the any non-place-holder in quotes for regex matching later.
    */
-  private Pattern replacePlaceHolders(String s) {
+  private static Pattern replacePlaceHolders(String s) {
     s = Pattern.quote(s);
     return Pattern.compile(s.replaceAll("\\{\\d+\\}", "\\\\E.*\\\\Q"));
   }
@@ -120,12 +127,13 @@ class RhinoErrorReporter {
         ImmutableMap.<Pattern, DiagnosticType>builder()
             // Trailing comma
             .put(
-                replacePlaceHolders(
-                    "Trailing comma is not legal in an ECMA-262 object initializer"),
+                Pattern.compile("Trailing comma is not legal in an ECMA-262 object initializer"),
                 TRAILING_COMMA)
 
             // Duplicate parameter
             .put(replacePlaceHolders("Duplicate parameter name \"{0}\""), DUPLICATE_PARAM)
+
+            .put(Pattern.compile("Unnecessary escape:.*"), UNNECESSARY_ESCAPE)
 
             .put(Pattern.compile("^invalid param name.*"), INVALID_PARAM)
 
@@ -135,40 +143,41 @@ class RhinoErrorReporter {
                 BAD_JSDOC_ANNOTATION)
 
             .put(
-                Pattern.compile(
-                    "^\\QNon-JSDoc comment has annotations. "
-                        + "Did you mean to start it with '/**'?\\E"),
+                Pattern.compile("^" + Pattern.quote(
+                    "Non-JSDoc comment has annotations. "
+                        + "Did you mean to start it with '/**'?")),
                 JSDOC_IN_BLOCK_COMMENT)
 
             .put(
                 Pattern.compile(
-                    "^Keywords and reserved words" + " are not allowed as unquoted property.*"),
+                    "^Keywords and reserved words are not allowed as unquoted property.*"),
                 INVALID_ES3_PROP_NAME)
 
             .put(Pattern.compile("^Too many template parameters"), TOO_MANY_TEMPLATE_PARAMS)
 
             // Type annotation warnings.
             .put(
-                replacePlaceHolders(
-                    "Bad type annotation. Type annotations should have curly braces."),
+                Pattern.compile(".*Type annotations should have curly braces.*"),
                 JSDOC_MISSING_BRACES_WARNING)
 
-            .put(replacePlaceHolders("Missing type declaration."), JSDOC_MISSING_TYPE_WARNING)
+            .put(Pattern.compile("Missing type declaration\\."), JSDOC_MISSING_TYPE_WARNING)
+
+            // Unresolved types that aren't forward declared.
+            .put(Pattern.compile(".*Unknown type.*"), UNRECOGNIZED_TYPE_ERROR)
 
             // Type annotation errors.
-            .put(
-                Pattern.compile(
-                    "^Bad type annotation.*(?!Type annotations should have curly braces\\.)"),
-                TYPE_PARSE_ERROR)
+            .put(Pattern.compile("^Bad type annotation.*"), TYPE_PARSE_ERROR)
 
             // Parse tree too deep.
-            .put(replacePlaceHolders("Too deep recursion while parsing"), PARSE_TREE_TOO_DEEP)
+            .put(Pattern.compile("Too deep recursion while parsing"), PARSE_TREE_TOO_DEEP)
 
-            // Octal literals
+            // Old-style octal literals
             .put(Pattern.compile("^Octal .*literal.*"), INVALID_OCTAL_LITERAL)
 
+            .put(Pattern.compile("^String continuations.*"), STRING_CONTINUATION)
+
             .put(
-                Pattern.compile("^this language feature is only supported in es6 mode.*"),
+                Pattern.compile("^this language feature is only supported for ECMASCRIPT6 mode.*"),
                 ES6_FEATURE)
 
             .put(Pattern.compile("^type syntax is only supported in ES6 typed mode.*"), ES6_TYPED)

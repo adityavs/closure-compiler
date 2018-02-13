@@ -16,13 +16,8 @@
 
 package com.google.javascript.jscomp;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-
-import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -35,17 +30,23 @@ import java.util.TreeMap;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.zip.CRC32;
 
 /**
- * A {@link Compiler} pass for aliasing strings. String declarations
+ * A compiler pass for aliasing strings. String declarations
  * contribute to garbage collection, which becomes a problem in large
  * applications. Strings that should be aliased occur many times in the code,
  * or occur on codepaths that get executed frequently.
  *
+ * 2017/09/17 Notes:
+ *     - Turning on this pass usually hurts code size after gzip.
+ *     - It was originally written to deal with performance problems on some
+ *       older browser VMs.
+ *     - However, projects that make heavy use of jslayout may need to enable
+ *       this pass even for modern browsers, because jslayout generates so many
+ *       duplicate strings.
+ *
  */
-class AliasStrings extends AbstractPostOrderCallback
-    implements CompilerPass {
+class AliasStrings implements CompilerPass, NodeTraversal.Callback {
 
   private static final Logger logger =
       Logger.getLogger(AliasStrings.class.getName());
@@ -81,7 +82,7 @@ class AliasStrings extends AbstractPostOrderCallback
 
   /** package private.  This value is AND-ed with the hash function to allow
    * unit tests to reduce the range of hash values to test collision cases */
-  long unitTestHashReductionMask = ~0L;
+  int unitTestHashReductionMask = ~0;
 
   /**
    * Creates an instance.
@@ -115,7 +116,7 @@ class AliasStrings extends AbstractPostOrderCallback
     logger.fine("Aliasing common strings");
 
     // Traverse the tree and collect strings
-    NodeTraversal.traverse(compiler, root, this);
+    NodeTraversal.traverseEs6(compiler, root, this);
 
     // 1st edit pass: replace some strings with aliases
     replaceStringsWithAliases();
@@ -129,10 +130,22 @@ class AliasStrings extends AbstractPostOrderCallback
   }
 
   @Override
+  public boolean shouldTraverse(NodeTraversal nodeTraversal, Node n, Node parent) {
+    switch (n.getToken()) {
+      case TEMPLATELIT:
+      case TAGGED_TEMPLATELIT:
+      case TEMPLATELIT_SUB: // technically redundant, since it must be a child of the others
+        // TODO(bradfordcsmith): Consider replacing long and/or frequently occurring substrings
+        // within template literals with template substitutions.
+        return false;
+      default:
+        return true;
+    }
+  }
+
+  @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
-    if (n.isString() &&
-        !parent.isGetProp() &&
-        !parent.isRegExp()) {
+    if (n.isString() && !parent.isGetProp() && !parent.isRegExp()) {
 
       String str = n.getString();
 
@@ -154,23 +167,18 @@ class AliasStrings extends AbstractPostOrderCallback
         info.occurrences.add(occurrence);
         info.numOccurrences++;
 
-        if (t.inGlobalScope() || isInThrowExpression(n)) {
-          info.numOccurrencesInfrequentlyExecuted++;
-        }
-
         // The current module.
         JSModule module = t.getModule();
         if (info.numOccurrences != 1) {
           // Check whether the current module depends on the module containing
           // the declaration.
-          if (module != null &&
-              info.moduleToContainDecl != null &&
-              module != info.moduleToContainDecl &&
-              !moduleGraph.dependsOn(module, info.moduleToContainDecl)) {
+          if (module != null
+              && info.moduleToContainDecl != null
+              && module != info.moduleToContainDecl) {
             // We need to declare this string in the deepest module in the
             // module dependency graph that both of these modules depend on.
-            module = moduleGraph.getDeepestCommonDependency(
-                module, info.moduleToContainDecl);
+            module =
+                moduleGraph.getDeepestCommonDependencyInclusive(module, info.moduleToContainDecl);
           } else {
             // use the previously saved insertion location.
             return;
@@ -201,36 +209,6 @@ class AliasStrings extends AbstractPostOrderCallback
     return info;
   }
 
-  /**
-   * Is the {@link Node} currently within a 'throw' expression?
-   */
-  private static boolean isInThrowExpression(Node n) {
-    // Look up the traversal stack to find a THROW node
-    for (Node ancestor : n.getAncestors()) {
-      switch (ancestor.getType()) {
-        case Token.THROW:
-          return true;
-        case Token.IF:
-        case Token.WHILE:
-        case Token.DO:
-        case Token.FOR:
-        case Token.SWITCH:
-        case Token.CASE:
-        case Token.DEFAULT_CASE:
-        case Token.BLOCK:
-        case Token.SCRIPT:
-        case Token.FUNCTION:
-        case Token.TRY:
-        case Token.CATCH:
-        case Token.RETURN:
-        case Token.EXPR_RESULT:
-          // early exit - these nodes types can't be within a THROW
-          return false;
-      }
-    }
-    return false;
-  }
-
  /**
    * Replace strings with references to alias variables.
    */
@@ -259,13 +237,14 @@ class AliasStrings extends AbstractPostOrderCallback
       }
       String alias = info.getVariableName(entry.getKey());
       Node var = IR.var(IR.name(alias), IR.string(entry.getKey()));
+      var.useSourceInfoFromForTree(info.parentForNewVarDecl);
       if (info.siblingToInsertVarDeclBefore == null) {
         info.parentForNewVarDecl.addChildToFront(var);
       } else {
         info.parentForNewVarDecl.addChildBefore(
             var, info.siblingToInsertVarDeclBefore);
       }
-      compiler.reportCodeChange();
+      compiler.reportChangeToEnclosingScope(var);
     }
   }
 
@@ -276,13 +255,6 @@ class AliasStrings extends AbstractPostOrderCallback
    *  @param info Accumulated information about a string
    */
   private static boolean shouldReplaceWithAlias(String str, StringInfo info) {
-    // Optimize for application performance.  If there are any uses of the
-    // string that are not 'infrequent uses', assume they are frequent and
-    // create an alias.
-    if (info.numOccurrences > info.numOccurrencesInfrequentlyExecuted) {
-      return true;
-    }
-
     // Optimize for code size.  Are aliases smaller than strings?
     //
     // This logic optimizes for the size of uncompressed code, but it tends to
@@ -310,10 +282,11 @@ class AliasStrings extends AbstractPostOrderCallback
   private void replaceStringWithAliasName(StringOccurrence occurrence,
                                           String name,
                                           StringInfo info) {
+    Node nameNode = IR.name(name);
     occurrence.parent.replaceChild(occurrence.node,
-                                   IR.name(name));
+                                   nameNode);
     info.isAliased = true;
-    compiler.reportCodeChange();
+    compiler.reportChangeToEnclosingScope(nameNode);
   }
 
   /**
@@ -360,7 +333,6 @@ class AliasStrings extends AbstractPostOrderCallback
 
     final List<StringOccurrence> occurrences;
     int numOccurrences;
-    int numOccurrencesInfrequentlyExecuted;
 
     JSModule moduleToContainDecl;
     Node parentForNewVarDecl;
@@ -440,11 +412,9 @@ class AliasStrings extends AbstractPostOrderCallback
 
       // The identifier is not unique because we omitted part, so add a
       // checksum as a hashcode.
-      CRC32 crc32 = new CRC32();
-      crc32.update(s.getBytes(UTF_8));
-      long hash = crc32.getValue() & unitTestHashReductionMask;
+      int hash = s.hashCode() & unitTestHashReductionMask;
       sb.append('_');
-      sb.append(Long.toHexString(hash));
+      sb.append(Integer.toHexString(hash));
       String encoded = sb.toString();
       if (!usedHashedAliases.add(encoded)) {
         // A collision has been detected (which is very rare). Use the sequence

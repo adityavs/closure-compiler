@@ -16,9 +16,9 @@
 
 package com.google.javascript.jscomp;
 
-public final class DeclaredGlobalExternsOnWindowTest extends Es6CompilerTestCase {
-  private static final String WINDOW_DEFINITION =
-      "/** @constructor */ function Window(){}\nvar /** Window */ window;";
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
+
+public final class DeclaredGlobalExternsOnWindowTest extends TypeICompilerTestCase {
 
   @Override
   protected CompilerPass getProcessor(Compiler compiler) {
@@ -26,10 +26,12 @@ public final class DeclaredGlobalExternsOnWindowTest extends Es6CompilerTestCase
   }
 
   @Override
-  protected void setUp() {
-    allowExternsChanges(true);
-    enableTypeCheck(CheckLevel.ERROR);
-    runTypeCheckAfterProcessing = true;
+  protected void setUp() throws Exception {
+    super.setUp();
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2017);
+    allowExternsChanges();
+    this.mode = TypeInferenceMode.BOTH;
+    enableRunTypeCheckAfterProcessing();
   }
 
   @Override
@@ -38,11 +40,10 @@ public final class DeclaredGlobalExternsOnWindowTest extends Es6CompilerTestCase
   }
 
   public void testWindowProperty1a() {
-    testExternChanges("function Window(){} var a", "",
-        "function Window(){} var a; Window.prototype.a");
+    testExternChanges("var window; var a;", "", "var window;var a;window.a");
   }
 
-  // No "function Window(){};" so this is a no-op.
+  // No "var window;" so this is a no-op.
   public void testWindowProperty1b() {
     testExternChanges("var a", "", "var a");
   }
@@ -52,11 +53,11 @@ public final class DeclaredGlobalExternsOnWindowTest extends Es6CompilerTestCase
   }
 
   public void testWindowProperty3a() {
-    testExternChanges("function Window(){} function f() {}", "var b",
-        "function Window(){} function f(){} Window.prototype.f;");
+    testExternChanges("var window; function f() {}", "var b",
+        "var window;function f(){}window.f;");
   }
 
-  // No "function Window(){};" so this is a no-op.
+  // No "var window;" so this is a no-op.
   public void testWindowProperty3b() {
     testExternChanges("function f() {}", "var b", "function f(){}");
   }
@@ -66,58 +67,130 @@ public final class DeclaredGlobalExternsOnWindowTest extends Es6CompilerTestCase
   }
 
   public void testWindowProperty5a() {
-    testExternChanges("function Window(){} var x = function f() {}", "var b",
-        "function Window(){} var x=function f(){};Window.prototype.x;");
+    testExternChanges("var window; var x = function f() {}", "var b",
+        "var window;var x=function f(){};window.x;");
+    testExternChanges("var window; var x = function () {}", "var b",
+        "var window;var x=function(){};window.x;");
   }
 
-  // No "function Window(){};" so this is a no-op.
+  // No "var window;" so this is a no-op.
   public void testWindowProperty5b() {
     testExternChanges("var x = function f() {}", "var b", "var x=function f(){}");
   }
 
+  public void testWindowProperty5c() {
+    testExternChanges(
+        "var window; var x = ()=>{}",
+        "var b",
+        "var window;var x=()=>{};window.x;");
+  }
+
   public void testWindowProperty6() {
-    testExternChanges("function Window(){} /** @const {number} */ var n;", "",
-        "function Window(){}\n" +
-        "/** @const {number} */ var n;\n" +
-        "/** @const {number} @suppress {duplicate} */ Window.prototype.n;");
+    testExternChanges("var window; /** @const {number} */ var n;", "",
+        lines(
+            "var window;",
+            "/** @const {number} */ var n;",
+            "/** @const {number} @suppress {const,duplicate} */ window.n;"));
   }
 
   public void testWindowProperty7() {
-    testExternChanges("function Window(){} /** @const */ var ns = {}", "",
-        "function Window(){}\n" +
-        "/** @const */ var ns = {};\n" +
-        "/** @suppress {duplicate} */ Window.prototype.ns = ns;");
+    testExternChanges("var window; /** @const */ var ns = {}", "",
+        lines(
+            "var window;",
+            "/** @const */ var ns = {};",
+            "/** @suppress {const,duplicate} @const */ window.ns = ns;"));
+  }
+
+  public void testNameAliasing() {
+    testExternChanges(
+        lines(
+            "var window;",
+            "/** @const */",
+            "var ns = {};",
+            "/** @const */",
+            "var ns2 = ns;"),
+        "",
+        lines(
+            "var window;",
+            "/** @const */",
+            "var ns = {};",
+            "/** @const */",
+            "var ns2 = ns;",
+            "/** @suppress {const,duplicate} @const */",
+            "window.ns = ns;",
+            "/** @suppress {const,duplicate} @const */",
+            "window.ns2 = ns;"));
+  }
+
+  public void testQualifiedNameAliasing() {
+    testExternChanges(
+        lines(
+            "var window;",
+            "/** @const */",
+            "var ns = {};",
+            "/** @type {number} A very important constant */",
+            "ns.THE_NUMBER;",
+            "/** @const */",
+            "var num = ns.THE_NUMBER;"),
+        "",
+        lines(
+            "var window;",
+            "/** @const */",
+            "var ns = {};",
+            "/** @type {number} A very important constant */",
+            "ns.THE_NUMBER;",
+            "/** @const */",
+            "var num = ns.THE_NUMBER;",
+            "/** @suppress {const,duplicate} @const */",
+            "window.ns=ns;",
+            "/** @suppress {const,duplicate} @const */",
+            "window.num = ns.THE_NUMBER;"));
   }
 
   public void testWindowProperty8() {
-    testExternChanges("function Window(){} /** @constructor */ function Foo() {}", "",
-        "function Window(){}\n" +
-        "/** @constructor */ function Foo(){}\n" +
-        "/** @constructor @suppress {duplicate} */ Window.prototype.Foo = Foo;");
+    testExternChanges("var window; /** @constructor */ function Foo() {}", "",
+        lines(
+            "var window;",
+            "/** @constructor */ function Foo(){}",
+            "/** @constructor @suppress {const,duplicate} */ window.Foo = Foo;"));
   }
 
+  public void testEnumWindowProperty() {
+    testExternChanges("var window; /** @enum {string} */ var Enum = { A: 'str' };", "",
+        lines(
+            "var window;",
+            "/** @enum {string} */ var Enum = { A: 'str' };",
+            "/** @enum {string} @suppress {const,duplicate} */ window.Enum = Enum;"));
+  }
 
   /**
-   * Test to make sure the compiler knows the type of "Window.prototype.x"
+   * Test to make sure the compiler knows the type of "window.x"
    * is the same as that of "x".
    */
   public void testWindowPropertyWithJsDoc() {
     testSame(
-        WINDOW_DEFINITION + "/** @type {string} */ var x;",
-        "/** @param {number} n*/\n" +
-        "function f(n) {}\n" +
-        "f(window.x);\n",
-        TypeValidator.TYPE_MISMATCH_WARNING);
+        externs(lines(
+            MINIMAL_EXTERNS,
+            "var window;",
+            "/** @type {string} */ var x;")),
+        srcs(lines(
+            "/** @param {number} n*/",
+            "function f(n) {}",
+            "f(window.x);")),
+        warningOtiNti(TypeValidator.TYPE_MISMATCH_WARNING, NewTypeInference.INVALID_ARGUMENT_TYPE));
   }
 
   public void testEnum() {
+    // TODO(sdh): figure out why NTI doesn't recognize props if 'window' not explicitly declared
+    this.mode = TypeInferenceMode.OTI_ONLY;
     testSame(
-        WINDOW_DEFINITION + "/** @enum {string} */ var Enum = {FOO: 'foo', BAR: 'bar'};",
-        "/** @param {Enum} e*/\n" +
-        "function f(e) {}\n" +
-        "f(window.Enum.FOO);\n" +
-        "f(7);",
-        TypeValidator.TYPE_MISMATCH_WARNING);
+        externs(lines(
+            MINIMAL_EXTERNS,
+            "/** @enum {string} */ var Enum = {FOO: 'foo', BAR: 'bar'};")),
+        srcs(lines(
+            "/** @param {Enum} e*/",
+            "function f(e) {}",
+            "f(window.Enum.FOO);")));
   }
 
   /**
@@ -126,20 +199,24 @@ public final class DeclaredGlobalExternsOnWindowTest extends Es6CompilerTestCase
    */
   public void testConstructorIsSameType() {
     testSame(
-        WINDOW_DEFINITION + "/** @constructor */ function Foo() {}\n",
-        "/** @param {!Foo} f*/\n" +
-        "function bar(f) {}\n" +
-        "bar(new window.Foo());\n" +
-        "bar(7);",
-        TypeValidator.TYPE_MISMATCH_WARNING);
+        externs(lines(
+            MINIMAL_EXTERNS,
+            "var window;",
+            "/** @constructor */ function Foo() {}")),
+        srcs(lines(
+            "/** @param {!window.Foo} f*/",
+            "function bar(f) {}",
+            "bar(new Foo());")));
 
+    // TODO(sdh): figure out why NTI doesn't recognize props if 'window' not explicitly declared
+    this.mode = TypeInferenceMode.OTI_ONLY;
     testSame(
-        WINDOW_DEFINITION + "/** @constructor */ function Foo() {}\n",
-        "/** @param {!Window.prototype.Foo} f*/\n" +
-        "function bar(f) {}\n" +
-        "bar(new Foo());\n" +
-        "bar(7);",
-        TypeValidator.TYPE_MISMATCH_WARNING);
-
+        externs(lines(
+            MINIMAL_EXTERNS,
+            "/** @constructor */ function Foo() {}")),
+        srcs(lines(
+            "/** @param {!Foo} f*/",
+            "function bar(f) {}",
+            "bar(new window.Foo());")));
   }
 }

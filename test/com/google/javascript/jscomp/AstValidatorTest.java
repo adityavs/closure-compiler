@@ -17,7 +17,11 @@
 package com.google.javascript.jscomp;
 
 import com.google.javascript.jscomp.AstValidator.ViolationHandler;
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
+import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.InputId;
+import com.google.javascript.rhino.JSDocInfoBuilder;
+import com.google.javascript.rhino.JSTypeExpression;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.SimpleSourceFile;
 import com.google.javascript.rhino.Token;
@@ -51,20 +55,61 @@ public final class AstValidatorTest extends CompilerTestCase {
 
   @Override
   protected void setUp() throws Exception {
-    super.enableAstValidation(false);
-    super.disableNormalize();
-    super.enableLineNumberCheck(false);
     super.setUp();
+    disableAstValidation();
+    disableNormalize();
+    disableLineNumberCheck();
+  }
+
+  public void testClass() {
+    valid(lines(
+        "class C {",
+        "  get m1() {return 1}",
+        "  set m1(a) {}",
+        "  m2(a) {}",
+        "  ['m2']() {}",
+        "  [m2]() {}",
+        "}"));
+
+    Node c = new Node(Token.CLASS, IR.name("C"), IR.empty());
+    Node members = new Node(Token.CLASS_MEMBERS);
+    c.addChildToBack(members);
+    expectValid(c, Check.STATEMENT);
+    Node method1 = new Node(
+        Token.MEMBER_FUNCTION_DEF, IR.function(IR.name(""), IR.paramList(), IR.block()));
+    members.addChildToBack(method1);
+    expectInvalid(c, Check.STATEMENT);
+
+    members.detachChildren();
+
+    // Invalid empty string
+    Node method2 = Node.newString(Token.MEMBER_FUNCTION_DEF, "");
+    method2.addChildToBack(IR.function(IR.name(""), IR.paramList(), IR.block()));
+    members.addChildToBack(method2);
+
+    expectInvalid(c, Check.STATEMENT);
   }
 
   public void testForIn() {
     valid("for(var a in b);");
+    valid("for(let a in b);");
+    valid("for(const a in b);");
     valid("for(a in b);");
     valid("for(a in []);");
     valid("for(a in {});");
   }
 
+  public void testForOf() {
+    valid("for(var a of b);");
+    valid("for(let a of b);");
+    valid("for(const a of b);");
+    valid("for(a of b);");
+    valid("for(a of []);");
+    valid("for(a of {});");
+  }
+
   public void testQuestionableForIn() {
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT5);
     setExpectParseWarningsThisTest();
     valid("for(var a = 1 in b);");
   }
@@ -104,11 +149,199 @@ public final class AstValidatorTest extends CompilerTestCase {
     expectInvalid(n, Check.SCRIPT);
   }
 
+  public void testValidConst() {
+    valid("const x = r;");
+    valid("const [x] = r;");
+    valid("const {x} = r;");
+    valid("const x = r, y = r;");
+    valid("const {x} = r, y = r;");
+    valid("const x = r, {y} = r;");
+  }
+
+  public void testInvalidConst() {
+    Node n = new Node(Token.CONST);
+    expectInvalid(n, Check.STATEMENT);
+
+    n.addChildToBack(IR.name("x"));
+    expectInvalid(n, Check.STATEMENT);
+
+    n = new Node(Token.CONST);
+    n.addChildToBack(new Node(Token.DESTRUCTURING_LHS));
+    n.getFirstChild().addChildToBack(new Node(Token.OBJECT_PATTERN));
+
+    expectInvalid(n, Check.STATEMENT);
+  }
+
+  public void testNewTargetIsValidExpression() {
+    Node n = new Node(Token.NEW_TARGET);
+    expectValid(n, Check.EXPRESSION);
+  }
+
+  public void testCastOnLeftSideOfAssign() {
+    JSDocInfoBuilder jsdoc = new JSDocInfoBuilder(false);
+    jsdoc.recordType(new JSTypeExpression(IR.string("number"), "<AstValidatorTest>"));
+    Node n = IR.exprResult(
+        new Node(
+            Token.ASSIGN,
+            IR.cast(IR.name("x"), jsdoc.build()),
+            IR.number(0)));
+    expectValid(n, Check.STATEMENT);
+  }
+
   public void testInvalidEmptyStatement() {
     Node n = new Node(Token.EMPTY, new Node(Token.TRUE));
     expectInvalid(n, Check.STATEMENT);
     n.detachChildren();
     expectValid(n, Check.STATEMENT);
+  }
+
+  public void testInvalidNumberStatement() {
+    Node n = IR.number(1);
+    expectInvalid(n, Check.STATEMENT);
+    n = IR.exprResult(n);
+    expectValid(n, Check.STATEMENT);
+  }
+
+  public void testValidRestParameter() {
+    setLanguage(LanguageMode.ECMASCRIPT_2015, LanguageMode.ECMASCRIPT5);
+    valid("function f(a,...rest){}");
+    valid("function f(a,...[re,...st]){}");
+  }
+
+  public void testDefaultParameter() {
+    setLanguage(LanguageMode.ECMASCRIPT_2015, LanguageMode.ECMASCRIPT5);
+    valid("function f(a = 0, b){}");
+  }
+
+  public void testAwaitExpression() {
+    setLanguage(LanguageMode.ECMASCRIPT_NEXT, LanguageMode.ECMASCRIPT5);
+    Node awaitNode = new Node(Token.AWAIT);
+    awaitNode.addChildToBack(IR.number(1));
+    Node parentFunction =
+        IR.function(IR.name("foo"), IR.paramList(), IR.block(IR.returnNode(awaitNode)));
+    parentFunction.setIsAsyncFunction(true);
+    expectValid(awaitNode, Check.EXPRESSION);
+  }
+
+  public void testAwaitExpressionNonAsyncFunction() {
+    setLanguage(LanguageMode.ECMASCRIPT_NEXT, LanguageMode.ECMASCRIPT5);
+    Node awaitNode = new Node(Token.AWAIT);
+    awaitNode.addChildToBack(IR.number(1));
+    Node parentFunction =
+        IR.function(IR.name("foo"), IR.paramList(), IR.block(IR.returnNode(awaitNode)));
+    parentFunction.setIsAsyncFunction(false);
+    expectInvalid(awaitNode, Check.EXPRESSION);
+  }
+
+  public void testAwaitExpressionNoFunction() {
+    setLanguage(LanguageMode.ECMASCRIPT_NEXT, LanguageMode.ECMASCRIPT5);
+    Node n = new Node(Token.AWAIT);
+    n.addChildToBack(IR.number(1));
+    expectInvalid(n, Check.EXPRESSION);
+  }
+
+  public void testInvalidArrayPattern0() {
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2015);
+
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2015);
+
+    // [...x = 1] = [];
+    Node n = IR.assign(
+        new Node(Token.ARRAY_PATTERN,
+            new Node(Token.REST,
+                new Node(Token.DEFAULT_VALUE,
+                    IR.name("x"), IR.arraylit()))),
+        IR.arraylit());
+    expectInvalid(n, Check.EXPRESSION);
+  }
+
+  public void testValidDestructuringAssignment0() {
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2015);
+    valid("var [x] = obj;");
+    valid("var [x = 1] = obj;");
+    valid("var [...y] = obj;");
+    valid("var [x, ...y] = obj;");
+
+    valid("[x] = [];");
+    valid("[x = 1] = [];");
+    valid("[x.y] = [];");
+    valid("[x.y = 1] = [];");
+    valid("[x['y']] = [];");
+    valid("[x['y'] = 1] = [];");
+    valid("[x().y] = [];");
+    valid("[x().y = 1] = [];");
+    valid("[x()['y']] = [];");
+    valid("[x()['y'] = 1] = [];");
+
+    valid("([...y] = obj);");
+    valid("([x, ...y] = obj);");
+    valid("([...this.x] = obj);");
+    valid("([...this['x']] = obj);");
+    valid("([...x.y] = obj);");
+    valid("([...x['y']] = obj);");
+    valid("([...x().y] = obj);");
+    valid("([...x()['y']] = obj);");
+  }
+
+  public void testValidDestructuringAssignment1() {
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2015);
+    valid("var {a:b} = obj;");
+    valid("({a:b} = obj);");
+    valid("({a:b.c} = obj);");
+    valid("({a:b().c} = obj);");
+    valid("({a:b['c']} = obj);");
+    valid("({a:b()['c']} = obj);");
+    valid("({a:b.c = 1} = obj);");
+    valid("({a:b().c = 1} = obj);");
+    valid("({a:b['c'] = 1} = obj);");
+    valid("({a:b()['c'] = 1} = obj);");
+  }
+
+  public void testValidDestructuringAssignment2() {
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2015);
+    valid("var {['a']:b} = obj;");
+    valid("({['a']:b} = obj);");
+    valid("({['a']:this.b} = obj);");
+    valid("({['a']:b.c} = obj);");
+    valid("({['a']:b.c = 1} = obj);");
+    valid("({['a']:b().c} = obj);");
+    valid("({['a']:b().c = 1} = obj);");
+    valid("({['a']:b['c']} = obj);");
+    valid("({['a']:b['c'] = 1} = obj);");
+    valid("({['a']:b()['c']} = obj);");
+    valid("({['a']:b()['c'] = 1} = obj);");
+  }
+
+  public void testObjectRestAssignment() {
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_NEXT);
+    valid("var {a, ...rest} = obj;");
+    valid("({a:b, ...rest} = obj);");
+    valid("({a:b.c, ...rest} = obj);");
+    valid("({a:b().c, ...rest} = obj);");
+    valid("({a:b['c'], ...rest} = obj);");
+    valid("({a:b()['c'], ...rest} = obj);");
+    valid("({a:b.c = 1, ...rest} = obj);");
+    valid("({a:b().c = 1, ...rest} = obj);");
+    valid("({a:b['c'] = 1, ...rest} = obj);");
+    valid("({a:b()['c'] = 1, ...rest} = obj);");
+  }
+
+  public void testInvalidDestructuringAssignment() {
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2015);
+
+    Node n = IR.assign(
+        new Node(Token.OBJECT_PATTERN, new Node(Token.ARRAY_PATTERN)), IR.objectlit());
+    expectInvalid(n, Check.EXPRESSION);
+
+    n = IR.assign(
+        new Node(Token.ARRAY_PATTERN, IR.computedProp(IR.string("x"), IR.number(1))),
+        IR.objectlit());
+    expectInvalid(n, Check.EXPRESSION);
+
+    Node stringkey = IR.stringKey("x");
+    stringkey.addChildToFront(IR.computedProp(IR.string("x"), IR.number(1)));
+    n = IR.assign(new Node(Token.OBJECT_PATTERN, stringkey), IR.objectlit());
+    expectInvalid(n, Check.EXPRESSION);
   }
 
   private void valid(String code) {

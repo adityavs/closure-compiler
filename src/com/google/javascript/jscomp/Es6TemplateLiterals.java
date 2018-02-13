@@ -15,10 +15,19 @@
  */
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkState;
+import static com.google.javascript.jscomp.Es6ToEs3Util.createGenericType;
+import static com.google.javascript.jscomp.Es6ToEs3Util.createType;
+import static com.google.javascript.jscomp.Es6ToEs3Util.withType;
+
+import com.google.javascript.jscomp.parsing.JsDocInfoParser;
 import com.google.javascript.rhino.IR;
+import com.google.javascript.rhino.JSDocInfoBuilder;
+import com.google.javascript.rhino.JSTypeExpression;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
+import com.google.javascript.rhino.TypeI;
+import com.google.javascript.rhino.TypeIRegistry;
+import com.google.javascript.rhino.jstype.JSTypeNative;
 
 /**
  * Helper class for transpiling ES6 template literals.
@@ -33,18 +42,20 @@ class Es6TemplateLiterals {
    *
    * @param n A TEMPLATELIT node that is not prefixed with a tag
    */
-  static void visitTemplateLiteral(NodeTraversal t, Node n) {
+  static void visitTemplateLiteral(NodeTraversal t, Node n, boolean addTypes) {
+    TypeIRegistry registry = t.getCompiler().getTypeIRegistry();
+    TypeI stringType = createType(addTypes, registry, JSTypeNative.STRING_TYPE);
     int length = n.getChildCount();
     if (length == 0) {
-      n.getParent().replaceChild(n, IR.string("\"\""));
+      n.replaceWith(withType(IR.string("\"\""), stringType));
     } else {
       Node first = n.removeFirstChild();
-      Preconditions.checkState(first.isString());
+      checkState(first.isString());
       if (length == 1) {
-        n.getParent().replaceChild(n, first);
+        n.replaceWith(first);
       } else {
         // Add the first string with the first substitution expression
-        Node add = IR.add(first, n.removeFirstChild().removeFirstChild());
+        Node add = withType(IR.add(first, n.removeFirstChild().removeFirstChild()), n.getTypeI());
         // Process the rest of the template literal
         for (int i = 2; i < length; i++) {
           Node child = n.removeFirstChild();
@@ -54,22 +65,24 @@ class Es6TemplateLiterals {
             } else if (i == 2 && first.getString().isEmpty()) {
               // So that `${hello} world` gets translated into (hello + " world")
               // instead of ("" + hello + " world").
-              add = add.getChildAtIndex(1).detachFromParent();
+              add = add.getSecondChild().detach();
             }
           }
-          add = IR.add(add, child.isString() ? child : child.removeFirstChild());
+          add =
+              withType(
+                  IR.add(add, child.isString() ? child : child.removeFirstChild()), n.getTypeI());
         }
-        n.getParent().replaceChild(n, add.useSourceInfoIfMissingFromForTree(n));
+        n.replaceWith(add.useSourceInfoIfMissingFromForTree(n));
       }
     }
-    t.getCompiler().reportCodeChange();
+    t.reportCodeChange();
   }
 
   /**
    * Converts tag`a\tb${bar}` to:
    *   // A global (module) scoped variable
-   *   var $jscomp$templatelit$0 = ["a\tb"];    // cooked string array
-   *   $jscomp$templatelit$0["raw"] = ["a\\tb"]; // raw string array
+   *   var $jscomp$templatelit$0 = ["a\tb"];   // cooked string array
+   *   $jscomp$templatelit$0.raw = ["a\\tb"];  // raw string array
    *   ...
    *   // A call to the tagging function
    *   tag($jscomp$templatelit$0, bar);
@@ -78,27 +91,51 @@ class Es6TemplateLiterals {
    *
    * @param n A TAGGED_TEMPLATELIT node
    */
-  static void visitTaggedTemplateLiteral(NodeTraversal t, Node n) {
+  static void visitTaggedTemplateLiteral(NodeTraversal t, Node n, boolean addTypes) {
+    TypeIRegistry registry = t.getCompiler().getTypeIRegistry();
+    TypeI stringType = createType(addTypes, registry, JSTypeNative.STRING_TYPE);
+    TypeI arrayType = createGenericType(addTypes, registry, JSTypeNative.ARRAY_TYPE, stringType);
+    TypeI templateArrayType =
+        createType(addTypes, registry, JSTypeNative.I_TEMPLATE_ARRAY_TYPE);
+
     Node templateLit = n.getLastChild();
     // Prepare the raw and cooked string arrays.
-    Node raw = createRawStringArray(templateLit);
-    Node cooked = createCookedStringArray(templateLit);
+    Node raw = createRawStringArray(templateLit, arrayType, stringType);
+    Node cooked = createCookedStringArray(templateLit, templateArrayType, stringType);
+
+    // Specify the type of the first argument to be ITemplateArray.
+    JSTypeExpression nonNullSiteObject = new JSTypeExpression(
+        JsDocInfoParser.parseTypeString("!ITemplateArray"), "<Es6TemplateLiterals.java>");
+    JSDocInfoBuilder info = new JSDocInfoBuilder(false);
+    info.recordType(nonNullSiteObject);
+    Node siteObject = withType(IR.cast(cooked, info.build()), templateArrayType);
 
     // Create a variable representing the template literal.
-    Node callsiteId = IR.name(
-        TEMPLATELIT_VAR + t.getCompiler().getUniqueNameIdSupplier().get());
-    Node var = IR.var(callsiteId, cooked).useSourceInfoIfMissingFromForTree(n);
-    Node script = NodeUtil.getEnclosingType(n, Token.SCRIPT);
-    script.addChildrenToFront(var);
+    Node callsiteId =
+        withType(
+            IR.name(TEMPLATELIT_VAR + t.getCompiler().getUniqueNameIdSupplier().get()),
+            templateArrayType);
+    Node var = IR.var(callsiteId, siteObject).useSourceInfoIfMissingFromForTree(n);
+    Node script = NodeUtil.getEnclosingScript(n);
+    script.addChildToFront(var);
+    t.reportCodeChange(var);
 
     // Define the "raw" property on the introduced variable.
-    Node defineRaw = IR.exprResult(IR.assign(IR.getelem(
-        callsiteId.cloneNode(), IR.string("raw")), raw))
+    Node defineRaw =
+        IR.exprResult(
+                withType(
+                    IR.assign(
+                        withType(
+                            IR.getprop(
+                                callsiteId.cloneNode(), withType(IR.string("raw"), stringType)),
+                            arrayType),
+                        raw),
+                    arrayType))
             .useSourceInfoIfMissingFromForTree(n);
     script.addChildAfter(defineRaw, var);
 
     // Generate the call expression.
-    Node call = IR.call(n.removeFirstChild(), callsiteId.cloneNode());
+    Node call = withType(IR.call(n.removeFirstChild(), callsiteId.cloneNode()), n.getTypeI());
     for (Node child = templateLit.getFirstChild(); child != null; child = child.getNext()) {
       if (!child.isString()) {
         call.addChildToBack(child.removeFirstChild());
@@ -106,26 +143,28 @@ class Es6TemplateLiterals {
     }
     call.useSourceInfoIfMissingFromForTree(templateLit);
     call.putBooleanProp(Node.FREE_CALL, !call.getFirstChild().isGetProp());
-    n.getParent().replaceChild(n, call);
-    t.getCompiler().reportCodeChange();
+    n.replaceWith(call);
+    t.reportCodeChange();
   }
 
-  private static Node createRawStringArray(Node n) {
-    Node array = IR.arraylit();
+  private static Node createRawStringArray(Node n, TypeI arrayType, TypeI stringType) {
+    Node array = withType(IR.arraylit(), arrayType);
     for (Node child = n.getFirstChild(); child != null; child = child.getNext()) {
       if (child.isString()) {
-        array.addChildToBack(IR.string((String) child.getProp(Node.RAW_STRING_VALUE)));
+        array.addChildToBack(
+            withType(IR.string((String) child.getProp(Node.RAW_STRING_VALUE)), stringType));
       }
     }
     return array;
   }
 
-  private static Node createCookedStringArray(Node n) {
-    Node array = IR.arraylit();
+  private static Node createCookedStringArray(Node n, TypeI templateArrayType, TypeI stringType) {
+    Node array = withType(IR.arraylit(), templateArrayType);
     for (Node child = n.getFirstChild(); child != null; child = child.getNext()) {
       if (child.isString()) {
-        Node string = IR.string(cookString((String) child.getProp(Node.RAW_STRING_VALUE)));
-        string.putBooleanProp(Node.COOKED_STRING, true);
+        Node string =
+            withType(
+                IR.string(cookString((String) child.getProp(Node.RAW_STRING_VALUE))), stringType);
         array.addChildToBack(string);
       }
     }
@@ -141,49 +180,47 @@ class Es6TemplateLiterals {
     StringBuilder sb = new StringBuilder();
     for (int i = 0; i < s.length();) {
       char c = s.charAt(i++);
-      switch (c) {
-        case '\\':
-          char c2 = s.charAt(i++);
-          switch (c2) {
-            // Strip line continuation.
-            case '\n':
-            case '\u2028':
-            case '\u2029':
-              break;
-            case '\r':
-              // \ \r \n should be stripped as one
-              if (s.charAt(i + 1) == '\n') {
-                i++;
-              }
-              break;
+      if (c == '\\') {
+        char c2 = s.charAt(i++);
+        switch (c2) {
+          case 't':
+            sb.append('\t');
+            break;
+          case 'n':
+            sb.append('\n');
+            break;
+          case 'r':
+            sb.append('\r');
+            break;
+          case 'f':
+            sb.append('\f');
+            break;
+          case 'b':
+            sb.append('\b');
+            break;
+          case 'u':
+            int unicodeValue = Integer.parseInt(s.substring(i, i + 4), 16);
+            sb.append((char) unicodeValue);
+            i += 4;
+            break;
+          // Strip line continuation.
+          case '\n':
+          case '\u2028':
+          case '\u2029':
+            break;
+          case '\r':
+            // \ \r \n should be stripped as one
+            if (s.charAt(i + 1) == '\n') {
+              i++;
+            }
+            break;
 
-            default:
-              sb.append(c);
-              sb.append(c2);
-          }
-          break;
-
-        // Whitespace
-        case '\n':
-          sb.append("\\n");
-          break;
-        // <CR><LF> and <CR> LineTerminatorSequences are normalized to <LF>
-        // for both TV and TRV.
-        case '\r':
-          if (s.charAt(i) == '\n') {
-            i++;
-          }
-          sb.append("\\n");
-          break;
-        case '\u2028':
-          sb.append("\\u2028");
-          break;
-        case '\u2029':
-          sb.append("\\u2029");
-          break;
-
-        default:
-          sb.append(c);
+          default:
+            sb.append(c);
+            sb.append(c2);
+        }
+      } else {
+        sb.append(c);
       }
     }
     return sb.toString();

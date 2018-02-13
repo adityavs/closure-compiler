@@ -16,12 +16,14 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
-
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 
 /**
  * Records all of the symbols and properties that should be exported.
@@ -44,8 +46,8 @@ class FindExportableNodes extends AbstractPostOrderCallback {
 
   static final DiagnosticType NON_GLOBAL_ERROR =
       DiagnosticType.error("JSC_NON_GLOBAL_ERROR",
-          "@export only applies to symbols/properties defined in the " +
-          "global scope.");
+          "@export only applies to symbols/properties defined in the "
+          + "global scope.");
 
   static final DiagnosticType EXPORT_ANNOTATION_NOT_ALLOWED =
       DiagnosticType.error("JSC_EXPORT_ANNOTATION_NOT_ALLOWED",
@@ -54,11 +56,15 @@ class FindExportableNodes extends AbstractPostOrderCallback {
   private final AbstractCompiler compiler;
 
   /**
-   * It's convenient to be able to iterate over exports in the order in which
-   * they are encountered.
+   * The set of node with @export annotations and their associated fully qualified names
    */
-  private final LinkedHashMap<String, GenerateNodeContext> exports =
-       new LinkedHashMap<>();
+  private final LinkedHashMap<String, Node> exports = new LinkedHashMap<>();
+
+  /**
+   * The set of property names associated with @export annotations that do not have
+   * an associated fully qualified name.
+   */
+  private final LinkedHashSet<String> localExports = new LinkedHashSet<>();
 
   private final boolean allowLocalExports;
 
@@ -82,77 +88,98 @@ class FindExportableNodes extends AbstractPostOrderCallback {
         }
       }
 
+      Mode mode = null;
       String export = null;
-      GenerateNodeContext context = null;
+      Node context = null;
 
-      switch (n.getType()) {
-        case Token.FUNCTION:
+      switch (n.getToken()) {
+        case FUNCTION:
+        case CLASS:
           if (parent.isScript()) {
-            export = NodeUtil.getFunctionName(n);
-            context = new GenerateNodeContext(n, Mode.EXPORT);
+            export = NodeUtil.getName(n);
+            context = n;
+            mode = Mode.EXPORT;
           }
           break;
 
-        case Token.CLASS:
-          if (parent.isScript()) {
-            export = NodeUtil.getClassName(n);
-            context = new GenerateNodeContext(n, Mode.EXPORT);
-          }
-          break;
-
-        case Token.MEMBER_FUNCTION_DEF:
-          export = n.getString();
-          context = new GenerateNodeContext(n, Mode.EXPORT);
-          break;
-
-        case Token.ASSIGN:
+        case ASSIGN:
           Node grandparent = parent.getParent();
           if (parent.isExprResult() && !n.getLastChild().isAssign()) {
             if (grandparent != null
                 && grandparent.isScript()
                 && n.getFirstChild().isQualifiedName()) {
               export = n.getFirstChild().getQualifiedName();
-              context = new GenerateNodeContext(n, Mode.EXPORT);
+              context = n;
+              mode = Mode.EXPORT;
             } else if (allowLocalExports && n.getFirstChild().isGetProp()) {
               Node target = n.getFirstChild();
               export = target.getLastChild().getString();
-              context = new GenerateNodeContext(n, Mode.EXTERN);
+              mode = Mode.EXTERN;
             }
           }
           break;
 
-        case Token.VAR:
-        case Token.LET:
-        case Token.CONST:
+        case VAR:
+        case LET:
+        case CONST:
           if (parent.isScript()) {
-            if (n.getFirstChild().hasChildren() &&
-                !n.getFirstChild().getFirstChild().isAssign()) {
+            if (n.getFirstChild().hasChildren() && !n.getFirstFirstChild().isAssign()) {
               export = n.getFirstChild().getString();
-              context = new GenerateNodeContext(n, Mode.EXPORT);
+              context = n;
+              mode = Mode.EXPORT;
             }
           }
           break;
 
-        case Token.GETPROP:
+        case GETPROP: {
+          // TODO(b/63582201): currently, the IF body is executed even for code in the global
+          // scope, e.g., when the pass looks at code transpiled from ES6 that uses getters.
+          // This means that the top-level code we want to rewrite works by accident, only when
+          // allowLocalExports happens to be true.
           if (allowLocalExports && parent.isExprResult()) {
             export = n.getLastChild().getString();
-            context = new GenerateNodeContext(n, Mode.EXTERN);
+            mode = Mode.EXTERN;
           }
           break;
+        }
 
-        case Token.STRING_KEY:
-        case Token.GETTER_DEF:
-        case Token.SETTER_DEF:
+        case MEMBER_FUNCTION_DEF:
+          if (parent.getParent().isClass()) {
+            export = n.getString();
+            context = n;
+            mode = Mode.EXPORT;
+            break;
+          }
+          // fallthrough
+
+        case STRING_KEY:
+        case GETTER_DEF:
+        case SETTER_DEF:
           if (allowLocalExports) {
             export = n.getString();
-            context = new GenerateNodeContext(n, Mode.EXTERN);
+            mode = Mode.EXTERN;
           }
+          break;
+        default:
           break;
       }
 
       if (export != null) {
-        exports.put(export, context);
-      } else {
+        if (mode == Mode.EXPORT) {
+          checkNotNull(context);
+          exports.put(export, context);
+        } else {
+          checkState(context == null);
+          checkState(mode == Mode.EXTERN);
+          checkState(!export.isEmpty());
+          localExports.add(export);
+        }
+      }
+      // Silently ignore exports of the form:
+      // /** @export */ Foo.prototype.myprop;
+      // They are currently used on interfaces and records and have no effect.
+      // If we cleanup the code base in the future, we can warn again.
+      else if (!(n.isGetProp() && parent.isExprResult())) {
         // Don't produce extra warnings for functions values of object literals
         if (!n.isFunction() || !NodeUtil.isObjectLitKey(parent)) {
           if (allowLocalExports) {
@@ -165,35 +192,16 @@ class FindExportableNodes extends AbstractPostOrderCallback {
     }
   }
 
-  LinkedHashMap<String, GenerateNodeContext> getExports() {
+  LinkedHashMap<String, Node> getExports() {
     return exports;
+  }
+
+  LinkedHashSet<String> getLocalExports() {
+    return localExports;
   }
 
   static enum Mode {
     EXPORT,
     EXTERN
-  }
-
-  /**
-   * Context holding the node references required for generating the export
-   * calls.
-   */
-  static class GenerateNodeContext {
-    private final Node node;
-    private final Mode mode;
-
-    GenerateNodeContext(
-        Node node, Mode mode) {
-      this.node = node;
-      this.mode = mode;
-    }
-
-    Node getNode() {
-      return node;
-    }
-
-    public Mode getMode() {
-      return mode;
-    }
   }
 }

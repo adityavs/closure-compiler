@@ -99,13 +99,18 @@ public class UnknownType extends ObjectType {
   }
 
   @Override
+  public boolean isVoidable() {
+    return true;
+  }
+
+  @Override
   public boolean isSubtype(JSType that) {
-    return isSubtype(that, null);
+    return isSubtype(that, null, SubtypingMode.NORMAL);
   }
 
   @Override
   protected boolean isSubtype(JSType that,
-      ImplCache implicitImplCache) {
+      ImplCache implicitImplCache, SubtypingMode subtypingMode) {
     return true;
   }
 
@@ -119,8 +124,8 @@ public class UnknownType extends ObjectType {
   }
 
   @Override
-  String toStringHelper(boolean forAnnotations) {
-    return getReferenceName();
+  StringBuilder appendTo(StringBuilder sb, boolean forAnnotations) {
+    return sb.append(getReferenceName());
   }
 
   @Override
@@ -163,5 +168,10 @@ public class UnknownType extends ObjectType {
   @Override
   JSType resolveInternal(ErrorReporter t, StaticTypedScope<JSType> scope) {
     return this;
+  }
+
+  @Override
+  public int hashCode() {
+    return System.identityHashCode(this);
   }
 }

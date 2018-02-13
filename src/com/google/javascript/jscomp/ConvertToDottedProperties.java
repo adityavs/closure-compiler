@@ -16,11 +16,10 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
+import com.google.javascript.jscomp.parsing.parser.FeatureSet;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
 
 /**
  * Converts property accesses from quoted string syntax to dot syntax, where
@@ -39,31 +38,35 @@ class ConvertToDottedProperties extends AbstractPostOrderCallback
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, this);
+    NodeTraversal.traverseEs6(compiler, root, this);
   }
 
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
-    switch (n.getType()) {
-      case Token.GETTER_DEF:
-      case Token.SETTER_DEF:
-      case Token.STRING_KEY:
-        if (NodeUtil.isValidPropertyName(LanguageMode.ECMASCRIPT3, n.getString())) {
-          n.putBooleanProp(Node.QUOTED_PROP, false);
-          compiler.reportCodeChange();
+    switch (n.getToken()) {
+      case GETTER_DEF:
+      case SETTER_DEF:
+      case STRING_KEY:
+        if (NodeUtil.isValidPropertyName(FeatureSet.ES3, n.getString())) {
+          if (n.getBooleanProp(Node.QUOTED_PROP)) {
+            n.putBooleanProp(Node.QUOTED_PROP, false);
+            compiler.reportChangeToEnclosingScope(n);
+          }
         }
         break;
 
-      case Token.GETELEM:
+      case GETELEM:
         Node left = n.getFirstChild();
         Node right = left.getNext();
-        if (right.isString() &&
-            NodeUtil.isValidPropertyName(LanguageMode.ECMASCRIPT3, right.getString())) {
+        if (right.isString() && NodeUtil.isValidPropertyName(FeatureSet.ES3, right.getString())) {
           n.removeChild(left);
           n.removeChild(right);
-          parent.replaceChild(n, IR.getprop(left, right));
-          compiler.reportCodeChange();
+          Node newGetProp = IR.getprop(left, right);
+          parent.replaceChild(n, newGetProp);
+          compiler.reportChangeToEnclosingScope(newGetProp);
         }
+        break;
+      default:
         break;
     }
   }

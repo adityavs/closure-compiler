@@ -16,7 +16,8 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Multimap;
 import com.google.javascript.rhino.Node;
@@ -25,9 +26,8 @@ import com.google.javascript.rhino.jstype.JSType;
 import com.google.javascript.rhino.jstype.SimpleReference;
 import com.google.javascript.rhino.jstype.SimpleSlot;
 import com.google.javascript.rhino.jstype.StaticTypedScope;
-
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -44,7 +44,7 @@ final class PreprocessorSymbolTable
   /**
    * All preprocessor symbols are globals.
    */
-  private final Map<String, SimpleSlot> symbols = new HashMap<>();
+  private final Map<String, SimpleSlot> symbols = new LinkedHashMap<>();
 
   private final Multimap<String, Reference> refs =
       ArrayListMultimap.create();
@@ -56,13 +56,19 @@ final class PreprocessorSymbolTable
   }
 
   @Override
-  public Node getRootNode() { return root; }
+  public Node getRootNode() {
+    return root;
+  }
 
   @Override
-  public JSType getTypeOfThis() { return null; }
+  public JSType getTypeOfThis() {
+    return null;
+  }
 
   @Override
-  public StaticTypedScope<JSType> getParentScope() { return null; }
+  public StaticTypedScope<JSType> getParentScope() {
+    return null;
+  }
 
   @Override
   public SimpleSlot getSlot(String name) {
@@ -90,14 +96,34 @@ final class PreprocessorSymbolTable
   }
 
   void addReference(Node node) {
-    String name = node.getQualifiedName();
-    Preconditions.checkNotNull(name);
+    addReference(node, getQualifiedName(node));
+  }
+
+  void addReference(Node node, String name) {
+    checkNotNull(name);
 
     if (!symbols.containsKey(name)) {
       symbols.put(name, new SimpleSlot(name, null, true));
     }
 
     refs.put(name, new Reference(symbols.get(name), node));
+  }
+
+  /**
+   * This variant of Node#getQualifiedName is adds special support for
+   * IS_MODULE_NAME.
+   */
+  public String getQualifiedName(Node n) {
+    if (n.getBooleanProp(Node.IS_MODULE_NAME)) {
+      return n.getString();
+    } else if (n.isGetProp()) {
+      String left = getQualifiedName(n.getFirstChild());
+      if (left == null) {
+        return null;
+      }
+      return left + "." + n.getLastChild().getString();
+    }
+    return n.getQualifiedName();
   }
 
   static final class Reference extends SimpleReference<SimpleSlot> {

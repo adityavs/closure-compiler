@@ -16,13 +16,14 @@
 
 package com.google.javascript.jscomp.newtypes;
 
+import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
 /** A naive persistent map that does too many copies */
-final class NaivePersistentMap<K, V> extends PersistentMap<K, V> {
-  private Map<K, V> map;
+final class NaivePersistentMap<K, V> extends PersistentMap<K, V> implements Serializable {
+  private final Map<K, V> map;
 
   private NaivePersistentMap(Map<K, V> m) {
     this.map = m;

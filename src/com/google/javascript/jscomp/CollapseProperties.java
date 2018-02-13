@@ -16,30 +16,24 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.base.Preconditions;
-import com.google.common.base.Predicates;
 import com.google.common.collect.Iterables;
-import com.google.javascript.jscomp.GlobalNamespace.AstChange;
+import com.google.javascript.jscomp.CompilerOptions.PropertyCollapseLevel;
 import com.google.javascript.jscomp.GlobalNamespace.Name;
 import com.google.javascript.jscomp.GlobalNamespace.Ref;
-import com.google.javascript.jscomp.GlobalNamespace.Ref.Type;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.Reference;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.ReferenceCollection;
+import com.google.javascript.jscomp.Normalize.PropagateConstantAnnotationsOverVars;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.TokenStream;
 import com.google.javascript.rhino.TypeI;
-
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Deque;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-
 
 /**
  * Flattens global objects/namespaces by replacing each '.' with '$' in
@@ -74,7 +68,6 @@ import java.util.Set;
  *
  */
 class CollapseProperties implements CompilerPass {
-
   // Warnings
   static final DiagnosticType UNSAFE_NAMESPACE_WARNING =
       DiagnosticType.warning(
@@ -88,14 +81,10 @@ class CollapseProperties implements CompilerPass {
 
   static final DiagnosticType UNSAFE_THIS = DiagnosticType.warning(
       "JSC_UNSAFE_THIS",
-      "dangerous use of 'this' in static method {0}");
+      "dangerous use of ''this'' in static method {0}");
 
-  static final DiagnosticType UNSAFE_CTOR_ALIASING = DiagnosticType.warning(
-      "JSC_UNSAFE_CTOR_ALIASING",
-      "Variable {0} aliases a constructor, "
-      + "so it cannot be assigned multiple times");
-
-  private AbstractCompiler compiler;
+  private final AbstractCompiler compiler;
+  private final PropertyCollapseLevel propertyCollapseLevel;
 
   /** Global namespace tree */
   private List<Name> globalNames;
@@ -103,26 +92,14 @@ class CollapseProperties implements CompilerPass {
   /** Maps names (e.g. "a.b.c") to nodes in the global namespace tree */
   private Map<String, Name> nameMap;
 
-  private final boolean inlineAliases;
-
-  /**
-   * @param inlineAliases Whether we're allowed to inline local aliases of
-   *     namespaces, etc. It's set to false only by the deprecated property-
-   *     renaming policies {@code HEURISTIC} and {@code AGGRESSIVE_HEURISTIC}.
-   */
-  CollapseProperties(AbstractCompiler compiler, boolean inlineAliases) {
+  CollapseProperties(AbstractCompiler compiler, PropertyCollapseLevel propertyCollapseLevel) {
     this.compiler = compiler;
-    this.inlineAliases = inlineAliases;
+    this.propertyCollapseLevel = propertyCollapseLevel;
   }
 
   @Override
   public void process(Node externs, Node root) {
-    GlobalNamespace namespace;
-    namespace = new GlobalNamespace(compiler, root);
-
-    if (inlineAliases) {
-      inlineAliases(namespace);
-    }
+    GlobalNamespace namespace = new GlobalNamespace(compiler, root);
     nameMap = namespace.getNameIndex();
     globalNames = namespace.getNameForest();
     checkNamespaces();
@@ -137,284 +114,36 @@ class CollapseProperties implements CompilerPass {
     for (Name name : globalNames) {
       collapseDeclarationOfNameAndDescendants(name, name.getBaseName());
     }
+
+    // This shouldn't be necessary, this pass should already be setting new constants as constant.
+    // TODO(b/64256754): Investigate.
+    (new PropagateConstantAnnotationsOverVars(compiler, false)).process(externs, root);
   }
 
-  /**
-   * For each qualified name N in the global scope, we check if:
-   * (a) No ancestor of N is ever aliased or assigned an unknown value type.
-   *     (If N = "a.b.c", "a" and "a.b" are never aliased).
-   * (b) N has exactly one write, and it lives in the global scope.
-   * (c) N is aliased in a local scope.
-   * (d) N is aliased in global scope
-   *
-   * If (a) is true, then GlobalNamespace must know all the writes to N.
-   * If (a) and (b) are true, then N cannot change during the execution of
-   *    a local scope.
-   * If (a) and (b) and (c) are true, then the alias can be inlined if the
-   *    alias obeys the usual rules for how we decide whether a variable is
-   *    inlineable.
-   * If (a) and (b) and (d) are true, then inline the alias if possible (if
-   * it is assigned exactly once unconditionally).
-   * @see InlineVariables
-   */
-  private void inlineAliases(GlobalNamespace namespace) {
-    // Invariant: All the names in the worklist meet condition (a).
-    Deque<Name> workList = new ArrayDeque<>(namespace.getNameForest());
-
-    while (!workList.isEmpty()) {
-      Name name = workList.pop();
-
-      // Don't attempt to inline a getter or setter property as a variable.
-      if (name.type == Name.Type.GET || name.type == Name.Type.SET) {
-        continue;
-      }
-
-      if (!name.inExterns && name.globalSets == 1 && name.localSets == 0 &&
-          name.aliasingGets > 0) {
-        // {@code name} meets condition (b). Find all of its local aliases
-        // and try to inline them.
-        List<Ref> refs = new ArrayList<>(name.getRefs());
-        for (Ref ref : refs) {
-          if (ref.type == Type.ALIASING_GET && ref.scope.isLocal()) {
-            // {@code name} meets condition (c). Try to inline it.
-            // TODO(johnlenz): consider picking up new aliases at the end
-            // of the pass instead of immediately like we do for global
-            // inlines.
-            if (inlineAliasIfPossible(name, ref, namespace)) {
-              name.removeRef(ref);
-            }
-          } else if (ref.type == Type.ALIASING_GET
-              && ref.scope.isGlobal()
-              && ref.getTwin() == null) { // ignore aliases in chained assignments
-            if (inlineGlobalAliasIfPossible(name, ref, namespace)) {
-              name.removeRef(ref);
-            }
-          }
-        }
-      }
-
-      // Check if {@code name} has any aliases left after the
-      // local-alias-inlining above.
-      if ((name.type == Name.Type.OBJECTLIT ||
-           name.type == Name.Type.FUNCTION) &&
-          name.aliasingGets == 0 && name.props != null) {
-        // All of {@code name}'s children meet condition (a), so they can be
-        // added to the worklist.
-        workList.addAll(name.props);
-      }
-    }
-  }
-
-  /**
-   * Attempt to inline an global alias of a global name. This requires that
-   * the name is well defined: assigned unconditionally, assigned exactly once.
-   * It is assumed that, the name for which it is an alias must already
-   * meet these same requirements.
-   *
-   * @param alias The alias to inline
-   * @return Whether the alias was inlined.
-   */
-  private boolean inlineGlobalAliasIfPossible(
-      Name name, Ref alias, GlobalNamespace namespace) {
-    // Ensure that the alias is assigned to global name at that the
-    // declaration.
-    Node aliasParent = alias.node.getParent();
-    if (aliasParent.isAssign() && NodeUtil.isExecutedExactlyOnce(aliasParent)
-        // We special-case for constructors here, to inline constructor aliases
-        // more aggressively in global scope.
-        // We do this because constructor properties are always collapsed,
-        // so we want to inline the aliases also to avoid breakages.
-        || aliasParent.isName() && name.isConstructor()) {
-      Node lvalue = aliasParent.isName() ? aliasParent : aliasParent.getFirstChild();
-      if (!lvalue.isQualifiedName()) {
-        return false;
-      }
-      name = namespace.getSlot(lvalue.getQualifiedName());
-      if (name != null && isInlinableGlobalAlias(name)) {
-        Set<AstChange> newNodes = new LinkedHashSet<>();
-
-        List<Ref> refs = new ArrayList<>(name.getRefs());
-        for (Ref ref : refs) {
-          switch (ref.type) {
-            case SET_FROM_GLOBAL:
-              continue;
-            case DIRECT_GET:
-            case ALIASING_GET:
-              Node newNode = alias.node.cloneTree();
-              Node node = ref.node;
-              node.getParent().replaceChild(node, newNode);
-              newNodes.add(new AstChange(ref.module, ref.scope, newNode));
-              name.removeRef(ref);
-              break;
-            default:
-              throw new IllegalStateException();
-          }
-        }
-
-        rewriteAliasProps(name, alias.node, 0, newNodes);
-
-        // just set the original alias to null.
-        aliasParent.replaceChild(alias.node, IR.nullNode());
-        compiler.reportCodeChange();
-
-        // Inlining the variable may have introduced new references
-        // to descendants of {@code name}. So those need to be collected now.
-        namespace.scanNewNodes(newNodes);
-
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * @param name The Name whose properties references should be updated.
-   * @param value The value to use when rewriting.
-   * @param depth The chain depth.
-   * @param newNodes Expression nodes that have been updated.
-   */
-  private static void rewriteAliasProps(
-      Name name, Node value, int depth, Set<AstChange> newNodes) {
-    if (name.props == null) {
-      return;
-    }
-    Preconditions.checkState(!value.matchesQualifiedName(name.getFullName()));
-    for (Name prop : name.props) {
-      rewriteAliasProps(prop, value, depth + 1, newNodes);
-      List<Ref> refs = new ArrayList<>(prop.getRefs());
-      for (Ref ref : refs) {
-        Node target = ref.node;
-        for (int i = 0; i <= depth; i++) {
-          if (target.isGetProp()) {
-            target = target.getFirstChild();
-          } else if (NodeUtil.isObjectLitKey(target)) {
-            // Object literal key definitions are a little trickier, as we
-            // need to find the assignment target
-            Node gparent = target.getParent().getParent();
-            if (gparent.isAssign()) {
-              target = gparent.getFirstChild();
-            } else {
-              Preconditions.checkState(NodeUtil.isObjectLitKey(gparent));
-              target = gparent;
-            }
-          } else {
-            throw new IllegalStateException("unexpected: " + target);
-          }
-        }
-        Preconditions.checkState(target.isGetProp() || target.isName());
-        target.getParent().replaceChild(target, value.cloneTree());
-        prop.removeRef(ref);
-        // Rescan the expression root.
-        newNodes.add(new AstChange(ref.module, ref.scope, ref.node));
-      }
-    }
-  }
-
-  private static boolean isInlinableGlobalAlias(Name name) {
-    // Only simple aliases with direct usage are inlinable.
-    if (name.inExterns || name.globalSets != 1 || name.localSets != 0
-        || !name.canCollapse()) {
+  private boolean canCollapse(Name name) {
+    if (!name.canCollapse()) {
       return false;
     }
 
-    // Only allow inlining of simple references.
-    for (Ref ref : name.getRefs()) {
-      switch (ref.type) {
-        case SET_FROM_GLOBAL:
-          // Expect one global set
-          continue;
-        case SET_FROM_LOCAL:
-          throw new IllegalStateException();
-        case ALIASING_GET:
-        case DIRECT_GET:
-          continue;
-        case PROTOTYPE_GET:
-        case CALL_GET:
-        case DELETE_PROP:
-          return false;
-        default:
-          throw new IllegalStateException();
-      }
+    if (propertyCollapseLevel == PropertyCollapseLevel.MODULE_EXPORT && !name.isModuleExport()) {
+      return false;
     }
+
     return true;
   }
 
-  private boolean inlineAliasIfPossible(
-      Name name, Ref alias, GlobalNamespace namespace) {
-    // Ensure that the alias is assigned to a local variable at that
-    // variable's declaration. If the alias's parent is a NAME,
-    // then the NAME must be the child of a VAR node, and we must
-    // be in a VAR assignment.
-    Node aliasParent = alias.node.getParent();
-    if (aliasParent.isName()) {
-      // Ensure that the local variable is well defined and never reassigned.
-      Scope scope = alias.scope;
-      String aliasVarName = aliasParent.getString();
-      Var aliasVar = scope.getVar(aliasVarName);
+  private boolean canEliminate(Name name) {
+    if (!name.canEliminate()) {
+      return false;
+    }
 
-      ReferenceCollectingCallback collector =
-          new ReferenceCollectingCallback(compiler,
-              ReferenceCollectingCallback.DO_NOTHING_BEHAVIOR,
-              Predicates.equalTo(aliasVar));
-      collector.processScope(scope);
-
-      ReferenceCollection aliasRefs = collector.getReferences(aliasVar);
-      Set<AstChange> newNodes = new LinkedHashSet<>();
-
-      if (aliasRefs.isWellDefined()
-          && aliasRefs.firstReferenceIsAssigningDeclaration()) {
-        if (!aliasRefs.isAssignedOnceInLifetime()) {
-          // Static properties of constructors are always collapsed.
-          // So, if a constructor is aliased and its properties are accessed from
-          // the alias, we would like to inline the alias here to access the
-          // properties correctly.
-          // But if the aliased variable is assigned more than once, we can't
-          // inline, so we warn.
-          if (name.isConstructor()) {
-            boolean accessPropsAfterAliasing = false;
-            for (Reference ref : aliasRefs.references) {
-              if (ref.getNode().getParent().isGetProp()) {
-                accessPropsAfterAliasing = true;
-                break;
-              }
-            }
-            if (accessPropsAfterAliasing) {
-              compiler.report(
-                  JSError.make(aliasParent, UNSAFE_CTOR_ALIASING, aliasVarName));
-            }
-          }
-          return false;
-        }
-
-        // The alias is well-formed, so do the inlining now.
-        int size = aliasRefs.references.size();
-        for (int i = 1; i < size; i++) {
-          ReferenceCollectingCallback.Reference aliasRef =
-              aliasRefs.references.get(i);
-
-          Node newNode = alias.node.cloneTree();
-          aliasRef.getParent().replaceChild(aliasRef.getNode(), newNode);
-          newNodes.add(new AstChange(
-              getRefModule(aliasRef), aliasRef.getScope(), newNode));
-        }
-
-        // just set the original alias to null.
-        aliasParent.replaceChild(alias.node, IR.nullNode());
-        compiler.reportCodeChange();
-
-        // Inlining the variable may have introduced new references
-        // to descendants of {@code name}. So those need to be collected now.
-        namespace.scanNewNodes(newNodes);
-        return true;
-      }
+    if (name.props == null
+        || name.props.isEmpty()
+        || propertyCollapseLevel != PropertyCollapseLevel.MODULE_EXPORT) {
+      return true;
     }
 
     return false;
-  }
-
-  JSModule getRefModule(ReferenceCollectingCallback.Reference ref) {
-    CompilerInput input  = compiler.getInput(ref.getInputId());
-    return input == null ? null : input.getModule();
   }
 
   /**
@@ -423,9 +152,10 @@ class CollapseProperties implements CompilerPass {
    */
   private void checkNamespaces() {
     for (Name name : nameMap.values()) {
-      if (name.isNamespaceObjectLit() &&
-          (name.aliasingGets > 0 || name.localSets + name.globalSets > 1 ||
-           name.deleteProps > 0)) {
+      if (name.isNamespaceObjectLit()
+          && (name.aliasingGets > 0
+              || name.localSets + name.globalSets > 1
+              || name.deleteProps > 0)) {
         boolean initialized = name.getDeclaration() != null;
         for (Ref ref : name.getRefs()) {
           if (ref == name.getDeclaration()) {
@@ -456,7 +186,7 @@ class CollapseProperties implements CompilerPass {
     // allow "a = a || {}" or "var a = a || {}"
     Node valParent = getValueParent(ref);
     Node val = valParent.getLastChild();
-    if (val.getType() == Token.OR) {
+    if (val.isOr()) {
       Node maybeName = val.getFirstChild();
       if (ref.node.matchesQualifiedName(maybeName)) {
         return true;
@@ -473,10 +203,9 @@ class CollapseProperties implements CompilerPass {
    * the parent would be the NAME node.
    */
   private static Node getValueParent(Ref ref) {
-    // there are two types of declarations: VARs and ASSIGNs
-    return (ref.node.getParent() != null
-        && ref.node.getParent().isVar())
-        ? ref.node : ref.node.getParent();
+    // there are four types of declarations: VARs, LETs, CONSTs, and ASSIGNs
+    Node n = ref.node.getParent();
+    return (n != null && NodeUtil.isNameDeclaration(n)) ? ref.node : ref.node.getParent();
   }
 
   /**
@@ -519,9 +248,14 @@ class CollapseProperties implements CompilerPass {
     for (Name p : n.props) {
       String propAlias = appendPropForAlias(alias, p.getBaseName());
 
-      if (p.canCollapse()) {
+      boolean isAllowedToCollapse =
+          propertyCollapseLevel != PropertyCollapseLevel.MODULE_EXPORT || p.isModuleExport();
+
+      if (isAllowedToCollapse && p.canCollapse()) {
         flattenReferencesTo(p, propAlias);
-      } else if (p.isSimpleStubDeclaration()) {
+      } else if (isAllowedToCollapse
+          && p.isSimpleStubDeclaration()
+          && !p.isCollapsingExplicitlyDenied()) {
         flattenSimpleStubDeclaration(p, propAlias);
       }
 
@@ -538,13 +272,13 @@ class CollapseProperties implements CompilerPass {
     Node nameNode = NodeUtil.newName(
         compiler, alias, ref.node,
         name.getFullName());
-    Node varNode = IR.var(nameNode).copyInformationFrom(nameNode);
+    Node varNode = IR.var(nameNode).useSourceInfoIfMissingFrom(nameNode);
 
-    Preconditions.checkState(ref.node.getParent().isExprResult());
+    checkState(ref.node.getParent().isExprResult());
     Node parent = ref.node.getParent();
     Node grandparent = parent.getParent();
     grandparent.replaceChild(parent, varNode);
-    compiler.reportCodeChange();
+    compiler.reportChangeToEnclosingScope(varNode);
   }
 
   /**
@@ -567,8 +301,7 @@ class CollapseProperties implements CompilerPass {
       // 2) References inside a complex assign. (a = x.y = 0). These are
       //    called TWIN references, because they show up twice in the
       //    reference list. Only collapse the set, not the alias.
-      if (!NodeUtil.isObjectLitKey(r.node) &&
-          (r.getTwin() == null || r.isSet())) {
+      if (!NodeUtil.isObjectLitKey(r.node) && (r.getTwin() == null || r.isSet())) {
         flattenNameRef(alias, r.node, rParent, originalName);
       }
     }
@@ -597,8 +330,7 @@ class CollapseProperties implements CompilerPass {
     // initialized is fully qualified (i.e. not an object literal key).
     String originalName = n.getFullName();
     Ref decl = n.getDeclaration();
-    if (decl != null && decl.node != null &&
-        decl.node.isGetProp()) {
+    if (decl != null && decl.node != null && decl.node.isGetProp()) {
       flattenNameRefAtDepth(alias, decl.node, depth, originalName);
     }
 
@@ -636,10 +368,10 @@ class CollapseProperties implements CompilerPass {
     // This method has to work for both GETPROP chains and, in rare cases,
     // OBJLIT keys, possibly nested. That's why we check for children before
     // proceeding. In the OBJLIT case, we don't need to do anything.
-    int nType = n.getType();
+    Token nType = n.getToken();
     boolean isQName = nType == Token.NAME || nType == Token.GETPROP;
     boolean isObjKey = NodeUtil.isObjectLitKey(n);
-    Preconditions.checkState(isObjKey || isQName);
+    checkState(isObjKey || isQName);
     if (isQName) {
       for (int i = 1; i < depth && n.hasChildren(); i++) {
         n = n.getFirstChild();
@@ -660,8 +392,8 @@ class CollapseProperties implements CompilerPass {
    */
   private void flattenNameRef(String alias, Node n, Node parent,
       String originalName) {
-    Preconditions.checkArgument(n.isGetProp(),
-        "Expected GETPROP, found %s. Node: %s", Token.name(n.getType()), n);
+    Preconditions.checkArgument(
+        n.isGetProp(), "Expected GETPROP, found %s. Node: %s", n.getToken(), n);
 
     // BEFORE:
     //   getprop
@@ -685,7 +417,7 @@ class CollapseProperties implements CompilerPass {
     }
 
     parent.replaceChild(n, ref);
-    compiler.reportCodeChange();
+    compiler.reportChangeToEnclosingScope(ref);
   }
 
   /**
@@ -700,104 +432,67 @@ class CollapseProperties implements CompilerPass {
     boolean canCollapseChildNames = n.canCollapseUnannotatedChildNames();
 
     // Handle this name first so that nested object literals get unrolled.
-    if (n.canCollapse()) {
-      updateObjLitOrFunctionDeclaration(n, alias, canCollapseChildNames);
+    if (canCollapse(n)) {
+      updateGlobalNameDeclaration(n, alias, canCollapseChildNames);
     }
 
     if (n.props == null) {
       return;
     }
     for (Name p : n.props) {
-      // Recur first so that saved node ancestries are intact when needed.
-      collapseDeclarationOfNameAndDescendants(
-          p, appendPropForAlias(alias, p.getBaseName()));
-      if (!p.inExterns && canCollapseChildNames &&
-          p.getDeclaration() != null &&
-          p.canCollapse() &&
-          p.getDeclaration().node != null &&
-          p.getDeclaration().node.getParent() != null &&
-          p.getDeclaration().node.getParent().isAssign()) {
-        updateSimpleDeclaration(
-            appendPropForAlias(alias, p.getBaseName()), p, p.getDeclaration());
-      }
+      collapseDeclarationOfNameAndDescendants(p, appendPropForAlias(alias, p.getBaseName()));
     }
   }
 
   /**
    * Updates the initial assignment to a collapsible property at global scope
-   * by changing it to a variable declaration (e.g. a.b = 1 -> var a$b = 1).
-   * The property's value may either be a primitive or an object literal or
-   * function whose properties aren't collapsible.
+   * by adding a VAR stub and collapsing the property. e.g. c = a.b = 1; => var a$b; c = a$b = 1;
+   * This specifically handles "twinned" assignments, which are those where the assignment is also
+   * used as a reference and which need special handling.
    *
    * @param alias The flattened property name (e.g. "a$b")
    * @param refName The name for the reference being updated.
-   * @param ref An object containing information about the assignment getting
-   *     updated
+   * @param ref An object containing information about the assignment getting updated
    */
-  private void updateSimpleDeclaration(String alias, Name refName, Ref ref) {
+  private void updateTwinnedDeclaration(String alias, Name refName, Ref ref) {
+    checkNotNull(ref.getTwin());
+    // Don't handle declarations of an already flat name, just qualified names.
+    if (!ref.node.isGetProp()) {
+      return;
+    }
     Node rvalue = ref.node.getNext();
     Node parent = ref.node.getParent();
     Node grandparent = parent.getParent();
-    Node greatGrandparent = grandparent.getParent();
 
     if (rvalue != null && rvalue.isFunction()) {
       checkForHosedThisReferences(rvalue, refName.docInfo, refName);
     }
 
     // Create the new alias node.
-    Node nameNode = NodeUtil.newName(compiler, alias, grandparent.getFirstChild(),
-        refName.getFullName());
+    Node nameNode =
+        NodeUtil.newName(compiler, alias, grandparent.getFirstChild(), refName.getFullName());
     NodeUtil.copyNameAnnotations(ref.node.getLastChild(), nameNode);
 
-    if (grandparent.isExprResult()) {
-      // BEFORE: a.b.c = ...;
-      //   exprstmt
-      //     assign
-      //       getprop
-      //         getprop
-      //           name a
-      //           string b
-      //         string c
-      //       NODE
-      // AFTER: var a$b$c = ...;
-      //   var
-      //     name a$b$c
-      //       NODE
+    // BEFORE:
+    // ... (x.y = 3);
+    //
+    // AFTER:
+    // var x$y;
+    // ... (x$y = 3);
 
-      // Remove the r-value (NODE).
-      parent.removeChild(rvalue);
-      nameNode.addChildToFront(rvalue);
+    Node current = grandparent;
+    Node currentParent = grandparent.getParent();
+    for (;
+        !currentParent.isScript() && !currentParent.isNormalBlock();
+        current = currentParent, currentParent = currentParent.getParent()) {}
 
-      Node varNode = IR.var(nameNode);
-      greatGrandparent.replaceChild(grandparent, varNode);
-    } else {
-      // This must be a complex assignment.
-      Preconditions.checkNotNull(ref.getTwin());
+    // Create a stub variable declaration right
+    // before the current statement.
+    Node stubVar = IR.var(nameNode.cloneTree()).useSourceInfoIfMissingFrom(nameNode);
+    currentParent.addChildBefore(stubVar, current);
 
-      // BEFORE:
-      // ... (x.y = 3);
-      //
-      // AFTER:
-      // var x$y;
-      // ... (x$y = 3);
-
-      Node current = grandparent;
-      Node currentParent = grandparent.getParent();
-      for (; !currentParent.isScript() &&
-             !currentParent.isBlock();
-           current = currentParent,
-           currentParent = currentParent.getParent()) {}
-
-      // Create a stub variable declaration right
-      // before the current statement.
-      Node stubVar = IR.var(nameNode.cloneTree())
-          .copyInformationFrom(nameNode);
-      currentParent.addChildBefore(stubVar, current);
-
-      parent.replaceChild(ref.node, nameNode);
-    }
-
-    compiler.reportCodeChange();
+    parent.replaceChild(ref.node, nameNode);
+    compiler.reportChangeToEnclosingScope(nameNode);
   }
 
   /**
@@ -819,7 +514,7 @@ class CollapseProperties implements CompilerPass {
    *     this name. (This is mostly passed for convenience; it's equivalent to
    *     n.canCollapseChildNames()).
    */
-  private void updateObjLitOrFunctionDeclaration(
+  private void updateGlobalNameDeclaration(
       Name n, String alias, boolean canCollapseChildNames) {
     Ref decl = n.getDeclaration();
     if (decl == null) {
@@ -828,22 +523,23 @@ class CollapseProperties implements CompilerPass {
       return;
     }
 
-    if (decl.getTwin() != null) {
-      // Twin declarations will get handled when normal references
-      // are handled.
-      return;
-    }
-
-    switch (decl.node.getParent().getType()) {
-      case Token.ASSIGN:
-        updateObjLitOrFunctionDeclarationAtAssignNode(
+    switch (decl.node.getParent().getToken()) {
+      case ASSIGN:
+        updateGlobalNameDeclarationAtAssignNode(
             n, alias, canCollapseChildNames);
         break;
-      case Token.VAR:
-        updateObjLitOrFunctionDeclarationAtVarNode(n, canCollapseChildNames);
+      case VAR:
+      case LET:
+      case CONST:
+        updateGlobalNameDeclarationAtVariableNode(n, canCollapseChildNames);
         break;
-      case Token.FUNCTION:
-        updateFunctionDeclarationAtFunctionNode(n, canCollapseChildNames);
+      case FUNCTION:
+        updateGlobalNameDeclarationAtFunctionNode(n, canCollapseChildNames);
+        break;
+      case CLASS:
+        updateGlobalNameDeclarationAtClassNode(n, canCollapseChildNames);
+        break;
+      default:
         break;
     }
   }
@@ -851,45 +547,53 @@ class CollapseProperties implements CompilerPass {
   /**
    * Updates the first initialization (a.k.a "declaration") of a global name
    * that occurs at an ASSIGN node. See comment for
-   * {@link #updateObjLitOrFunctionDeclaration}.
+   * {@link #updateGlobalNameDeclaration}.
    *
    * @param n An object representing a global name (e.g. "a", "a.b.c")
    * @param alias The flattened name for {@code n} (e.g. "a", "a$b$c")
    */
-  private void updateObjLitOrFunctionDeclarationAtAssignNode(
+  private void updateGlobalNameDeclarationAtAssignNode(
       Name n, String alias, boolean canCollapseChildNames) {
     // NOTE: It's important that we don't add additional nodes
     // (e.g. a var node before the exprstmt) because the exprstmt might be
     // the child of an if statement that's not inside a block).
 
+    // All qualified names - even for variables that are initially declared as LETS and CONSTS -
+    // are being declared as VAR statements, but this is not incorrect because
+    // we are only collapsing for global names.
     Ref ref = n.getDeclaration();
     Node rvalue = ref.node.getNext();
+    if (ref.getTwin() != null) {
+      updateTwinnedDeclaration(alias, ref.name, ref);
+      return;
+    }
     Node varNode = new Node(Token.VAR);
     Node varParent = ref.node.getAncestor(3);
     Node grandparent = ref.node.getAncestor(2);
     boolean isObjLit = rvalue.isObjectLit();
     boolean insertedVarNode = false;
 
-    if (isObjLit && n.canEliminate()) {
+    if (isObjLit && canEliminate(n)) {
       // Eliminate the object literal altogether.
       varParent.replaceChild(grandparent, varNode);
       ref.node = null;
       insertedVarNode = true;
-
+      compiler.reportChangeToEnclosingScope(varNode);
     } else if (!n.isSimpleName()) {
       // Create a VAR node to declare the name.
       if (rvalue.isFunction()) {
         checkForHosedThisReferences(rvalue, n.docInfo, n);
       }
 
+      compiler.reportChangeToEnclosingScope(rvalue);
       ref.node.getParent().removeChild(rvalue);
 
       Node nameNode = NodeUtil.newName(compiler,
           alias, ref.node.getAncestor(2), n.getFullName());
 
       JSDocInfo info = NodeUtil.getBestJSDocInfo(ref.node.getParent());
-      if (ref.node.getLastChild().getBooleanProp(Node.IS_CONSTANT_NAME) ||
-          (info != null && info.isConstant())) {
+      if (ref.node.getLastChild().getBooleanProp(Node.IS_CONSTANT_NAME)
+          || (info != null && info.isConstant())) {
         nameNode.putBooleanProp(Node.IS_CONSTANT_NAME, true);
       }
 
@@ -903,13 +607,13 @@ class CollapseProperties implements CompilerPass {
       // Update the node ancestry stored in the reference.
       ref.node = nameNode;
       insertedVarNode = true;
+      compiler.reportChangeToEnclosingScope(varNode);
     }
 
     if (canCollapseChildNames) {
       if (isObjLit) {
-        declareVarsForObjLitValues(
-            n, alias, rvalue,
-            varNode, varParent.getChildBefore(varNode), varParent);
+        declareVariablesForObjLitValues(
+            n, alias, rvalue, varNode, varNode.getPrevious(), varParent);
       }
 
       addStubsForUndeclaredProperties(n, alias, varParent, varNode);
@@ -919,7 +623,6 @@ class CollapseProperties implements CompilerPass {
       if (!varNode.hasChildren()) {
         varParent.removeChild(varNode);
       }
-      compiler.reportCodeChange();
     }
   }
 
@@ -929,11 +632,13 @@ class CollapseProperties implements CompilerPass {
    */
   private void checkForHosedThisReferences(Node function, JSDocInfo docInfo,
       final Name name) {
-    // A function is getting collapsed. Make sure that if it refers to
-    // "this", it must be a constructor or documented with @this.
-    if (docInfo == null ||
-        (!docInfo.isConstructor() && !docInfo.hasThisType())) {
-      NodeTraversal.traverse(compiler, function.getLastChild(),
+    // A function is getting collapsed. Make sure that if it refers to "this",
+    // it must be a constructor, interface, record, arrow function, or documented with @this.
+    boolean isAllowedToReferenceThis =
+        (docInfo != null && (docInfo.isConstructorOrInterface() || docInfo.hasThisType()))
+        || function.isArrowFunction();
+    if (!isAllowedToReferenceThis) {
+      NodeTraversal.traverseEs6(compiler, function.getLastChild(),
           new NodeTraversal.AbstractShallowCallback() {
             @Override
             public void visit(NodeTraversal t, Node n, Node parent) {
@@ -947,13 +652,12 @@ class CollapseProperties implements CompilerPass {
   }
 
   /**
-   * Updates the first initialization (a.k.a "declaration") of a global name
-   * that occurs at a VAR node. See comment for
-   * {@link #updateObjLitOrFunctionDeclaration}.
+   * Updates the first initialization (a.k.a "declaration") of a global name that occurs at a VAR
+   * node. See comment for {@link #updateGlobalNameDeclaration}.
    *
    * @param n An object representing a global name (e.g. "a")
    */
-  private void updateObjLitOrFunctionDeclarationAtVarNode(
+  private void updateGlobalNameDeclarationAtVariableNode(
       Name n, boolean canCollapseChildNames) {
     if (!canCollapseChildNames) {
       return;
@@ -962,73 +666,84 @@ class CollapseProperties implements CompilerPass {
     Ref ref = n.getDeclaration();
     String name = ref.node.getString();
     Node rvalue = ref.node.getFirstChild();
-    Node varNode = ref.node.getParent();
-    Node grandparent = varNode.getParent();
+    Node variableNode = ref.node.getParent();
+    Node grandparent = variableNode.getParent();
 
     boolean isObjLit = rvalue.isObjectLit();
-    int numChanges = 0;
 
     if (isObjLit) {
-      numChanges += declareVarsForObjLitValues(
-          n, name, rvalue, varNode, grandparent.getChildBefore(varNode),
-          grandparent);
+      declareVariablesForObjLitValues(
+          n, name, rvalue, variableNode, variableNode.getPrevious(), grandparent);
     }
 
-    numChanges += addStubsForUndeclaredProperties(n, name, grandparent, varNode);
+    addStubsForUndeclaredProperties(n, name, grandparent, variableNode);
 
-    if (isObjLit && n.canEliminate()) {
-      varNode.removeChild(ref.node);
-      if (!varNode.hasChildren()) {
-        grandparent.removeChild(varNode);
+    if (isObjLit && canEliminate(n)) {
+      variableNode.removeChild(ref.node);
+      compiler.reportChangeToEnclosingScope(variableNode);
+      if (!variableNode.hasChildren()) {
+        grandparent.removeChild(variableNode);
       }
-      numChanges++;
 
       // Clear out the object reference, since we've eliminated it from the
       // parse tree.
       ref.node = null;
-    }
-
-    if (numChanges > 0) {
-      compiler.reportCodeChange();
     }
   }
 
   /**
    * Updates the first initialization (a.k.a "declaration") of a global name
    * that occurs at a FUNCTION node. See comment for
-   * {@link #updateObjLitOrFunctionDeclaration}.
+   * {@link #updateGlobalNameDeclaration}.
    *
    * @param n An object representing a global name (e.g. "a")
    */
-  private void updateFunctionDeclarationAtFunctionNode(
+  private void updateGlobalNameDeclarationAtFunctionNode(
       Name n, boolean canCollapseChildNames) {
-    if (!canCollapseChildNames || !n.canCollapse()) {
+    if (!canCollapseChildNames || !canCollapse(n)) {
       return;
     }
 
     Ref ref = n.getDeclaration();
     String fnName = ref.node.getString();
-    addStubsForUndeclaredProperties(
-        n, fnName, ref.node.getAncestor(2), ref.node.getParent());
+    addStubsForUndeclaredProperties(n, fnName, ref.node.getAncestor(2), ref.node.getParent());
   }
 
   /**
-   * Declares global variables to serve as aliases for the values in an object
-   * literal, optionally removing all of the object literal's keys and values.
+   * Updates the first initialization (a.k.a "declaration") of a global name that occurs at a CLASS
+   * node. See comment for {@link #updateGlobalNameDeclaration}.
+   *
+   * @param n An object representing a global name (e.g. "a")
+   */
+  private void updateGlobalNameDeclarationAtClassNode(Name n, boolean canCollapseChildNames) {
+    if (!canCollapseChildNames || !canCollapse(n)) {
+      return;
+    }
+
+    Ref ref = n.getDeclaration();
+    String className = ref.node.getString();
+    addStubsForUndeclaredProperties(
+        n, className, ref.node.getAncestor(2), ref.node.getParent());
+  }
+
+  /**
+   * Declares global variables to serve as aliases for the values in an object literal, optionally
+   * removing all of the object literal's keys and values.
    *
    * @param alias The object literal's flattened name (e.g. "a$b$c")
    * @param objlit The OBJLIT node
-   * @param varNode The VAR node to which new global variables should be added
-   *     as children
-   * @param nameToAddAfter The child of {@code varNode} after which new
-   *     variables should be added (may be null)
+   * @param varNode The VAR node to which new global variables should be added as children
+   * @param nameToAddAfter The child of {@code varNode} after which new variables should be added
+   *     (may be null)
    * @param varParent {@code varNode}'s parent
-   * @return The number of variables added
    */
-  private int declareVarsForObjLitValues(
-      Name objlitName, String alias, Node objlit, Node varNode,
-      Node nameToAddAfter, Node varParent) {
-    int numVars = 0;
+  private void declareVariablesForObjLitValues(
+      Name objlitName,
+      String alias,
+      Node objlit,
+      Node varNode,
+      Node nameToAddAfter,
+      Node varParent) {
     int arbitraryNameCounter = 0;
     boolean discardKeys = !objlitName.shouldKeepKeys();
 
@@ -1037,8 +752,8 @@ class CollapseProperties implements CompilerPass {
       Node value = key.getFirstChild();
       nextKey = key.getNext();
 
-      // A get or a set can not be rewritten as a VAR.
-      if (key.isGetterDef() || key.isSetterDef()) {
+      // A computed property, or a get or a set can not be rewritten as a VAR.
+      if (key.isGetterDef() || key.isSetterDef() || key.isComputedProp()) {
         continue;
       }
 
@@ -1047,15 +762,13 @@ class CollapseProperties implements CompilerPass {
       // this object literal's child names wouldn't be collapsible.) The only
       // reason that we don't eliminate them entirely is the off chance that
       // their values are expressions that have side effects.
-      boolean isJsIdentifier = !key.isNumber() &&
-                               TokenStream.isJSIdentifier(key.getString());
-      String propName = isJsIdentifier ?
-          key.getString() : String.valueOf(++arbitraryNameCounter);
+      boolean isJsIdentifier = !key.isNumber() && TokenStream.isJSIdentifier(key.getString());
+      String propName = isJsIdentifier ? key.getString() : String.valueOf(++arbitraryNameCounter);
 
       // If the name cannot be collapsed, skip it.
       String qName = objlitName.getFullName() + '.' + propName;
       Name p = nameMap.get(qName);
-      if (p != null && !p.canCollapse()) {
+      if (p != null && !canCollapse(p)) {
         continue;
       }
 
@@ -1063,7 +776,8 @@ class CollapseProperties implements CompilerPass {
       Node refNode = null;
       if (discardKeys) {
         objlit.removeChild(key);
-        value.detachFromParent();
+        value.detach();
+        // Don't report a change here because the objlit has already been removed from the tree.
       } else {
         // Substitute a reference for the value.
         refNode = IR.name(propAlias);
@@ -1072,6 +786,7 @@ class CollapseProperties implements CompilerPass {
         }
 
         key.replaceChild(value, refNode);
+        compiler.reportChangeToEnclosingScope(refNode);
       }
 
       // Declare the collapsed name as a variable with the original value.
@@ -1080,13 +795,13 @@ class CollapseProperties implements CompilerPass {
       if (key.getBooleanProp(Node.IS_CONSTANT_NAME)) {
         nameNode.putBooleanProp(Node.IS_CONSTANT_NAME, true);
       }
-      Node newVar = IR.var(nameNode).copyInformationFromForTree(key);
+      Node newVar = IR.var(nameNode).useSourceInfoIfMissingFromForTree(key);
       if (nameToAddAfter != null) {
         varParent.addChildAfter(newVar, nameToAddAfter);
       } else {
         varParent.addChildBefore(newVar, varNode);
       }
-      compiler.reportCodeChange();
+      compiler.reportChangeToEnclosingScope(newVar);
       nameToAddAfter = newVar;
 
       // Update the global name's node ancestry if it hasn't already been
@@ -1106,61 +821,58 @@ class CollapseProperties implements CompilerPass {
           checkForHosedThisReferences(value, key.getJSDocInfo(), p);
         }
       }
-
-      numVars++;
     }
-    return numVars;
   }
 
   /**
-   * Adds global variable "stubs" for any properties of a global name that are
-   * only set in a local scope or read but never set.
+   * Adds global variable "stubs" for any properties of a global name that are only set in a local
+   * scope or read but never set.
    *
    * @param n An object representing a global name (e.g. "a", "a.b.c")
-   * @param alias The flattened name of the object whose properties we are
-   *     adding stubs for (e.g. "a$b$c")
-   * @param parent The node to which new global variables should be added
-   *     as children
-   * @param addAfter The child of after which new
-   *     variables should be added
-   * @return The number of variables added
+   * @param alias The flattened name of the object whose properties we are adding stubs for (e.g.
+   *     "a$b$c")
+   * @param parent The node to which new global variables should be added as children
+   * @param addAfter The child of after which new variables should be added
    */
-  private int addStubsForUndeclaredProperties(
-      Name n, String alias, Node parent, Node addAfter) {
-    Preconditions.checkState(n.canCollapseUnannotatedChildNames());
-    Preconditions.checkArgument(NodeUtil.isStatementBlock(parent));
-    Preconditions.checkNotNull(addAfter);
+  private void addStubsForUndeclaredProperties(Name n, String alias, Node parent, Node addAfter) {
+    checkState(n.canCollapseUnannotatedChildNames(), n);
+    checkArgument(NodeUtil.isStatementBlock(parent), parent);
+    checkNotNull(addAfter);
     if (n.props == null) {
-      return 0;
+      return;
     }
-    int numStubs = 0;
     for (Name p : n.props) {
       if (p.needsToBeStubbed()) {
         String propAlias = appendPropForAlias(alias, p.getBaseName());
         Node nameNode = IR.name(propAlias);
-        Node newVar = IR.var(nameNode).copyInformationFromForTree(addAfter);
+        Node newVar = IR.var(nameNode).useSourceInfoIfMissingFromForTree(addAfter);
         parent.addChildAfter(newVar, addAfter);
         addAfter = newVar;
-        numStubs++;
-        compiler.reportCodeChange();
+        compiler.reportChangeToEnclosingScope(newVar);
         // Determine if this is a constant var by checking the first
         // reference to it. Don't check the declaration, as it might be null.
         if (p.getRefs().get(0).node.getLastChild().getBooleanProp(
             Node.IS_CONSTANT_NAME)) {
           nameNode.putBooleanProp(Node.IS_CONSTANT_NAME, true);
+          compiler.reportChangeToEnclosingScope(nameNode);
         }
       }
     }
-    return numStubs;
   }
 
-  private static String appendPropForAlias(String root, String prop) {
+  private String appendPropForAlias(String root, String prop) {
     if (prop.indexOf('$') != -1) {
       // Encode '$' in a property as '$0'. Because '0' cannot be the
       // start of an identifier, this will never conflict with our
       // encoding from '.' -> '$'.
       prop = prop.replace("$", "$0");
     }
-    return root + '$' + prop;
+    String result = root + '$' + prop;
+    int id = 1;
+    while (nameMap.containsKey(result)) {
+      result = root + '$' + prop + '$' + id;
+      id++;
+    }
+    return result;
   }
 }

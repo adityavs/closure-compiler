@@ -16,16 +16,33 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
+import com.google.common.annotations.GwtIncompatible;
+import com.google.common.base.Ascii;
+import com.google.common.base.MoreObjects;
+import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Multimap;
+import com.google.common.primitives.Chars;
+import com.google.javascript.jscomp.deps.ModuleLoader;
+import com.google.javascript.jscomp.parsing.Config;
+import com.google.javascript.jscomp.parsing.parser.FeatureSet;
+import com.google.javascript.jscomp.resources.ResourceLoader;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.SourcePosition;
-
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.OutputStream;
+import java.io.PrintStream;
 import java.io.Serializable;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
@@ -34,16 +51,21 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.annotation.Nullable;
 
 /**
  * Compiler options
+ *
  * @author nicksantos@google.com (Nick Santos)
  */
 public class CompilerOptions implements Serializable {
+  // The number of characters after which we insert a line break in the code
+  static final int DEFAULT_LINE_LENGTH_THRESHOLD = 500;
 
-  // Unused. For people using reflection to circumvent access control.
-  @SuppressWarnings("unused")
-  private boolean manageClosureDependencies = false;
+  static final char[] POLYMER_PROPERTY_RESERVED_FIRST_CHARS =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ$".toCharArray();
+  static final char[] POLYMER_PROPERTY_RESERVED_NON_FIRST_CHARS = "_$".toCharArray();
+  static final char[] ANGULAR_PROPERTY_RESERVED_FIRST_CHARS = {'$'};
 
   /**
    * A common enum for compiler passes that can run either globally or locally.
@@ -51,20 +73,30 @@ public class CompilerOptions implements Serializable {
   public enum Reach {
     ALL,
     LOCAL_ONLY,
-    NONE
+    NONE;
+
+    public boolean isOn() {
+      return this != NONE;
+    }
+
+    public boolean includesGlobals() {
+      return this == ALL;
+    }
+  }
+
+  public enum PropertyCollapseLevel {
+    ALL,
+    NONE,
+    MODULE_EXPORT
   }
 
   // TODO(nicksantos): All public properties of this class should be made
   // package-private, and have a public setter.
 
-  private static final long serialVersionUID = 7L;
-
   /**
-   * The warning classes that are available.
+   * Should the compiled output start with "'use strict';"?
    */
-  protected DiagnosticGroups getDiagnosticGroups() {
-    return new DiagnosticGroups();
-  }
+  private Optional<Boolean> emitUseStrict = Optional.absent();
 
   /**
    * The JavaScript language version accepted.
@@ -77,23 +109,35 @@ public class CompilerOptions implements Serializable {
   private LanguageMode languageOut;
 
   /**
-   * If true, don't transpile ES6 to ES3.
-   *  WARNING: Enabling this option will likely cause the compiler to crash
-   *     or produce incorrect output.
+   * The builtin set of externs to be used
    */
-  boolean skipTranspilationAndCrash = false;
+  private Environment environment;
 
   /**
-   * Allow disabling ES6 to ES3 transpilation.
+   * Instrument code for the purpose of collecting coverage data - restrict to coverage pass only,
+   * and skip all other passes.
    */
-  public void setSkipTranspilationAndCrash(boolean value) {
-    skipTranspilationAndCrash = value;
+  private boolean instrumentForCoverageOnly = false;
+
+  public void setInstrumentForCoverageOnly(boolean instrumentForCoverageOnly) {
+    this.instrumentForCoverageOnly = instrumentForCoverageOnly;
   }
 
+  public boolean getInstrumentForCoverageOnly() {
+    return instrumentForCoverageOnly;
+  }
+
+  @Deprecated
+  public void setSkipTranspilationAndCrash(boolean value) {}
+
   /**
-   * Whether the compiler accepts type syntax ({@code var foo: string;}).
+   * Sets the input sourcemap files, indexed by the JS files they refer to.
+   *
+   * @param inputSourceMaps the collection of input sourcemap files
    */
-  boolean acceptTypeSyntax;
+  public void setInputSourceMaps(final ImmutableMap<String, SourceMapInput> inputSourceMaps) {
+    this.inputSourceMaps = inputSourceMaps;
+  }
 
   /**
    * Whether to infer consts. This should not be configurable by
@@ -116,30 +160,84 @@ public class CompilerOptions implements Serializable {
    */
   private boolean assumeStrictThis;
 
-  /**
-   * Configures the compiler for use as an IDE backend.  In this mode:
-   * <ul>
-   *  <li>No optimization passes will run.</li>
-   *  <li>The last time custom passes are invoked is
-   *      {@link CustomPassExecutionTime#BEFORE_OPTIMIZATIONS}</li>
-   *  <li>The compiler will always try to process all inputs fully, even
-   *      if it encounters errors.</li>
-   *  <li>The compiler may record more information than is strictly
-   *      needed for codegen.</li>
-   * </ul>
-   */
-  public boolean ideMode;
+  private boolean allowHotswapReplaceScript = false;
+  private boolean preserveDetailedSourceInfo = false;
+  private boolean continueAfterErrors = false;
 
-  private boolean parseJsDocDocumentation = false;
+  public enum IncrementalCheckMode {
+    /** Normal mode */
+    OFF,
+
+    /**
+     * The compiler should generate an output file that represents the type-only interface
+     * of the code being compiled.  This is useful for incremental type checking.
+     */
+    GENERATE_IJS,
+  }
+
+  private IncrementalCheckMode incrementalCheckMode = IncrementalCheckMode.OFF;
+
+  public void setIncrementalChecks(IncrementalCheckMode value) {
+    incrementalCheckMode = value;
+    switch (value) {
+      case OFF:
+        break;
+      case GENERATE_IJS:
+        setPreserveTypeAnnotations(true);
+        setOutputJs(OutputJs.NORMAL);
+        break;
+    }
+  }
+
+  public boolean shouldGenerateTypedExterns() {
+    return incrementalCheckMode == IncrementalCheckMode.GENERATE_IJS;
+  }
+
+  private Config.JsDocParsing parseJsDocDocumentation = Config.JsDocParsing.TYPES_ONLY;
+
+  private boolean printExterns;
+
+  void setPrintExterns(boolean printExterns) {
+    this.printExterns = printExterns;
+  }
+
+  boolean shouldPrintExterns() {
+    return this.printExterns || incrementalCheckMode == IncrementalCheckMode.GENERATE_IJS;
+  }
 
   /**
-   * Even if checkTypes is disabled, clients might want to still infer types.
-   * This is mostly used when ideMode is enabled.
+   * Even if checkTypes is disabled, clients such as IDEs might want to still infer types.
    */
   boolean inferTypes;
 
-  // The new type inference is a work in progress. Don't use.
-  boolean useNewTypeInference;
+  private boolean useNewTypeInference;
+
+  /**
+   * Several passes after type checking use type information. We have converted all these passes
+   * to use TypeI, and most users of NTI use NTI types throughout their compilation.
+   * But there are a few NTI users that still use the old mode, where OTI runs after NTI
+   * and the optimizations see the old types. We plan to switch these users to NTI-only builds
+   * and delete this option.
+   */
+  private boolean runOTIafterNTI = false;
+
+  /**
+   * Relevant only when {@link #useNewTypeInference} is true, where we normally disable OTI errors.
+   * If you want both NTI and OTI errors in this case, set to true.
+   * E.g. if using using a warnings guard to filter NTI or OTI warnings in new or legacy code,
+   * respectively.
+   * This will be removed when NTI entirely replaces OTI.
+   */
+  boolean reportOTIErrorsUnderNTI = false;
+
+  /**
+   * Run type checking natively on the subset of ES6 features that we are able to typecheck
+   * natively, and then transpile them after NTI.
+   * Doing this currently causes reordering of {@link LateEs6ToEs3Converter} pass
+   * and {@link Es6RewriteBlockScopedDeclaration} pass, which has the potential to break builds.
+   * This option should eventually be turned on by default and removed.
+   */
+  private boolean typeCheckEs6Natively = false;
 
   /**
    * Configures the compiler to skip as many passes as possible.
@@ -148,7 +246,7 @@ public class CompilerOptions implements Serializable {
   boolean skipNonTranspilationPasses;
 
   /**
-   * Configures the compiler to run expensive sanity checks after
+   * Configures the compiler to run expensive validity checks after
    * every pass. Only intended for internal development.
    */
   DevMode devMode;
@@ -166,56 +264,21 @@ public class CompilerOptions implements Serializable {
   DependencyOptions dependencyOptions = new DependencyOptions();
 
   /** Returns localized replacement for MSG_* variables */
-  // Transient so that clients don't have to implement Serializable.
-  public transient MessageBundle messageBundle = null;
+  public MessageBundle messageBundle = null;
 
   //--------------------------------
   // Checks
   //--------------------------------
 
   /** Checks that all symbols are defined */
+  // TODO(tbreisacher): Remove this and deprecate the corresponding setter.
   public boolean checkSymbols;
-
-  /**
-   * Deprecated. The checks that used to be controlled by this flag are now on by default,
-   * and this setter is a no-op. You can safely remove this call from your code.
-   */
-  @Deprecated
-  public void setAggressiveVarCheck(CheckLevel level) {}
 
   /** Checks for suspicious statements that have no effect */
   public boolean checkSuspiciousCode;
 
   /** Checks types on expressions */
   public boolean checkTypes;
-
-  public CheckLevel reportMissingOverride;
-
-  /**
-   * Flags a warning if a property is missing the @override annotation, but it
-   * overrides a base class property.
-   */
-  public void setReportMissingOverride(CheckLevel level) {
-    reportMissingOverride = level;
-  }
-
-  /**
-   * Deprecated. Use
-   * {@code setWarningLevel(DiagnosticGroups.MISSING_REQUIRE, CheckLevel.WARNING);}
-   * or
-   * {@code setWarningLevel(DiagnosticGroups.MISSING_REQUIRE, CheckLevel.ERROR);}
-   */
-  @Deprecated
-  public void setCheckRequires(CheckLevel level) {
-    setWarningLevel(DiagnosticGroups.MISSING_REQUIRE, level);
-  }
-
-  public CheckLevel checkProvides;
-
-  /** Checks for missing goog.provides() calls **/
-  public void setCheckProvides(CheckLevel level) {
-    checkProvides = level;
-  }
 
   public CheckLevel checkGlobalNamesLevel;
 
@@ -227,9 +290,14 @@ public class CompilerOptions implements Serializable {
     checkGlobalNamesLevel = level;
   }
 
+  @Deprecated
   public CheckLevel brokenClosureRequiresLevel;
 
-  /** Sets the check level for bad Closure require calls. */
+  /**
+   * Sets the check level for bad Closure require calls.
+   * Do not use; this should always be an error.
+   */
+  @Deprecated
   public void setBrokenClosureRequiresLevel(CheckLevel level) {
     brokenClosureRequiresLevel = level;
   }
@@ -270,25 +338,65 @@ public class CompilerOptions implements Serializable {
    */
   Set<String> extraAnnotationNames;
 
+  /** @deprecated No longer has any effect. */
+  @Deprecated
+  public enum DisposalCheckingPolicy {
+    /**
+     * Don't check any disposal.
+     */
+    OFF,
+
+    /**
+     * Default/conservative disposal checking.
+     */
+    ON,
+
+    /**
+     * Aggressive disposal checking.
+     */
+    AGGRESSIVE,
+  }
+
+  /** @deprecated No longer has any effect. */
+  @Deprecated
+  public void setCheckEventfulObjectDisposalPolicy(DisposalCheckingPolicy policy) {}
+
+  /** @deprecated No longer has any effect. */
+  @Deprecated
+  public DisposalCheckingPolicy getCheckEventfulObjectDisposalPolicy() {
+    return DisposalCheckingPolicy.OFF;
+  }
+
   /**
-   * Check for patterns that are known to cause memory leaks.
+   * Used for projects that are not well maintained, but are still used.
+   * Does not allow promoting warnings to errors, and disables some potentially
+   * risky optimizations.
    */
-  CheckEventfulObjectDisposal.DisposalCheckingPolicy checkEventfulObjectDisposalPolicy;
+  boolean legacyCodeCompile = false;
 
-  public void setCheckEventfulObjectDisposalPolicy(
-      CheckEventfulObjectDisposal.DisposalCheckingPolicy policy) {
-    this.checkEventfulObjectDisposalPolicy = policy;
-
-    // The CheckEventfulObjectDisposal pass requires types so enable inferring types if
-    // this pass is enabled.
-    if (policy != CheckEventfulObjectDisposal.DisposalCheckingPolicy.OFF) {
-      this.inferTypes = true;
-    }
-  }
-  public CheckEventfulObjectDisposal.DisposalCheckingPolicy getCheckEventfulObjectDisposalPolicy() {
-    return checkEventfulObjectDisposalPolicy;
+  public boolean getLegacyCodeCompile() {
+    return this.legacyCodeCompile;
   }
 
+  public void setLegacyCodeCompile(boolean legacy) {
+    this.legacyCodeCompile = legacy;
+  }
+
+  // TODO(bradfordcsmith): Investigate how can we use multi-threads as default.
+  int numParallelThreads = 1;
+
+  /**
+   * Sets the level of parallelism for compilation passes that can exploit multi-threading.
+   *
+   * <p>Some compiler passes may take advantage of multi-threading, for example, parsing inputs.
+   * This sets the level of parallelism. The compiler will not start more than this number of
+   * threads.
+   *
+   * @param parallelism up to this number of parallel threads may be created.
+   */
+  public void setNumParallelThreads(int parallelism) {
+    numParallelThreads = parallelism;
+  }
 
   //--------------------------------
   // Optimizations
@@ -306,9 +414,6 @@ public class CompilerOptions implements Serializable {
   /** Inlines constants (symbols that are all CAPS) */
   public boolean inlineConstantVars;
 
-  /** Inlines global functions */
-  public boolean inlineFunctions;
-
   /**
    * For projects that want to avoid the creation of giant functions after
    * inlining.
@@ -316,14 +421,11 @@ public class CompilerOptions implements Serializable {
   int maxFunctionSizeAfterInlining;
   static final int UNLIMITED_FUN_SIZE_AFTER_INLINING = -1;
 
-  /** Inlines functions defined in local scopes */
-  public boolean inlineLocalFunctions;
-
   /** More aggressive function inlining */
   boolean assumeClosuresOnlyCaptureReferences;
 
   /** Inlines properties */
-  boolean inlineProperties;
+  private boolean inlineProperties;
 
   /** Move code to a deeper module */
   public boolean crossModuleCodeMotion;
@@ -352,7 +454,7 @@ public class CompilerOptions implements Serializable {
   public boolean crossModuleMethodMotion;
 
   /** Inlines trivial getters */
-  public boolean inlineGetters;
+  boolean inlineGetters;
 
   /** Inlines variables */
   public boolean inlineVariables;
@@ -372,13 +474,6 @@ public class CompilerOptions implements Serializable {
 
   /** Removes code that will never execute */
   public boolean removeDeadCode;
-
-  public CheckLevel checkMissingReturn;
-
-  /** Checks for missing return statements */
-  public void setCheckMissingReturn(CheckLevel level) {
-    this.checkMissingReturn = level;
-  }
 
   public enum ExtractPrototypeMemberDeclarationsMode {
     OFF,
@@ -406,30 +501,6 @@ public class CompilerOptions implements Serializable {
 
   /** Removes unused variables in local scope. */
   public boolean removeUnusedLocalVars;
-
-  /** Adds variable aliases for externals to reduce code size */
-  public boolean aliasExternals;
-
-  String aliasableGlobals;
-
-  /**
-   * A comma separated white-list of global names. When {@link #aliasExternals}
-   * is enable, if set to a non-empty string, only externals with these names
-   * will be considered for aliasing.
-   */
-  public void setAliasableGlobals(String names) {
-    aliasableGlobals = names;
-  }
-
-  String unaliasableGlobals;
-
-  /**
-   * A comma separated white-list of global names. When {@link #aliasExternals}
-   * is enable, these global names will not be aliased.
-   */
-  public void setUnaliasableGlobals(String names) {
-    unaliasableGlobals = names;
-  }
 
   /** Collapses multiple variable declarations into one */
   public boolean collapseVariableDeclarations;
@@ -464,21 +535,11 @@ public class CompilerOptions implements Serializable {
   /** Print string usage as part of the compilation log. */
   boolean outputJsStringUsage;
 
-  /** Converts quoted property accesses to dot syntax (a['b'] -> a.b) */
+  /** Converts quoted property accesses to dot syntax (a['b'] &rarr; a.b) */
   public boolean convertToDottedProperties;
 
   /** Reduces the size of common function expressions. */
   public boolean rewriteFunctionExpressions;
-
-  /**
-   * Remove unused and constant parameters.
-   */
-  public boolean optimizeParameters;
-
-  /**
-   * Remove unused return values.
-   */
-  public boolean optimizeReturns;
 
   /**
    * Remove unused parameters from call sites.
@@ -490,8 +551,17 @@ public class CompilerOptions implements Serializable {
    */
   public boolean optimizeArgumentsArray;
 
-  /** Chains calls to functions that return this. */
-  boolean chainCalls;
+  /** Use type information to enable additional optimization opportunities. */
+  boolean useTypesForLocalOptimization;
+
+  boolean useSizeHeuristicToStopOptimizationLoop = true;
+
+  /**
+   * Do up to this many iterations of the optimization loop.
+   * Setting this field to some small number, say 3 or 4, allows a large project to build faster,
+   * but sacrifice some code size.
+   */
+  int optimizationLoopMaxIterations;
 
   //--------------------------------
   // Renaming
@@ -544,8 +614,16 @@ public class CompilerOptions implements Serializable {
     renamePrefixNamespaceAssumeCrossModuleNames = assume;
   }
 
+  private PropertyCollapseLevel collapsePropertiesLevel;
+
   /** Flattens multi-level property names (e.g. a$b = x) */
-  public boolean collapseProperties;
+  public boolean shouldCollapseProperties() {
+    return collapsePropertiesLevel != PropertyCollapseLevel.NONE;
+  }
+
+  public PropertyCollapseLevel getPropertyCollapseLevel() {
+    return collapsePropertiesLevel;
+  }
 
   /** Split object literals into individual variables when possible. */
   boolean collapseObjectLiterals;
@@ -581,10 +659,10 @@ public class CompilerOptions implements Serializable {
    * Rename properties to disambiguate between unrelated fields based on
    * type information.
    */
-  public boolean disambiguateProperties;
+  private boolean disambiguateProperties;
 
   /** Rename unrelated properties to the same name to reduce code size. */
-  public boolean ambiguateProperties;
+  private boolean ambiguateProperties;
 
   /** Input sourcemap files, indexed by the JS files they refer to */
   ImmutableMap<String, SourceMapInput> inputSourceMaps;
@@ -617,6 +695,13 @@ public class CompilerOptions implements Serializable {
   /** Whether to declare globals declared in externs as properties on window */
   boolean declaredGlobalExternsOnWindow;
 
+  /** Shared name generator */
+  NameGenerator nameGenerator;
+
+  public void setNameGenerator(NameGenerator nameGenerator) {
+    this.nameGenerator = nameGenerator;
+  }
+
   //--------------------------------
   // Special-purpose alterations
   //--------------------------------
@@ -631,11 +716,11 @@ public class CompilerOptions implements Serializable {
   public void setReplaceMessagesWithChromeI18n(
       boolean replaceMessagesWithChromeI18n,
       String tcProjectId) {
-    if (replaceMessagesWithChromeI18n &&
-        messageBundle != null &&
-        !(messageBundle instanceof EmptyMessageBundle)) {
-      throw new RuntimeException("When replacing messages with " +
-          "chrome.i18n.getMessage, a message bundle should not be specified.");
+    if (replaceMessagesWithChromeI18n
+        && messageBundle != null
+        && !(messageBundle instanceof EmptyMessageBundle)) {
+    throw new RuntimeException("When replacing messages with"
+          + " chrome.i18n.getMessage, a message bundle should not be specified.");
     }
 
     this.replaceMessagesWithChromeI18n = replaceMessagesWithChromeI18n;
@@ -655,8 +740,9 @@ public class CompilerOptions implements Serializable {
   /** A CodingConvention to use during the compile. */
   private CodingConvention codingConvention;
 
+  @Nullable
   public String syntheticBlockStartMarker;
-
+  @Nullable
   public String syntheticBlockEndMarker;
 
   /** Compiling locale */
@@ -668,23 +754,36 @@ public class CompilerOptions implements Serializable {
   /** Processes goog.provide() and goog.require() calls */
   public boolean closurePass;
 
-  /** Do not strip goog.require() calls from the code. */
-  public boolean preserveGoogRequires;
-
-  /** Processes jQuery aliases */
-  public boolean jqueryPass;
+  /** Do not strip goog.provide()/goog.require() calls from the code. */
+  private boolean preserveClosurePrimitives;
 
   /** Processes AngularJS-specific annotations */
   boolean angularPass;
 
-  /** Processes Polymer calls */
-  boolean polymerPass;
+  /** If non-null, processes Polymer code */
+  @Nullable
+  Integer polymerVersion;
 
-  /** Remove goog.abstractMethod assignments. */
+  /** Processes cr.* functions */
+  private boolean chromePass;
+
+  /** Processes the output of the Dart Dev Compiler */
+  boolean dartPass;
+
+  /** Processes the output of J2CL */
+  J2clPassMode j2clPassMode;
+
+  /** Remove goog.abstractMethod assignments and @abstract methods. */
   boolean removeAbstractMethods;
+
+  /** Remove methods that only make a super call without changing the arguments. */
+  boolean removeSuperMethods;
 
   /** Remove goog.asserts calls. */
   boolean removeClosureAsserts;
+
+  /** Remove J2CL assert calls. */
+  boolean removeJ2clAsserts = true;
 
   /** Gather CSS names (requires closurePass) */
   public boolean gatherCssNames;
@@ -721,7 +820,7 @@ public class CompilerOptions implements Serializable {
   public boolean moveFunctionDeclarations;
 
   /** Instrumentation template to use with #recordFunctionInformation */
-  public String instrumentationTemplate;
+  public Instrumentation instrumentationTemplate;
 
   String appNameStr;
 
@@ -736,9 +835,24 @@ public class CompilerOptions implements Serializable {
   /** Record function information */
   public boolean recordFunctionInformation;
 
-  public boolean checksOnly;
+  boolean checksOnly;
+
+  static enum OutputJs {
+    // Don't output anything.
+    NONE,
+    // Output a "sentinel" file containing just a comment.
+    SENTINEL,
+    // Output the compiled JS.
+    NORMAL,
+  }
+  OutputJs outputJs;
 
   public boolean generateExports;
+
+  // TODO(dimvar): generate-exports should always run after typechecking.
+  // If it runs before, it adds a bunch of properties to Object, which masks
+  // many type warnings. Cleanup all clients and remove this.
+  boolean generateExportsAfterTypeChecking;
 
   boolean exportLocalPropertyDefinitions;
 
@@ -756,6 +870,9 @@ public class CompilerOptions implements Serializable {
 
   /** Id generators to replace. */
   ImmutableMap<String, RenamingMap> idGenerators;
+
+  /** Hash function to use for xid generation. */
+  Xid.HashFunction xidHashFunction;
 
   /**
    * A previous map of ids (serialized to a string by a previous compile).
@@ -783,8 +900,27 @@ public class CompilerOptions implements Serializable {
   boolean processCommonJSModules = false;
 
   /** CommonJS module prefix. */
-  List<String> moduleRoots = ImmutableList.of(ES6ModuleLoader.DEFAULT_FILENAME_PREFIX);
+  List<String> moduleRoots = ImmutableList.of(ModuleLoader.DEFAULT_FILENAME_PREFIX);
 
+  /** Rewrite polyfills. */
+  boolean rewritePolyfills = false;
+
+  /** Runtime libraries to always inject. */
+  List<String> forceLibraryInjection = ImmutableList.of();
+
+  /** Runtime libraries to never inject. */
+  boolean preventLibraryInjection = false;
+
+  boolean assumeForwardDeclaredForMissingTypes = false;
+
+  /**
+   * If {@code true}, considers all missing types to be forward declared (useful for partial
+   * compilation).
+   */
+  public void setAssumeForwardDeclaredForMissingTypes(
+      boolean assumeForwardDeclaredForMissingTypes) {
+    this.assumeForwardDeclaredForMissingTypes = assumeForwardDeclaredForMissingTypes;
+  }
 
   //--------------------------------
   // Output options
@@ -794,7 +930,7 @@ public class CompilerOptions implements Serializable {
   public boolean preserveTypeAnnotations;
 
   /** Output in pretty indented format */
-  public boolean prettyPrint;
+  private boolean prettyPrint;
 
   /** Line break the output a bit more aggressively */
   public boolean lineBreak;
@@ -807,6 +943,9 @@ public class CompilerOptions implements Serializable {
 
   /** The string to use as the separator for printInputDelimiter */
   public String inputDelimiter = "// Input %num%";
+
+  /** Whether to write keyword properties as foo['class'] instead of foo.class; needed for IE8. */
+  private boolean quoteKeywordProperties;
 
   boolean preferSingleQuotes;
 
@@ -831,21 +970,64 @@ public class CompilerOptions implements Serializable {
     trustedStrings = yes;
   }
 
-  String reportPath;
+  private boolean allowMethodCallDecomposing;
 
-  /** Where to save a report of global name usage */
-  public void setReportPath(String reportPath) {
-    this.reportPath = reportPath;
+  /**
+   * See https://github.com/google/closure-compiler/wiki/FAQ#i-get-an-undecomposable-expression-error-for-my-yield-or-await-expression-what-do-i-do
+   */
+  boolean allowMethodCallDecomposing() {
+    return allowMethodCallDecomposing;
   }
 
-  TracerMode tracer;
+  /**
+   * Setting this to true indicates that it's safe to rewrite x.y() as: fn = x.y; fn.call(x);
+   * This should be false if supporting IE 8 or IE 9 is necessary.
+   *
+   * See https://github.com/google/closure-compiler/wiki/FAQ#i-get-an-undecomposable-expression-error-for-my-yield-or-await-expression-what-do-i-do
+   */
+  public void setAllowMethodCallDecomposing(boolean value) {
+    this.allowMethodCallDecomposing = value;
+  }
+
+  // Should only be used when debugging compiler bugs.
+  boolean printSourceAfterEachPass;
+
+  // Used to narrow down the printed source when overall input size is large. If these are both
+  // empty the entire source is printed.
+  List<String> filesToPrintAfterEachPassRegexList = ImmutableList.of();
+  List<String> modulesToPrintAfterEachPassRegexList = ImmutableList.of();
+
+  public void setPrintSourceAfterEachPass(boolean printSource) {
+    this.printSourceAfterEachPass = printSource;
+  }
+
+  public void setFilesToPrintAfterEachPassRegexList(List<String> filePathRegexList) {
+    this.filesToPrintAfterEachPassRegexList = filePathRegexList;
+  }
+
+  public void setModulesToPrintAfterEachPassRegexList(List<String> modulePathRegexList) {
+    this.modulesToPrintAfterEachPassRegexList = modulePathRegexList;
+  }
+
+  private TracerMode tracer;
 
   public TracerMode getTracerMode() {
     return tracer;
   }
 
+  // NOTE: Timing information will not be printed if compiler.disableThreads() is called!
   public void setTracerMode(TracerMode mode) {
     this.tracer = mode;
+  }
+
+  private PrintStream tracerOutput;
+
+  PrintStream getTracerOutput() {
+    return tracerOutput;
+  }
+
+  public void setTracerOutput(PrintStream out) {
+    tracerOutput = out;
   }
 
   private boolean colorizeErrorOutput;
@@ -856,7 +1038,13 @@ public class CompilerOptions implements Serializable {
 
   int summaryDetailLevel = 1;
 
-  int lineLengthThreshold = CodePrinter.DEFAULT_LINE_LENGTH_THRESHOLD;
+  int lineLengthThreshold = DEFAULT_LINE_LENGTH_THRESHOLD;
+
+  /**
+   * Whether to use the original names of nodes in the code output. This option is only really
+   * useful when using the compiler to print code meant to check in to source.
+   */
+  boolean useOriginalNamesInOutput = false;
 
   //--------------------------------
   // Special Output Options
@@ -870,20 +1058,6 @@ public class CompilerOptions implements Serializable {
 
   /** The output path for the created externs file. */
   String externExportsPath;
-
-  String nameReferenceReportPath;
-
-  /** Where to save a cross-reference report from the name reference graph */
-  public void setNameReferenceReportPath(String filePath) {
-    nameReferenceReportPath = filePath;
-  }
-
-  String nameReferenceGraphPath;
-
-  /** Where to save the name reference graph */
-  public void setNameReferenceGraphPath(String filePath) {
-    nameReferenceGraphPath = filePath;
-  }
 
   //--------------------------------
   // Debugging Options
@@ -900,20 +1074,35 @@ public class CompilerOptions implements Serializable {
   public SourceMap.Format sourceMapFormat =
       SourceMap.Format.DEFAULT;
 
+  /**
+   * Whether to parse inline source maps.
+   */
+  boolean parseInlineSourceMaps = true;
+
+  /**
+   * Whether to apply input source maps to the output, i.e. map back to original inputs from
+   * input files that have source maps applied to them.
+   */
+  boolean applyInputSourceMaps = false;
+
+  /**
+   * Whether to resolve source mapping annotations. Cannot do this in an appengine or js environment
+   * since we don't have access to the filesystem.
+   */
+  boolean resolveSourceMapAnnotations = true;
+
   public List<SourceMap.LocationMapping> sourceMapLocationMappings =
       Collections.emptyList();
 
   /**
-   * Whether to return strings logged with AbstractCompiler#addToDebugLog
-   * in the compiler's Result.
+   * Whether to include full file contents in the source map.
    */
-  boolean useDebugLog;
+  boolean sourceMapIncludeSourcesContent = false;
 
   /**
    * Charset to use when generating code.  If null, then output ASCII.
-   * This needs to be a string because CompilerOptions is serializable.
    */
-  String outputCharset;
+  transient Charset outputCharset;
 
   /**
    * Transitional option.
@@ -923,13 +1112,21 @@ public class CompilerOptions implements Serializable {
   /**
    * When set, assume that apparently side-effect free code is meaningful.
    */
-  boolean protectHiddenSideEffects;
+  private boolean protectHiddenSideEffects;
 
   /**
    * When enabled, assume that apparently side-effect free code is meaningful.
    */
   public void setProtectHiddenSideEffects(boolean enable) {
     this.protectHiddenSideEffects = enable;
+  }
+
+  /**
+   * Whether or not the compiler should wrap apparently side-effect free code
+   * to prevent it from being removed
+   */
+  public boolean shouldProtectHiddenSideEffects() {
+    return protectHiddenSideEffects && !checksOnly && !allowHotswapReplaceScript;
   }
 
   /**
@@ -947,8 +1144,52 @@ public class CompilerOptions implements Serializable {
    */
   public boolean instrumentForCoverage;
 
-  /** List of conformance configs to use in CheckConformance */
-  private ImmutableList<ConformanceConfig> conformanceConfigs = ImmutableList.of();
+  /** Instrument branch coverage data - valid only if instrumentForCoverage is True */
+  public boolean instrumentBranchCoverage;
+
+  String instrumentationTemplateFile;
+
+  /**
+   * List of conformance configs to use in CheckConformance.
+   *
+   * <p>The first entry of this list is always the Global ConformanceConfig
+   */
+  private ImmutableList<ConformanceConfig> conformanceConfigs =
+      ImmutableList.of(ResourceLoader.loadGlobalConformance(CompilerOptions.class));
+
+  /**
+   * For use in {@link CompilationLevel#WHITESPACE_ONLY} mode, when using goog.module.
+   */
+  boolean wrapGoogModulesForWhitespaceOnly = true;
+
+  public void setWrapGoogModulesForWhitespaceOnly(boolean enable) {
+    this.wrapGoogModulesForWhitespaceOnly = enable;
+  }
+
+  /**
+   * Print all configuration options to stderr after the compiler is initialized.
+   */
+  boolean printConfig = false;
+
+  /**
+   * Are the input files written for strict mode?
+   */
+  private Optional<Boolean> isStrictModeInput = Optional.absent();
+
+  /** Which algorithm to use for locating ES6 and CommonJS modules */
+  ModuleLoader.ResolutionMode moduleResolutionMode;
+
+  /** Which entries to look for in package.json files when processing modules */
+  List<String> packageJsonEntryNames;
+
+  /**
+   * Should the compiler print its configuration options to stderr when they are initialized?
+   *
+   * <p>Default {@code false}.
+   */
+  public void setPrintConfig(boolean printConfig) {
+    this.printConfig = printConfig;
+  }
 
   /**
    * Initializes compiler options. All options are disabled by default.
@@ -958,11 +1199,15 @@ public class CompilerOptions implements Serializable {
    */
   public CompilerOptions() {
     // Accepted language
-    languageIn = LanguageMode.ECMASCRIPT3;
+    languageIn = LanguageMode.ECMASCRIPT_2017;
     languageOut = LanguageMode.NO_TRANSPILE;
 
-    // Language variation
-    acceptTypeSyntax = false;
+    // Which environment to use
+    environment = Environment.BROWSER;
+
+    // Modules
+    moduleResolutionMode = ModuleLoader.ResolutionMode.BROWSER;
+    packageJsonEntryNames = ImmutableList.of("browser", "module", "main");
 
     // Checks
     skipNonTranspilationPasses = false;
@@ -971,27 +1216,21 @@ public class CompilerOptions implements Serializable {
     checkSymbols = false;
     checkSuspiciousCode = false;
     checkTypes = false;
-    reportMissingOverride = CheckLevel.OFF;
-    checkProvides = CheckLevel.OFF;
     checkGlobalNamesLevel = CheckLevel.OFF;
     brokenClosureRequiresLevel = CheckLevel.ERROR;
     checkGlobalThisLevel = CheckLevel.OFF;
-    checkMissingReturn = CheckLevel.OFF;
     checkMissingGetCssNameLevel = CheckLevel.OFF;
     checkMissingGetCssNameBlacklist = null;
     computeFunctionSideEffects = false;
-    chainCalls = false;
     extraAnnotationNames = null;
-    checkEventfulObjectDisposalPolicy = CheckEventfulObjectDisposal.DisposalCheckingPolicy.OFF;
 
     // Optimizations
     foldConstants = false;
     coalesceVariableNames = false;
     deadAssignmentElimination = false;
     inlineConstantVars = false;
-    inlineFunctions = false;
+    inlineFunctionsLevel = Reach.NONE;
     maxFunctionSizeAfterInlining = UNLIMITED_FUN_SIZE_AFTER_INLINING;
-    inlineLocalFunctions = false;
     assumeStrictThis = false;
     assumeClosuresOnlyCaptureReferences = false;
     inlineProperties = false;
@@ -1012,7 +1251,6 @@ public class CompilerOptions implements Serializable {
     removeUnusedConstructorProperties = false;
     removeUnusedVars = false;
     removeUnusedLocalVars = false;
-    aliasExternals = false;
     collapseVariableDeclarations = false;
     collapseAnonymousFunctions = false;
     aliasableStrings = Collections.emptySet();
@@ -1021,8 +1259,6 @@ public class CompilerOptions implements Serializable {
     outputJsStringUsage = false;
     convertToDottedProperties = false;
     rewriteFunctionExpressions = false;
-    optimizeParameters = false;
-    optimizeReturns = false;
 
     // Renaming
     variableRenaming = VariableRenamingPolicy.OFF;
@@ -1032,7 +1268,7 @@ public class CompilerOptions implements Serializable {
     shadowVariables = false;
     preferStableNames = false;
     renamePrefix = null;
-    collapseProperties = false;
+    collapsePropertiesLevel = PropertyCollapseLevel.NONE;
     collapseObjectLiterals = false;
     devirtualizePrototypeMethods = false;
     disambiguateProperties = false;
@@ -1040,6 +1276,7 @@ public class CompilerOptions implements Serializable {
     anonymousFunctionNaming = AnonymousFunctionNamingPolicy.OFF;
     exportTestFunctions = false;
     declaredGlobalExternsOnWindow = true;
+    nameGenerator = new DefaultNameGenerator();
 
     // Alterations
     runtimeTypeCheck = false;
@@ -1049,11 +1286,13 @@ public class CompilerOptions implements Serializable {
     locale = null;
     markAsCompiled = false;
     closurePass = false;
-    preserveGoogRequires = false;
-    jqueryPass = false;
+    preserveClosurePrimitives = false;
     angularPass = false;
-    polymerPass = false;
-    removeAbstractMethods = true;
+    polymerVersion = null;
+    dartPass = false;
+    j2clPassMode = J2clPassMode.AUTO;
+    removeAbstractMethods = false;
+    removeSuperMethods = false;
     removeClosureAsserts = false;
     stripTypes = Collections.emptySet();
     stripNameSuffixes = Collections.emptySet();
@@ -1068,7 +1307,9 @@ public class CompilerOptions implements Serializable {
     appNameStr = "";
     recordFunctionInformation = false;
     checksOnly = false;
+    outputJs = OutputJs.NORMAL;
     generateExports = false;
+    generateExportsAfterTypeChecking = true;
     exportLocalPropertyDefinitions = false;
     cssRenamingMap = null;
     cssRenamingWhitelist = null;
@@ -1083,6 +1324,8 @@ public class CompilerOptions implements Serializable {
     // Instrumentation
     instrumentationTemplate = null;  // instrument functions
     instrumentForCoverage = false;  // instrument lines
+    instrumentBranchCoverage = false; // instrument branches
+    instrumentationTemplateFile = "";
 
     // Output
     preserveTypeAnnotations = false;
@@ -1090,19 +1333,16 @@ public class CompilerOptions implements Serializable {
     prettyPrint = false;
     lineBreak = false;
     preferLineBreakAtEndOfFile = false;
-    reportPath = null;
     tracer = TracerMode.OFF;
     colorizeErrorOutput = false;
     errorFormat = ErrorFormat.SINGLELINE;
     debugFunctionSideEffectsPath = null;
     externExports = false;
-    nameReferenceReportPath = null;
-    nameReferenceGraphPath = null;
 
     // Debugging
     aliasHandler = NULL_ALIAS_TRANSFORMATION_HANDLER;
     errorHandler = null;
-    useDebugLog = false;
+    printSourceAfterEachPass = false;
   }
 
   /**
@@ -1149,12 +1389,9 @@ public class CompilerOptions implements Serializable {
     return getReplacementsHelper(tweakReplacements);
   }
 
-  /**
-   * Creates a map of String->Node from a map of String->Number/String/Boolean.
-   */
-  private static Map<String, Node> getReplacementsHelper(
-      Map<String, Object> source) {
-    Map<String, Node> map = new HashMap<>();
+  /** Creates a map of String->Node from a map of String->Number/String/Boolean. */
+  private static ImmutableMap<String, Node> getReplacementsHelper(Map<String, Object> source) {
+    ImmutableMap.Builder<String, Node> map = ImmutableMap.builder();
     for (Map.Entry<String, Object> entry : source.entrySet()) {
       String name = entry.getKey();
       Object value = entry.getValue();
@@ -1165,11 +1402,11 @@ public class CompilerOptions implements Serializable {
       } else if (value instanceof Double) {
         map.put(name, IR.number(((Double) value).doubleValue()));
       } else {
-        Preconditions.checkState(value instanceof String);
+        checkState(value instanceof String);
         map.put(name, IR.string((String) value));
       }
     }
-    return map;
+    return map.build();
   }
 
   /**
@@ -1177,7 +1414,7 @@ public class CompilerOptions implements Serializable {
    * to a boolean literal.
    */
   public void setDefineToBooleanLiteral(String defineName, boolean value) {
-    defineReplacements.put(defineName, new Boolean(value));
+    defineReplacements.put(defineName, value);
   }
 
   /**
@@ -1193,7 +1430,7 @@ public class CompilerOptions implements Serializable {
    * number literal.
    */
   public void setDefineToNumberLiteral(String defineName, int value) {
-    defineReplacements.put(defineName, new Integer(value));
+    defineReplacements.put(defineName, value);
   }
 
   /**
@@ -1201,7 +1438,7 @@ public class CompilerOptions implements Serializable {
    * number literal.
    */
   public void setDefineToDoubleLiteral(String defineName, double value) {
-    defineReplacements.put(defineName, new Double(value));
+    defineReplacements.put(defineName, value);
   }
 
   /**
@@ -1209,7 +1446,7 @@ public class CompilerOptions implements Serializable {
    * to a boolean literal.
    */
   public void setTweakToBooleanLiteral(String tweakId, boolean value) {
-    tweakReplacements.put(tweakId, new Boolean(value));
+    tweakReplacements.put(tweakId, value);
   }
 
   /**
@@ -1225,7 +1462,7 @@ public class CompilerOptions implements Serializable {
    * number literal.
    */
   public void setTweakToNumberLiteral(String tweakId, int value) {
-    tweakReplacements.put(tweakId, new Integer(value));
+    tweakReplacements.put(tweakId, value);
   }
 
   /**
@@ -1233,7 +1470,7 @@ public class CompilerOptions implements Serializable {
    * number literal.
    */
   public void setTweakToDoubleLiteral(String tweakId, double value) {
-    tweakReplacements.put(tweakId, new Double(value));
+    tweakReplacements.put(tweakId, value);
   }
 
   /**
@@ -1248,7 +1485,7 @@ public class CompilerOptions implements Serializable {
    * group of warnings.
    */
   boolean enables(DiagnosticGroup type) {
-    return warningsGuard.enables(type);
+    return this.warningsGuard.enables(type);
   }
 
   /**
@@ -1256,7 +1493,7 @@ public class CompilerOptions implements Serializable {
    * group of warnings.
    */
   boolean disables(DiagnosticGroup type) {
-    return warningsGuard.disables(type);
+    return this.warningsGuard.disables(type);
   }
 
   /**
@@ -1266,26 +1503,15 @@ public class CompilerOptions implements Serializable {
     addWarningsGuard(new DiagnosticGroupWarningsGuard(type, level));
   }
 
-  /**
-   * Configure the given type of warning to the given level.
-   */
-  public void setWarningLevel(String groupName, CheckLevel level) {
-    DiagnosticGroup type = getDiagnosticGroups().forName(groupName);
-    if (type == null) {
-      throw new RuntimeException("Unknown DiagnosticGroup name: " + groupName);
-    }
-    setWarningLevel(type, level);
-  }
-
   WarningsGuard getWarningsGuard() {
-    return warningsGuard;
+    return this.warningsGuard;
   }
 
   /**
    * Reset the warnings guard.
    */
   public void resetWarningsGuard() {
-    warningsGuard = new ComposeWarningsGuard();
+    this.warningsGuard = new ComposeWarningsGuard();
   }
 
   /**
@@ -1293,14 +1519,18 @@ public class CompilerOptions implements Serializable {
    * warnings guards.
    */
   void useEmergencyFailSafe() {
-    warningsGuard = warningsGuard.makeEmergencyFailSafeGuard();
+    this.warningsGuard = this.warningsGuard.makeEmergencyFailSafeGuard();
+  }
+
+  void useNonStrictWarningsGuard() {
+    this.warningsGuard = this.warningsGuard.makeNonStrict();
   }
 
   /**
    * Add a guard to the set of warnings guards.
    */
   public void addWarningsGuard(WarningsGuard guard) {
-    warningsGuard.addGuard(guard);
+    this.warningsGuard.addGuard(guard);
   }
 
   /**
@@ -1337,19 +1567,13 @@ public class CompilerOptions implements Serializable {
    * Sets the id generators to replace.
    */
   public void setIdGenerators(Set<String> idGenerators) {
+    RenamingMap gen = new UniqueRenamingToken();
     ImmutableMap.Builder<String, RenamingMap> builder = ImmutableMap.builder();
     for (String name : idGenerators) {
-       builder.put(name, UNIQUE_ID_GENERATOR);
+       builder.put(name, gen);
     }
     this.idGenerators = builder.build();
   }
-
-  /**
-   * A renaming map instance to use to signal the use of the "inconsistent"
-   * id generator type.
-   */
-  public static final RenamingMap UNIQUE_ID_GENERATOR =
-      ReplaceIdGenerators.UNIQUE;
 
   /**
    * Sets the id generators to replace.
@@ -1368,30 +1592,41 @@ public class CompilerOptions implements Serializable {
   }
 
   /**
+   * Sets the hash function to use for Xid
+   */
+  public void setXidHashFunction(Xid.HashFunction xidHashFunction) {
+    this.xidHashFunction = xidHashFunction;
+  }
+
+  private Reach inlineFunctionsLevel;
+
+  /** Use {@link #setInlineFunctions(Reach)} instead */
+  @Deprecated
+  public void setInlineFunctions(boolean inlineFunctions) {
+    this.setInlineFunctions(inlineFunctions ? Reach.ALL : Reach.NONE);
+  }
+
+  /**
    * Set the function inlining policy for the compiler.
    */
   public void setInlineFunctions(Reach reach) {
-    switch (reach) {
-      case ALL:
-        this.inlineFunctions = true;
-        this.inlineLocalFunctions = true;
-        break;
-      case LOCAL_ONLY:
-        this.inlineFunctions = false;
-        this.inlineLocalFunctions = true;
-        break;
-      case NONE:
-        this.inlineFunctions = false;
-        this.inlineLocalFunctions = false;
-        break;
-      default:
-        throw new IllegalStateException("unexpected");
-    }
+    this.inlineFunctionsLevel = reach;
+  }
+
+  /**
+   * Get the function inlining policy for the compiler.
+   */
+  public Reach getInlineFunctionsLevel() {
+    return this.inlineFunctionsLevel;
   }
 
   public void setMaxFunctionSizeAfterInlining(int funAstSize) {
-    Preconditions.checkArgument(funAstSize > 0);
+    checkArgument(funAstSize > 0);
     this.maxFunctionSizeAfterInlining = funAstSize;
+  }
+
+  public void setInlineVariables(boolean inlineVariables) {
+    this.inlineVariables = inlineVariables;
   }
 
   /**
@@ -1421,6 +1656,10 @@ public class CompilerOptions implements Serializable {
    */
   public void setInlineProperties(boolean enable) {
     inlineProperties = enable;
+  }
+
+  public boolean shouldInlineProperties() {
+    return inlineProperties;
   }
 
   /**
@@ -1459,8 +1698,20 @@ public class CompilerOptions implements Serializable {
     this.removeAbstractMethods = remove;
   }
 
+  public void setRemoveSuperMethods(boolean remove) {
+    this.removeSuperMethods = remove;
+  }
+
+  public boolean getRemoveSuperMethods() {
+    return removeSuperMethods;
+  }
+
   public void setRemoveClosureAsserts(boolean remove) {
     this.removeClosureAsserts = remove;
+  }
+
+  public void setRemoveJ2clAsserts(boolean remove) {
+    this.removeJ2clAsserts = remove;
   }
 
   public void setColorizeErrorOutput(boolean colorizeErrorOutput) {
@@ -1471,12 +1722,6 @@ public class CompilerOptions implements Serializable {
     return colorizeErrorOutput;
   }
 
-  /**
-   * If true, chain calls to functions that return this.
-   */
-  public void setChainCalls(boolean value) {
-    this.chainCalls = value;
-  }
 
   /**
    * Enable run-time type checking, which adds JS type assertions for debugging.
@@ -1497,6 +1742,10 @@ public class CompilerOptions implements Serializable {
     this.checksOnly = checksOnly;
   }
 
+  void setOutputJs(OutputJs outputJs) {
+    this.outputJs = outputJs;
+  }
+
   public void setGenerateExports(boolean generateExports) {
     this.generateExports = generateExports;
   }
@@ -1505,12 +1754,34 @@ public class CompilerOptions implements Serializable {
     this.exportLocalPropertyDefinitions = export;
   }
 
+  public boolean shouldExportLocalPropertyDefinitions() {
+    return this.exportLocalPropertyDefinitions;
+  }
+
   public void setAngularPass(boolean angularPass) {
     this.angularPass = angularPass;
   }
 
-  public void setPolymerPass(boolean polymerPass) {
-    this.polymerPass = polymerPass;
+  public void setPolymerVersion(Integer polymerVersion) {
+    checkArgument(polymerVersion == null || polymerVersion == 1 || polymerVersion == 2,
+        "Invalid Polymer version:", polymerVersion);
+    this.polymerVersion = polymerVersion;
+  }
+
+  public void setChromePass(boolean chromePass) {
+    this.chromePass = chromePass;
+  }
+
+  public boolean isChromePassEnabled() {
+    return chromePass;
+  }
+
+  public void setDartPass(boolean dartPass) {
+    this.dartPass = dartPass;
+  }
+
+  public void setJ2clPass(J2clPassMode j2clPassMode) {
+    this.j2clPassMode = j2clPassMode;
   }
 
   public void setCodingConvention(CodingConvention codingConvention) {
@@ -1526,8 +1797,11 @@ public class CompilerOptions implements Serializable {
    * This supersedes manageClosureDependencies.
    */
   public void setDependencyOptions(DependencyOptions options) {
-    Preconditions.checkNotNull(options);
     this.dependencyOptions = options;
+  }
+
+  public DependencyOptions getDependencyOptions() {
+    return dependencyOptions;
   }
 
   /**
@@ -1540,7 +1814,6 @@ public class CompilerOptions implements Serializable {
     dependencyOptions.setDependencyPruning(
         newVal || dependencyOptions.shouldPruneDependencies());
     dependencyOptions.setMoocherDropping(false);
-    manageClosureDependencies = newVal;
   }
 
   /**
@@ -1553,9 +1826,16 @@ public class CompilerOptions implements Serializable {
    *     will always be left in.
    */
   public void setManageClosureDependencies(List<String> entryPoints) {
-    Preconditions.checkNotNull(entryPoints);
+    checkNotNull(entryPoints);
     setManageClosureDependencies(true);
-    dependencyOptions.setEntryPoints(entryPoints);
+
+    List<ModuleIdentifier> normalizedEntryPoints = new ArrayList<>();
+
+    for (String entryPoint : entryPoints) {
+      normalizedEntryPoints.add(ModuleIdentifier.forClosure(entryPoint));
+    }
+
+    dependencyOptions.setEntryPoints(normalizedEntryPoints);
   }
 
   /**
@@ -1586,17 +1866,17 @@ public class CompilerOptions implements Serializable {
   }
 
   /**
-   * Sets the output charset by name.
+   * Sets the output charset.
    */
-  public void setOutputCharset(String charsetName) {
-    this.outputCharset = charsetName;
+  public void setOutputCharset(Charset charset) {
+    this.outputCharset = charset;
   }
 
   /**
-   * Gets the output charset as a rich object.
+   * Gets the output charset.
    */
   Charset getOutputCharset() {
-    return outputCharset == null ? null : Charset.forName(outputCharset);
+    return outputCharset;
   }
 
   /**
@@ -1614,7 +1894,7 @@ public class CompilerOptions implements Serializable {
    * Sets ECMAScript version to use.
    */
   public void setLanguage(LanguageMode language) {
-    Preconditions.checkState(languageIn != LanguageMode.NO_TRANSPILE);
+    checkState(language != LanguageMode.NO_TRANSPILE);
     this.languageIn = language;
     this.languageOut = language;
   }
@@ -1624,7 +1904,7 @@ public class CompilerOptions implements Serializable {
    * transpiling from one version to another, use #setLanguage instead.
    */
   public void setLanguageIn(LanguageMode languageIn) {
-    Preconditions.checkState(languageIn != LanguageMode.NO_TRANSPILE);
+    checkState(languageIn != LanguageMode.NO_TRANSPILE);
     this.languageIn = languageIn;
   }
 
@@ -1647,22 +1927,25 @@ public class CompilerOptions implements Serializable {
     return languageOut;
   }
 
-  /**
-   * @return whether we are currently transpiling from ES6 to a lower version.
-   */
-  boolean lowerFromEs6() {
-    return languageOut != LanguageMode.NO_TRANSPILE
-        && languageIn.isEs6OrHigher()
-        && !languageOut.isEs6OrHigher();
+  public boolean needsTranspilationFrom(FeatureSet languageLevel) {
+    return getLanguageIn().toFeatureSet().contains(languageLevel)
+        && !getLanguageOut().toFeatureSet().contains(languageLevel);
+  }
+
+  public boolean needsTranspilationOf(FeatureSet.Feature feature) {
+    return getLanguageIn().toFeatureSet().has(feature)
+        && !getLanguageOut().toFeatureSet().has(feature);
   }
 
   /**
-   * @return whether we are currently transpiling to ES6_TYPED
+   * Set which set of builtin externs to use.
    */
-  boolean raiseToEs6Typed() {
-    return languageOut != LanguageMode.NO_TRANSPILE
-        && !languageIn.isEs6OrHigher()
-        && languageOut == LanguageMode.ECMASCRIPT6_TYPED;
+  public void setEnvironment(Environment environment) {
+    this.environment = environment;
+  }
+
+  public Environment getEnvironment() {
+    return environment;
   }
 
   public void setAliasTransformationHandler(
@@ -1707,14 +1990,42 @@ public class CompilerOptions implements Serializable {
   }
 
   public boolean getNewTypeInference() {
-    return useNewTypeInference;
+    return this.useNewTypeInference;
   }
 
   public void setNewTypeInference(boolean enable) {
-    useNewTypeInference = enable;
+    this.useNewTypeInference = enable;
   }
 
   /**
+   * @return true if either typechecker is ON.
+   */
+  public boolean isTypecheckingEnabled() {
+    return this.checkTypes || this.useNewTypeInference;
+  }
+
+  public boolean getRunOTIafterNTI() {
+    return this.runOTIafterNTI;
+  }
+
+  public void setRunOTIafterNTI(boolean enable) {
+    this.runOTIafterNTI = enable;
+  }
+
+  // Not dead code; used by the open-source users of the compiler.
+  public void setReportOTIErrorsUnderNTI(boolean enable) {
+    this.reportOTIErrorsUnderNTI = enable;
+  }
+
+  public boolean getTypeCheckEs6Natively() {
+    return this.typeCheckEs6Natively;
+  }
+
+  public void setTypeCheckEs6Natively(boolean enable) {
+    this.typeCheckEs6Natively = enable;
+  }
+
+/**
    * @return Whether assumeStrictThis is set.
    */
   public boolean assumeStrictThis() {
@@ -1750,21 +2061,70 @@ public class CompilerOptions implements Serializable {
   public void setPropertyInvalidationErrors(
       Map<String, CheckLevel> propertyInvalidationErrors) {
     this.propertyInvalidationErrors =
-         new HashMap<>(propertyInvalidationErrors);
-  }
-
-  public void setIdeMode(boolean ideMode) {
-    this.ideMode = ideMode;
+         ImmutableMap.copyOf(propertyInvalidationErrors);
   }
 
   /**
-   * Enables or disables the parsing of JSDoc documentation. When IDE mode is
-   * enabled then documentation is always parsed.
+   * Configures the compiler for use as an IDE backend.  In this mode:
+   * <ul>
+   *  <li>No optimization passes will run.</li>
+   *  <li>The last time custom passes are invoked is
+   *      {@link CustomPassExecutionTime#BEFORE_OPTIMIZATIONS}</li>
+   *  <li>The compiler will always try to process all inputs fully, even
+   *      if it encounters errors.</li>
+   *  <li>The compiler may record more information than is strictly
+   *      needed for codegen.</li>
+   * </ul>
    *
-   * @param parseJsDocDocumentation
-   *           True to enable JSDoc documentation parsing, false to disable it.
+   * @deprecated Some "IDE" clients will need some of these options but not
+   * others. Consider calling setChecksOnly, setAllowRecompilation, etc,
+   * explicitly, instead of calling this method which does a variety of
+   * different things.
    */
-  public void setParseJsDocDocumentation(boolean parseJsDocDocumentation) {
+  @Deprecated
+  public void setIdeMode(boolean ideMode) {
+    setChecksOnly(ideMode);
+    setContinueAfterErrors(ideMode);
+    setAllowHotswapReplaceScript(ideMode);
+    setPreserveDetailedSourceInfo(ideMode);
+    setParseJsDocDocumentation(
+        ideMode
+            ? Config.JsDocParsing.INCLUDE_DESCRIPTIONS_NO_WHITESPACE
+            : Config.JsDocParsing.TYPES_ONLY);
+  }
+
+  public void setAllowHotswapReplaceScript(boolean allowRecompilation) {
+    this.allowHotswapReplaceScript = allowRecompilation;
+  }
+
+  boolean allowsHotswapReplaceScript() {
+    return allowHotswapReplaceScript;
+  }
+
+  public void setPreserveDetailedSourceInfo(boolean preserveDetailedSourceInfo) {
+    this.preserveDetailedSourceInfo = preserveDetailedSourceInfo;
+  }
+
+  boolean preservesDetailedSourceInfo() {
+    return preserveDetailedSourceInfo;
+  }
+
+  public void setContinueAfterErrors(boolean continueAfterErrors) {
+    this.continueAfterErrors = continueAfterErrors;
+  }
+
+  boolean canContinueAfterErrors() {
+    return continueAfterErrors;
+  }
+
+  /**
+   * Enables or disables the parsing of JSDoc documentation, and optionally also
+   * the preservation of all whitespace and formatting within a JSDoc comment.
+   * By default, whitespace is collapsed for all comments except {@literal @license} and
+   * {@literal @preserve} blocks,
+   *
+   */
+  public void setParseJsDocDocumentation(Config.JsDocParsing parseJsDocDocumentation) {
     this.parseJsDocDocumentation = parseJsDocDocumentation;
   }
 
@@ -1773,13 +2133,14 @@ public class CompilerOptions implements Serializable {
    *
    * @return True when JSDoc documentation will be parsed, false if not.
    */
-  public boolean isParseJsDocDocumentation() {
-    return this.ideMode || this.parseJsDocDocumentation;
+  public Config.JsDocParsing isParseJsDocDocumentation() {
+    return this.parseJsDocDocumentation;
   }
 
   /**
-   * Skip all passes (other than transpilation, if requested). Don't inject es6_runtime.js
-   * or do any checks/optimizations (this is useful for per-file transpilation).
+   * Skip all passes (other than transpilation, if requested). Don't inject any
+   * runtime libraries (unless explicitly requested) or do any checks/optimizations
+   * (this is useful for per-file transpilation).
    */
   public void setSkipNonTranspilationPasses(boolean skipNonTranspilationPasses) {
     this.skipNonTranspilationPasses = skipNonTranspilationPasses;
@@ -1791,9 +2152,6 @@ public class CompilerOptions implements Serializable {
 
   public void setCheckDeterminism(boolean checkDeterminism) {
     this.checkDeterminism = checkDeterminism;
-    if (checkDeterminism) {
-      this.useDebugLog = true;
-    }
   }
 
   public boolean getCheckDeterminism() {
@@ -1832,14 +2190,6 @@ public class CompilerOptions implements Serializable {
     this.inlineConstantVars = inlineConstantVars;
   }
 
-  public void setInlineFunctions(boolean inlineFunctions) {
-    this.inlineFunctions = inlineFunctions;
-  }
-
-  public void setInlineLocalFunctions(boolean inlineLocalFunctions) {
-    this.inlineLocalFunctions = inlineLocalFunctions;
-  }
-
   public void setCrossModuleCodeMotion(boolean crossModuleCodeMotion) {
     this.crossModuleCodeMotion = crossModuleCodeMotion;
   }
@@ -1863,14 +2213,6 @@ public class CompilerOptions implements Serializable {
     this.crossModuleMethodMotion = crossModuleMethodMotion;
   }
 
-  public void setInlineGetters(boolean inlineGetters) {
-    this.inlineGetters = inlineGetters;
-  }
-
-  public void setInlineVariables(boolean inlineVariables) {
-    this.inlineVariables = inlineVariables;
-  }
-
   public void setInlineLocalVariables(boolean inlineLocalVariables) {
     this.inlineLocalVariables = inlineLocalVariables;
   }
@@ -1880,7 +2222,14 @@ public class CompilerOptions implements Serializable {
   }
 
   public void setSmartNameRemoval(boolean smartNameRemoval) {
+    // TODO(bradfordcsmith): Remove the smart name removal option.
     this.smartNameRemoval = smartNameRemoval;
+    if (smartNameRemoval) {
+      // To get the effect this option used to have we need to enable these options.
+      // Don't disable them here if they were set explicitly, though.
+      this.removeUnusedVars = true;
+      this.removeUnusedPrototypeProperties = true;
+    }
   }
 
   public void setExtraSmartNameRemoval(boolean smartNameRemoval) {
@@ -1905,22 +2254,13 @@ public class CompilerOptions implements Serializable {
 
   public void setRemoveUnusedPrototypeProperties(boolean enabled) {
     this.removeUnusedPrototypeProperties = enabled;
+    // InlineSimpleMethods makes similar assumptions to
+    // RemoveUnusedCode, so they are enabled together.
+    this.inlineGetters = enabled;
   }
 
   public void setRemoveUnusedPrototypePropertiesInExterns(boolean enabled) {
     this.removeUnusedPrototypePropertiesInExterns = enabled;
-  }
-
-  public void setRemoveUnusedVars(boolean removeUnusedVars) {
-    this.removeUnusedVars = removeUnusedVars;
-  }
-
-  public void setRemoveUnusedLocalVars(boolean removeUnusedLocalVars) {
-    this.removeUnusedLocalVars = removeUnusedLocalVars;
-  }
-
-  public void setAliasExternals(boolean aliasExternals) {
-    this.aliasExternals = aliasExternals;
   }
 
   public void setCollapseVariableDeclarations(boolean enabled) {
@@ -1951,16 +2291,26 @@ public class CompilerOptions implements Serializable {
     this.convertToDottedProperties = convertToDottedProperties;
   }
 
+  public void setUseTypesForLocalOptimization(boolean useTypesForLocalOptimization) {
+    this.useTypesForLocalOptimization = useTypesForLocalOptimization;
+  }
+
+  public boolean shouldUseTypesForLocalOptimization() {
+    return this.useTypesForLocalOptimization;
+  }
+
+  @Deprecated
+  public void setUseTypesForOptimization(boolean useTypesForOptimization) {
+    if (useTypesForOptimization) {
+      this.disambiguateProperties = useTypesForOptimization;
+      this.ambiguateProperties = useTypesForOptimization;
+      this.inlineProperties = useTypesForOptimization;
+      this.useTypesForLocalOptimization = useTypesForOptimization;
+    }
+  }
+
   public void setRewriteFunctionExpressions(boolean rewriteFunctionExpressions) {
     this.rewriteFunctionExpressions = rewriteFunctionExpressions;
-  }
-
-  public void setOptimizeParameters(boolean optimizeParameters) {
-    this.optimizeParameters = optimizeParameters;
-  }
-
-  public void setOptimizeReturns(boolean optimizeReturns) {
-    this.optimizeReturns = optimizeReturns;
   }
 
   public void setOptimizeCalls(boolean optimizeCalls) {
@@ -1977,6 +2327,10 @@ public class CompilerOptions implements Serializable {
 
   public void setPropertyRenaming(PropertyRenamingPolicy propertyRenaming) {
     this.propertyRenaming = propertyRenaming;
+  }
+
+  public PropertyRenamingPolicy getPropertyRenaming() {
+    return this.propertyRenaming;
   }
 
   public void setLabelRenaming(boolean labelRenaming) {
@@ -2007,8 +2361,14 @@ public class CompilerOptions implements Serializable {
     this.renamePrefixNamespace = renamePrefixNamespace;
   }
 
-  public void setCollapseProperties(boolean collapseProperties) {
-    this.collapseProperties = collapseProperties;
+  public void setCollapsePropertiesLevel(PropertyCollapseLevel level) {
+    this.collapsePropertiesLevel = level;
+  }
+
+  @Deprecated
+  public void setCollapseProperties(boolean fullyCollapse) {
+    this.collapsePropertiesLevel =
+        fullyCollapse ? PropertyCollapseLevel.ALL : PropertyCollapseLevel.NONE;
   }
 
   public void setDevirtualizePrototypeMethods(boolean devirtualizePrototypeMethods) {
@@ -2042,8 +2402,16 @@ public class CompilerOptions implements Serializable {
     this.disambiguateProperties = disambiguateProperties;
   }
 
+  public boolean shouldDisambiguateProperties() {
+    return this.disambiguateProperties;
+  }
+
   public void setAmbiguateProperties(boolean ambiguateProperties) {
     this.ambiguateProperties = ambiguateProperties;
+  }
+
+  public boolean shouldAmbiguateProperties() {
+    return this.ambiguateProperties;
   }
 
   public void setAnonymousFunctionNaming(
@@ -2095,8 +2463,32 @@ public class CompilerOptions implements Serializable {
     this.closurePass = closurePass;
   }
 
-  public void setPreserveGoogRequires(boolean preserveGoogRequires) {
-    this.preserveGoogRequires = preserveGoogRequires;
+  /** Preserve closure primitives.
+   *
+   * For now, this only preserves goog.provide(), goog.require() and goog.module() calls.
+   */
+  public void setPreserveClosurePrimitives(boolean preserveClosurePrimitives) {
+    this.preserveClosurePrimitives = preserveClosurePrimitives;
+  }
+
+  // TODO(bangert): Delete this alias once it has been deprecated for 3 months.
+  /** Preserve goog.provide(), goog.require() and goog.module() calls. */
+  @Deprecated
+  public void setPreserveGoogProvidesAndRequires(boolean preserveGoogProvidesAndRequires) {
+     setPreserveClosurePrimitives(preserveGoogProvidesAndRequires);
+  }
+
+  public boolean shouldPreservesGoogProvidesAndRequires() {
+    return this.preserveClosurePrimitives || this.shouldGenerateTypedExterns();
+  }
+
+  public boolean shouldPreserveGoogModule() {
+    return this.preserveClosurePrimitives;
+  }
+
+  /** Do not process goog. intrinsics, such as goog.getCssName(). */
+  public boolean shouldPreserveGoogLibraryPrimitives() {
+    return this.preserveClosurePrimitives;
   }
 
   public void setPreserveTypeAnnotations(boolean preserveTypeAnnotations) {
@@ -2146,8 +2538,12 @@ public class CompilerOptions implements Serializable {
     this.moveFunctionDeclarations = moveFunctionDeclarations;
   }
 
-  public void setInstrumentationTemplate(String instrumentationTemplate) {
+  public void setInstrumentationTemplate(Instrumentation instrumentationTemplate) {
     this.instrumentationTemplate = instrumentationTemplate;
+  }
+
+  public void setInstrumentationTemplateFile(String filename){
+    this.instrumentationTemplateFile = filename;
   }
 
   public void setRecordFunctionInformation(boolean recordFunctionInformation) {
@@ -2188,6 +2584,10 @@ public class CompilerOptions implements Serializable {
     this.prettyPrint = prettyPrint;
   }
 
+  public boolean isPrettyPrint() {
+    return this.prettyPrint;
+  }
+
   public void setLineBreak(boolean lineBreak) {
     this.lineBreak = lineBreak;
   }
@@ -2206,6 +2606,18 @@ public class CompilerOptions implements Serializable {
 
   public void setInputDelimiter(String inputDelimiter) {
     this.inputDelimiter = inputDelimiter;
+  }
+
+  public void setQuoteKeywordProperties(boolean quoteKeywordProperties) {
+    this.quoteKeywordProperties = quoteKeywordProperties;
+  }
+
+  public boolean shouldQuoteKeywordProperties() {
+    // Never quote properties in .i.js files
+    if (incrementalCheckMode == IncrementalCheckMode.GENERATE_IJS) {
+      return false;
+    }
+    return this.quoteKeywordProperties || languageOut == LanguageMode.ECMASCRIPT3;
   }
 
   public void setErrorFormat(ErrorFormat errorFormat) {
@@ -2228,6 +2640,14 @@ public class CompilerOptions implements Serializable {
     return this.lineLengthThreshold;
   }
 
+  public void setUseOriginalNamesInOutput(boolean useOriginalNamesInOutput) {
+    this.useOriginalNamesInOutput = useOriginalNamesInOutput;
+  }
+
+  public boolean getUseOriginalNamesInOutput() {
+    return this.useOriginalNamesInOutput;
+  }
+
   public void setExternExports(boolean externExports) {
     this.externExports = externExports;
   }
@@ -2238,6 +2658,18 @@ public class CompilerOptions implements Serializable {
 
   public void setSourceMapOutputPath(String sourceMapOutputPath) {
     this.sourceMapOutputPath = sourceMapOutputPath;
+  }
+
+  public void setApplyInputSourceMaps(boolean applyInputSourceMaps) {
+    this.applyInputSourceMaps = applyInputSourceMaps;
+  }
+
+  public void setResolveSourceMapAnnotations(boolean resolveSourceMapAnnotations) {
+    this.resolveSourceMapAnnotations = resolveSourceMapAnnotations;
+  }
+
+  public void setSourceMapIncludeSourcesContent(boolean sourceMapIncludeSourcesContent) {
+    this.sourceMapIncludeSourcesContent = sourceMapIncludeSourcesContent;
   }
 
   public void setSourceMapDetailLevel(SourceMap.DetailLevel sourceMapDetailLevel) {
@@ -2283,6 +2715,31 @@ public class CompilerOptions implements Serializable {
   }
 
   /**
+   * Sets whether to rewrite polyfills.
+   */
+  public void setRewritePolyfills(boolean rewritePolyfills) {
+    this.rewritePolyfills = rewritePolyfills;
+  }
+
+  public boolean getRewritePolyfills() {
+    return this.rewritePolyfills;
+  }
+
+  /**
+   * Sets list of libraries to always inject, even if not needed.
+   */
+  public void setForceLibraryInjection(Iterable<String> libraries) {
+    this.forceLibraryInjection = ImmutableList.copyOf(libraries);
+  }
+
+  /**
+   * Sets the set of libraries to never inject, even if required.
+   */
+  public void setPreventLibraryInjection(boolean preventLibraryInjection) {
+    this.preventLibraryInjection = preventLibraryInjection;
+  }
+
+  /**
    * Set whether or not code should be modified to provide coverage
    * information.
    */
@@ -2290,22 +2747,275 @@ public class CompilerOptions implements Serializable {
     this.instrumentForCoverage = instrumentForCoverage;
   }
 
-  public List<ConformanceConfig> getConformanceConfigs() {
+  /** Set whether to instrument to collect branch coverage */
+  public void setInstrumentBranchCoverage(boolean instrumentBranchCoverage) {
+    if (instrumentForCoverage || !instrumentBranchCoverage) {
+      this.instrumentBranchCoverage = instrumentBranchCoverage;
+    } else {
+      throw new RuntimeException("The option instrumentForCoverage must be set to true for "
+          + "instrumentBranchCoverage to be set to true.");
+    }
+  }
+
+  public final ImmutableList<ConformanceConfig> getConformanceConfigs() {
     return conformanceConfigs;
   }
 
-  /**
-   * Both enable and configure conformance checks, if non-null.
-   */
+  /** Both enable and configure conformance checks, if non-null. */
+  @GwtIncompatible("Conformance")
   public void setConformanceConfig(ConformanceConfig conformanceConfig) {
-    this.conformanceConfigs = ImmutableList.of(conformanceConfig);
+    setConformanceConfigs(ImmutableList.of(conformanceConfig));
   }
 
   /**
    * Both enable and configure conformance checks, if non-null.
    */
+  @GwtIncompatible("Conformance")
   public void setConformanceConfigs(List<ConformanceConfig> configs) {
-    this.conformanceConfigs = ImmutableList.copyOf(configs);
+    this.conformanceConfigs =
+        ImmutableList.<ConformanceConfig>builder()
+            .add(ResourceLoader.loadGlobalConformance(CompilerOptions.class))
+            .addAll(configs)
+            .build();
+  }
+
+  public boolean shouldEmitUseStrict() {
+    return this.emitUseStrict.or(getLanguageOut().isDefaultStrict());
+  }
+
+  public CompilerOptions setEmitUseStrict(boolean emitUseStrict) {
+    this.emitUseStrict = Optional.of(emitUseStrict);
+    return this;
+  }
+
+  public ModuleLoader.ResolutionMode getModuleResolutionMode() {
+    return this.moduleResolutionMode;
+  }
+
+  public void setModuleResolutionMode(ModuleLoader.ResolutionMode mode) {
+    this.moduleResolutionMode = mode;
+  }
+
+  public List<String> getPackageJsonEntryNames() {
+    return this.packageJsonEntryNames;
+  }
+
+  public void setPackageJsonEntryNames(List<String> names) {
+    this.packageJsonEntryNames = names;
+  }
+
+  /** Serializes compiler options to a stream. */
+  @GwtIncompatible("ObjectOutputStream")
+  public void serialize(OutputStream objectOutputStream) throws IOException {
+    new java.io.ObjectOutputStream(objectOutputStream).writeObject(this);
+  }
+
+  /** Deserializes compiler options from a stream. */
+  @GwtIncompatible("ObjectInputStream")
+  public static CompilerOptions deserialize(InputStream objectInputStream)
+      throws IOException, ClassNotFoundException {
+    return (CompilerOptions) new java.io.ObjectInputStream(objectInputStream).readObject();
+  }
+
+  @Override
+  public String toString() {
+    String strValue =
+        MoreObjects.toStringHelper(this)
+            .omitNullValues()
+            .add("aggressiveFusion", aggressiveFusion)
+            .add("aliasableStrings", aliasableStrings)
+            .add("aliasAllStrings", aliasAllStrings)
+            .add("aliasHandler", getAliasTransformationHandler())
+            .add("aliasStringsBlacklist", aliasStringsBlacklist)
+            .add("allowHotswapReplaceScript", allowsHotswapReplaceScript())
+            .add("ambiguateProperties", ambiguateProperties)
+            .add("angularPass", angularPass)
+            .add("anonymousFunctionNaming", anonymousFunctionNaming)
+            .add("appNameStr", appNameStr)
+            .add("assumeClosuresOnlyCaptureReferences", assumeClosuresOnlyCaptureReferences)
+            .add("assumeStrictThis", assumeStrictThis())
+            .add("brokenClosureRequiresLevel", brokenClosureRequiresLevel)
+            .add("checkDeterminism", getCheckDeterminism())
+            .add("checkGlobalNamesLevel", checkGlobalNamesLevel)
+            .add("checkGlobalThisLevel", checkGlobalThisLevel)
+            .add("checkMissingGetCssNameBlacklist", checkMissingGetCssNameBlacklist)
+            .add("checkMissingGetCssNameLevel", checkMissingGetCssNameLevel)
+            .add("checksOnly", checksOnly)
+            .add("checkSuspiciousCode", checkSuspiciousCode)
+            .add("checkSymbols", checkSymbols)
+            .add("checkTypes", checkTypes)
+            .add("closurePass", closurePass)
+            .add("coalesceVariableNames", coalesceVariableNames)
+            .add("codingConvention", getCodingConvention())
+            .add("collapseAnonymousFunctions", collapseAnonymousFunctions)
+            .add("collapseObjectLiterals", collapseObjectLiterals)
+            .add("collapseProperties", collapsePropertiesLevel)
+            .add("collapseVariableDeclarations", collapseVariableDeclarations)
+            .add("colorizeErrorOutput", shouldColorizeErrorOutput())
+            .add("computeFunctionSideEffects", computeFunctionSideEffects)
+            .add("conformanceConfigs", getConformanceConfigs())
+            .add("continueAfterErrors", canContinueAfterErrors())
+            .add("convertToDottedProperties", convertToDottedProperties)
+            .add("crossModuleCodeMotion", crossModuleCodeMotion)
+            .add("crossModuleCodeMotionNoStubMethods", crossModuleCodeMotionNoStubMethods)
+            .add("crossModuleMethodMotion", crossModuleMethodMotion)
+            .add("cssRenamingMap", cssRenamingMap)
+            .add("cssRenamingWhitelist", cssRenamingWhitelist)
+            .add("customPasses", customPasses)
+            .add("dartPass", dartPass)
+            .add("deadAssignmentElimination", deadAssignmentElimination)
+            .add("debugFunctionSideEffectsPath", debugFunctionSideEffectsPath)
+            .add("declaredGlobalExternsOnWindow", declaredGlobalExternsOnWindow)
+            .add("defineReplacements", getDefineReplacements())
+            .add("dependencyOptions", dependencyOptions)
+            .add("devirtualizePrototypeMethods", devirtualizePrototypeMethods)
+            .add("devMode", devMode)
+            .add("disambiguatePrivateProperties", disambiguatePrivateProperties)
+            .add("disambiguateProperties", disambiguateProperties)
+            .add("enforceAccessControlCodingConventions", enforceAccessControlCodingConventions)
+            .add("environment", getEnvironment())
+            .add("errorFormat", errorFormat)
+            .add("errorHandler", errorHandler)
+            .add("exportLocalPropertyDefinitions", exportLocalPropertyDefinitions)
+            .add("exportTestFunctions", exportTestFunctions)
+            .add("externExports", isExternExportsEnabled())
+            .add("externExportsPath", externExportsPath)
+            .add("extraAnnotationNames", extraAnnotationNames)
+            .add("extractPrototypeMemberDeclarations", extractPrototypeMemberDeclarations)
+            .add("extraSmartNameRemoval", extraSmartNameRemoval)
+            .add("filesToPrintAfterEachPassRegexList", filesToPrintAfterEachPassRegexList)
+            .add("flowSensitiveInlineVariables", flowSensitiveInlineVariables)
+            .add("foldConstants", foldConstants)
+            .add("forceLibraryInjection", forceLibraryInjection)
+            .add("gatherCssNames", gatherCssNames)
+            .add("generateExportsAfterTypeChecking", generateExportsAfterTypeChecking)
+            .add("generateExports", generateExports)
+            .add("generatePseudoNames", generatePseudoNames)
+            .add("generateTypedExterns", shouldGenerateTypedExterns())
+            .add("idGenerators", idGenerators)
+            .add("idGeneratorsMapSerialized", idGeneratorsMapSerialized)
+            .add("incrementalCheckMode", incrementalCheckMode)
+            .add("inferConsts", inferConsts)
+            .add("inferTypes", inferTypes)
+            .add("inlineConstantVars", inlineConstantVars)
+            .add("inlineFunctionsLevel", inlineFunctionsLevel)
+            .add("inlineGetters", inlineGetters)
+            .add("inlineLocalVariables", inlineLocalVariables)
+            .add("inlineProperties", inlineProperties)
+            .add("inlineVariables", inlineVariables)
+            .add("inputAnonymousFunctionNamingMap", inputAnonymousFunctionNamingMap)
+            .add("inputDelimiter", inputDelimiter)
+            .add("inputPropertyMap", inputPropertyMap)
+            .add("inputSourceMaps", inputSourceMaps)
+            .add("inputVariableMap", inputVariableMap)
+            .add("instrumentationTemplateFile", instrumentationTemplateFile)
+            .add("instrumentationTemplate", instrumentationTemplate)
+            .add("instrumentForCoverage", instrumentForCoverage)
+            .add("instrumentForCoverageOnly", instrumentForCoverageOnly)
+            .add("instrumentBranchCoverage", instrumentBranchCoverage)
+            .add("j2clPassMode", j2clPassMode)
+            .add("labelRenaming", labelRenaming)
+            .add("languageIn", getLanguageIn())
+            .add("languageOut", getLanguageOut())
+            .add("legacyCodeCompile", legacyCodeCompile)
+            .add("lineBreak", lineBreak)
+            .add("lineLengthThreshold", lineLengthThreshold)
+            .add("locale", locale)
+            .add("markAsCompiled", markAsCompiled)
+            .add("markNoSideEffectCalls", markNoSideEffectCalls)
+            .add("maxFunctionSizeAfterInlining", maxFunctionSizeAfterInlining)
+            .add("messageBundle", messageBundle)
+            .add("moduleRoots", moduleRoots)
+            .add("modulesToPrintAfterEachPassRegexList", modulesToPrintAfterEachPassRegexList)
+            .add("moveFunctionDeclarations", moveFunctionDeclarations)
+            .add("nameGenerator", nameGenerator)
+            .add("optimizeArgumentsArray", optimizeArgumentsArray)
+            .add("optimizeCalls", optimizeCalls)
+            .add("outputCharset", outputCharset)
+            .add("outputJs", outputJs)
+            .add("outputJsStringUsage", outputJsStringUsage)
+            .add(
+                "parentModuleCanSeeSymbolsDeclaredInChildren",
+                parentModuleCanSeeSymbolsDeclaredInChildren)
+            .add("parseJsDocDocumentation", isParseJsDocDocumentation())
+            .add("polymerVersion", polymerVersion)
+            .add("preferLineBreakAtEndOfFile", preferLineBreakAtEndOfFile)
+            .add("preferSingleQuotes", preferSingleQuotes)
+            .add("preferStableNames", preferStableNames)
+            .add("preserveDetailedSourceInfo", preservesDetailedSourceInfo())
+            .add("preserveGoogProvidesAndRequires", preserveClosurePrimitives)
+            .add("preserveTypeAnnotations", preserveTypeAnnotations)
+            .add("prettyPrint", prettyPrint)
+            .add("preventLibraryInjection", preventLibraryInjection)
+            .add("printConfig", printConfig)
+            .add("printInputDelimiter", printInputDelimiter)
+            .add("printSourceAfterEachPass", printSourceAfterEachPass)
+            .add("processCommonJSModules", processCommonJSModules)
+            .add("processObjectPropertyString", processObjectPropertyString)
+            .add("propertyInvalidationErrors", propertyInvalidationErrors)
+            .add("propertyRenaming", propertyRenaming)
+            .add("protectHiddenSideEffects", protectHiddenSideEffects)
+            .add("quoteKeywordProperties", quoteKeywordProperties)
+            .add("recordFunctionInformation", recordFunctionInformation)
+            .add("removeAbstractMethods", removeAbstractMethods)
+            .add("removeSuperMethods", removeSuperMethods)
+            .add("removeClosureAsserts", removeClosureAsserts)
+            .add("removeJ2clAsserts", removeJ2clAsserts)
+            .add("removeDeadCode", removeDeadCode)
+            .add("removeUnusedClassProperties", removeUnusedClassProperties)
+            .add("removeUnusedConstructorProperties", removeUnusedConstructorProperties)
+            .add("removeUnusedLocalVars", removeUnusedLocalVars)
+            .add(
+                "removeUnusedPrototypePropertiesInExterns",
+                removeUnusedPrototypePropertiesInExterns)
+            .add("removeUnusedPrototypeProperties", removeUnusedPrototypeProperties)
+            .add("removeUnusedVars", removeUnusedVars)
+            .add(
+                "renamePrefixNamespaceAssumeCrossModuleNames",
+                renamePrefixNamespaceAssumeCrossModuleNames)
+            .add("renamePrefixNamespace", renamePrefixNamespace)
+            .add("renamePrefix", renamePrefix)
+            .add("replaceIdGenerators", replaceIdGenerators)
+            .add("replaceMessagesWithChromeI18n", replaceMessagesWithChromeI18n)
+            .add("replaceStringsFunctionDescriptions", replaceStringsFunctionDescriptions)
+            .add("replaceStringsInputMap", replaceStringsInputMap)
+            .add("replaceStringsPlaceholderToken", replaceStringsPlaceholderToken)
+            .add("replaceStringsReservedStrings", replaceStringsReservedStrings)
+            .add("reportOTIErrorsUnderNTI", reportOTIErrorsUnderNTI)
+            .add("reserveRawExports", reserveRawExports)
+            .add("rewriteFunctionExpressions", rewriteFunctionExpressions)
+            .add("rewritePolyfills", rewritePolyfills)
+            .add("runtimeTypeCheckLogFunction", runtimeTypeCheckLogFunction)
+            .add("runtimeTypeCheck", runtimeTypeCheck)
+            .add("shadowVariables", shadowVariables)
+            .add("skipNonTranspilationPasses", skipNonTranspilationPasses)
+            .add("smartNameRemoval", smartNameRemoval)
+            .add("sourceMapDetailLevel", sourceMapDetailLevel)
+            .add("sourceMapFormat", sourceMapFormat)
+            .add("sourceMapLocationMappings", sourceMapLocationMappings)
+            .add("sourceMapOutputPath", sourceMapOutputPath)
+            .add("stripNamePrefixes", stripNamePrefixes)
+            .add("stripNameSuffixes", stripNameSuffixes)
+            .add("stripTypePrefixes", stripTypePrefixes)
+            .add("stripTypes", stripTypes)
+            .add("summaryDetailLevel", summaryDetailLevel)
+            .add("syntheticBlockEndMarker", syntheticBlockEndMarker)
+            .add("syntheticBlockStartMarker", syntheticBlockStartMarker)
+            .add("tcProjectId", tcProjectId)
+            .add("tracer", tracer)
+            .add("transformAMDToCJSModules", transformAMDToCJSModules)
+            .add("trustedStrings", trustedStrings)
+            .add("tweakProcessing", getTweakProcessing())
+            .add("tweakReplacements", getTweakReplacements())
+            .add("useNewTypeInference", getNewTypeInference())
+            .add("emitUseStrict", emitUseStrict)
+            .add("useTypesForLocalOptimization", useTypesForLocalOptimization)
+            .add("variableRenaming", variableRenaming)
+            .add("warningsGuard", getWarningsGuard())
+            .add("wrapGoogModulesForWhitespaceOnly", wrapGoogModulesForWhitespaceOnly)
+            .toString();
+
+    return strValue;
   }
 
   //////////////////////////////////////////////////////////////////////////////
@@ -2333,15 +3043,8 @@ public class CompilerOptions implements Serializable {
      */
     ECMASCRIPT5_STRICT,
 
-    /**
-     * Shiny new JavaScript
-     */
-    ECMASCRIPT6,
-
-    /**
-     * Nitpicky, shiny new JavaScript
-     */
-    ECMASCRIPT6_STRICT,
+    /** ECMAScript standard approved in 2015. */
+    ECMASCRIPT_2015,
 
     /**
      * A superset of ES6 which adds Typescript-style type declarations. Always strict.
@@ -2349,71 +3052,87 @@ public class CompilerOptions implements Serializable {
     ECMASCRIPT6_TYPED,
 
     /**
+     * ECMAScript standard approved in 2016.
+     * Adds the exponent operator (**).
+     */
+    ECMASCRIPT_2016,
+
+    /** ECMAScript standard approved in 2017. Adds async/await and other syntax */
+    ECMASCRIPT_2017,
+
+    /** ECMAScript latest draft standard. */
+    ECMASCRIPT_NEXT,
+
+    /**
      * For languageOut only. The same language mode as the input.
      */
     NO_TRANSPILE;
 
-    /** Whether this is a "strict mode" language. */
-    public boolean isStrict() {
-      Preconditions.checkState(this != NO_TRANSPILE);
-      switch (this) {
-        case ECMASCRIPT5_STRICT:
-        case ECMASCRIPT6_STRICT:
-        case ECMASCRIPT6_TYPED:
-          return true;
-        default:
-          return false;
-      }
-    }
 
-    /** Whether this is ECMAScript 5 or higher. */
-    public boolean isEs5OrHigher() {
-      Preconditions.checkState(this != NO_TRANSPILE);
-      return this != LanguageMode.ECMASCRIPT3;
+    /** Whether this language mode defaults to strict mode */
+    boolean isDefaultStrict() {
+      switch (this) {
+        case ECMASCRIPT3:
+        case ECMASCRIPT5:
+          return false;
+        default:
+          return true;
+      }
     }
 
     /** Whether this is ECMAScript 6 or higher. */
+    @Deprecated
     public boolean isEs6OrHigher() {
-      Preconditions.checkState(this != NO_TRANSPILE);
-      switch (this) {
-        case ECMASCRIPT6:
-        case ECMASCRIPT6_STRICT:
-        case ECMASCRIPT6_TYPED:
-          return true;
-        default:
-          return false;
-      }
+      return this.toFeatureSet().contains(FeatureSet.ES6);
     }
 
     public static LanguageMode fromString(String value) {
-      switch (value) {
-        case "ECMASCRIPT6_STRICT":
-        case "ES6_STRICT":
-          return LanguageMode.ECMASCRIPT6_STRICT;
-        case "ECMASCRIPT6":
-        case "ES6":
-          return LanguageMode.ECMASCRIPT6;
-        case "ECMASCRIPT5_STRICT":
-        case "ES5_STRICT":
-          return LanguageMode.ECMASCRIPT5_STRICT;
-        case "ECMASCRIPT5":
-        case "ES5":
-          return LanguageMode.ECMASCRIPT5;
-        case "ECMASCRIPT3":
-        case "ES3":
-          return LanguageMode.ECMASCRIPT3;
-        case "ECMASCRIPT6_TYPED":
-        case "ES6_TYPED":
-          return LanguageMode.ECMASCRIPT6_TYPED;
+      if (value == null) {
+        return null;
       }
-      return null;
+      // Trim spaces, disregard case, and allow abbreviation of ECMASCRIPT for convenience.
+      String canonicalizedName = Ascii.toUpperCase(value.trim()).replaceFirst("^ES", "ECMASCRIPT");
+
+      if (canonicalizedName.equals("ECMASCRIPT6")
+          || canonicalizedName.equals("ECMASCRIPT6_STRICT")) {
+        return ECMASCRIPT_2015;
+      }
+
+      try {
+        return LanguageMode.valueOf(canonicalizedName);
+      } catch (IllegalArgumentException e) {
+        return null; // unknown name.
+      }
+    }
+
+    FeatureSet toFeatureSet() {
+      switch (this) {
+        case ECMASCRIPT3:
+          return FeatureSet.ES3;
+        case ECMASCRIPT5:
+        case ECMASCRIPT5_STRICT:
+          return FeatureSet.ES5;
+        case ECMASCRIPT_2015:
+          return FeatureSet.ES6_MODULES;
+        case ECMASCRIPT_2016:
+          return FeatureSet.ES7_MODULES;
+        case ECMASCRIPT_2017:
+          return FeatureSet.ES8_MODULES;
+        case ECMASCRIPT_NEXT:
+          return FeatureSet.ES_NEXT;
+        case ECMASCRIPT6_TYPED:
+          return FeatureSet.TYPESCRIPT;
+        case NO_TRANSPILE:
+          throw new IllegalStateException();
+      }
+      throw new IllegalStateException();
     }
   }
 
-  /** When to do the extra sanity checks */
-  static enum DevMode {
+  /** When to do the extra validity checks */
+  public static enum DevMode {
     /**
-     * Don't do any extra sanity checks.
+     * Don't do any extra checks.
      */
     OFF,
 
@@ -2435,8 +3154,9 @@ public class CompilerOptions implements Serializable {
 
   /** How much tracing we want to do */
   public static enum TracerMode {
-    ALL,  // Collect all timing and size metrics.
-    RAW_SIZE, // Collect all timing and size metrics, except gzipped size.
+    ALL, // Collect all timing and size metrics. Very slow.
+    RAW_SIZE, // Collect all timing and size metrics, except gzipped size. Slow.
+    AST_SIZE, // For size data, don't serialize the AST, just count the number of nodes.
     TIMING_ONLY, // Collect timing metrics only.
     OFF;  // Collect no timing and size metrics.
 
@@ -2458,6 +3178,12 @@ public class CompilerOptions implements Serializable {
     public boolean shouldStrip() {
       return this == STRIP;
     }
+  }
+
+  /** What kind of isolation is going to be used */
+  public static enum IsolationMode {
+    NONE, // output does not include additional isolation.
+    IIFE; // The output should be wrapped in an IIFE to isolate global variables.
   }
 
   /**
@@ -2525,10 +3251,7 @@ public class CompilerOptions implements Serializable {
   static final AliasTransformationHandler NULL_ALIAS_TRANSFORMATION_HANDLER =
       new NullAliasTransformationHandler();
 
-  private static class NullAliasTransformationHandler
-      implements AliasTransformationHandler, Serializable {
-    private static final long serialVersionUID = 0L;
-
+  private static class NullAliasTransformationHandler implements AliasTransformationHandler {
     private static final AliasTransformation NULL_ALIAS_TRANSFORMATION =
         new NullAliasTransformation();
 
@@ -2539,13 +3262,152 @@ public class CompilerOptions implements Serializable {
       return NULL_ALIAS_TRANSFORMATION;
     }
 
-    private static class NullAliasTransformation
-        implements AliasTransformation, Serializable {
-      private static final long serialVersionUID = 0L;
-
+    private static class NullAliasTransformation implements AliasTransformation {
       @Override
       public void addAlias(String alias, String definition) {
       }
     }
+  }
+
+  /**
+   * An environment specifies the built-in externs that are loaded for a given
+   * compilation.
+   */
+  public static enum Environment {
+    /**
+     * Hand crafted externs that have traditionally been the default externs.
+     */
+    BROWSER,
+
+    /**
+     * Only language externs are loaded.
+     */
+    CUSTOM
+  }
+
+  /**
+   * Whether standard input or standard output should be an array of
+   * JSON encoded files
+   */
+  static enum JsonStreamMode {
+    /**
+     * stdin/out are both single files.
+     */
+    NONE,
+
+    /**
+     * stdin is a json stream.
+     */
+    IN,
+
+    /**
+     * stdout is a json stream.
+     */
+    OUT,
+
+    /**
+     * stdin and stdout are both json streams.
+     */
+    BOTH
+  }
+
+  /** How compiler should prune files based on the provide-require dependency graph */
+  public static enum DependencyMode {
+    /**
+     * All files will be included in the compilation
+     */
+    NONE,
+
+    /**
+     * Files must be discoverable from specified entry points. Files
+     * which do not goog.provide a namespace and are not either
+     * an ES6 or CommonJS module will be automatically treated as entry points.
+     * Module files will be included only if referenced from an entry point.
+     */
+    LOOSE,
+
+    /**
+     * Files must be discoverable from specified entry points. Files which
+     * do not goog.provide a namespace and are neither
+     * an ES6 or CommonJS module will be dropped. Module files will be included
+     * only if referenced from an entry point.
+     */
+    STRICT
+  }
+
+  /**
+   * A mode enum used to indicate whether J2clPass should be enabled, disabled, or enabled
+   * automatically if there is any J2cl source file (i.e. in the AUTO mode).
+   */
+  public static enum J2clPassMode {
+    /** J2clPass is disabled. */
+    OFF,
+    /** It auto-detects whether there are J2cl generated file. If yes, execute J2clPass. */
+    AUTO;
+
+    boolean shouldAddJ2clPasses() {
+      return this == AUTO;
+    }
+  }
+
+  public boolean expectStrictModeInput() {
+    return isStrictModeInput.or(getLanguageIn().isDefaultStrict());
+  }
+
+  public CompilerOptions setStrictModeInput(boolean isStrictModeInput) {
+    this.isStrictModeInput = Optional.of(isStrictModeInput);
+    return this;
+  }
+
+  public char[] getPropertyReservedNamingFirstChars() {
+    char[] reservedChars = anonymousFunctionNaming.getReservedCharacters();
+    if (polymerVersion != null && polymerVersion > 1) {
+      if (reservedChars == null) {
+        reservedChars = POLYMER_PROPERTY_RESERVED_FIRST_CHARS;
+      } else {
+        reservedChars = Chars.concat(reservedChars, POLYMER_PROPERTY_RESERVED_FIRST_CHARS);
+      }
+    } else if (angularPass) {
+      if (reservedChars == null) {
+        reservedChars = ANGULAR_PROPERTY_RESERVED_FIRST_CHARS;
+      } else {
+        reservedChars = Chars.concat(reservedChars, ANGULAR_PROPERTY_RESERVED_FIRST_CHARS);
+      }
+    }
+    return reservedChars;
+  }
+
+  public char[] getPropertyReservedNamingNonFirstChars() {
+    char[] reservedChars = anonymousFunctionNaming.getReservedCharacters();
+    if (polymerVersion != null && polymerVersion > 1) {
+      if (reservedChars == null) {
+        reservedChars = POLYMER_PROPERTY_RESERVED_NON_FIRST_CHARS;
+      } else {
+        reservedChars = Chars.concat(reservedChars, POLYMER_PROPERTY_RESERVED_NON_FIRST_CHARS);
+      }
+    }
+    return reservedChars;
+  }
+
+  @GwtIncompatible("ObjectOutputStream")
+  private void writeObject(ObjectOutputStream out) throws IOException, ClassNotFoundException {
+    out.defaultWriteObject();
+    out.writeObject(outputCharset == null ? null : outputCharset.name());
+  }
+
+  @GwtIncompatible("ObjectInputStream")
+  private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+    in.defaultReadObject();
+    String outputCharsetName = (String) in.readObject();
+    if (outputCharsetName != null) {
+      outputCharset = Charset.forName(outputCharsetName);
+    }
+  }
+
+  boolean shouldOptimize() {
+    return !skipNonTranspilationPasses
+        && !checksOnly
+        && !shouldGenerateTypedExterns()
+        && !instrumentForCoverageOnly;
   }
 }

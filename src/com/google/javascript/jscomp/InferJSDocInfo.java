@@ -16,15 +16,15 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.jstype.EnumType;
 import com.google.javascript.rhino.jstype.JSType;
 import com.google.javascript.rhino.jstype.ObjectType;
-
 import javax.annotation.Nullable;
 
 /**
@@ -69,27 +69,27 @@ class InferJSDocInfo extends AbstractPostOrderCallback
   @Override
   public void process(Node externs, Node root) {
     if (externs != null) {
-      NodeTraversal.traverse(compiler, externs, this);
+      NodeTraversal.traverseEs6(compiler, externs, this);
     }
     if (root != null) {
-      NodeTraversal.traverse(compiler, root, this);
+      NodeTraversal.traverseEs6(compiler, root, this);
     }
   }
 
   @Override
   public void hotSwapScript(Node root, Node originalRoot) {
-    Preconditions.checkNotNull(root);
-    Preconditions.checkState(root.isScript());
-    NodeTraversal.traverse(compiler, root, this);
+    checkNotNull(root);
+    checkState(root.isScript());
+    NodeTraversal.traverseEs6(compiler, root, this);
   }
 
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
     JSDocInfo docInfo;
 
-    switch (n.getType()) {
+    switch (n.getToken()) {
       // Infer JSDocInfo on types of all type declarations on variables.
-      case Token.NAME:
+      case NAME:
         if (parent == null) {
           return;
         }
@@ -140,9 +140,9 @@ class InferJSDocInfo extends AbstractPostOrderCallback
         attachJSDocInfoToNominalTypeOrShape(objType, docInfo, n.getString());
         break;
 
-      case Token.STRING_KEY:
-      case Token.GETTER_DEF:
-      case Token.SETTER_DEF:
+      case STRING_KEY:
+      case GETTER_DEF:
+      case SETTER_DEF:
         docInfo = n.getJSDocInfo();
         if (docInfo == null) {
           return;
@@ -156,7 +156,7 @@ class InferJSDocInfo extends AbstractPostOrderCallback
         }
         break;
 
-      case Token.GETPROP:
+      case GETPROP:
         // Infer JSDocInfo on properties.
         // There are two ways to write doc comments on a property.
         //
@@ -194,6 +194,8 @@ class InferJSDocInfo extends AbstractPostOrderCallback
             }
           }
         }
+        break;
+      default:
         break;
     }
   }

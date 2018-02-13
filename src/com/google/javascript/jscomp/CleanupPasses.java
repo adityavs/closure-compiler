@@ -16,13 +16,15 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.javascript.jscomp.parsing.parser.FeatureSet.ES5;
+
 import com.google.common.collect.ImmutableList;
-import com.google.javascript.jscomp.DefaultPassConfig.HotSwapPassFactory;
 import com.google.javascript.jscomp.GlobalVarReferenceMap.GlobalVarRefCleanupPass;
+import com.google.javascript.jscomp.PassFactory.HotSwapPassFactory;
+import com.google.javascript.jscomp.parsing.parser.FeatureSet;
 import com.google.javascript.rhino.FunctionTypeI;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.TypeI;
-
 import java.util.ArrayList;
 import java.util.List;
 
@@ -32,8 +34,6 @@ import java.util.List;
  * @author tylerg@google.com (Tyler Goodwin)
  */
 class CleanupPasses extends PassConfig {
-
-  private State state;
 
   public CleanupPasses(CompilerOptions options) {
     super(options);
@@ -49,53 +49,58 @@ class CleanupPasses extends PassConfig {
   }
 
   @Override
-  protected State getIntermediateState() {
-    return state;
-  }
-
-  @Override
   protected List<PassFactory> getOptimizations() {
     return ImmutableList.of();
   }
 
-  @Override
-  protected void setIntermediateState(State state) {
-    this.state = state;
-  }
-
   final PassFactory fieldCleanupPassFactory =
-      new HotSwapPassFactory("FieldCleaupPassFactory", false) {
+      new HotSwapPassFactory("FieldCleanupPassFactory") {
         @Override
         protected HotSwapCompilerPass create(
             AbstractCompiler compiler) {
           return new FieldCleanupPass(compiler);
         }
+
+        @Override
+        protected FeatureSet featureSet() {
+          return ES5;
+        }
       };
 
   final PassFactory scopeCleanupPassFactory =
-      new HotSwapPassFactory("ScopeCleanupPassFactory", false) {
+      new HotSwapPassFactory("ScopeCleanupPassFactory") {
         @Override
         protected HotSwapCompilerPass create(
             AbstractCompiler compiler) {
           return new MemoizedScopeCleanupPass(compiler);
         }
+
+        @Override
+        protected FeatureSet featureSet() {
+          return ES5;
+        }
       };
 
   final PassFactory globalVarRefCleanupPassFactory =
-      new HotSwapPassFactory("GlobalVarRefCleanupPassFactory", false) {
+      new HotSwapPassFactory("GlobalVarRefCleanupPassFactory") {
         @Override
         protected HotSwapCompilerPass create(
             AbstractCompiler compiler) {
           return new GlobalVarRefCleanupPass(compiler);
         }
+
+        @Override
+        protected FeatureSet featureSet() {
+          return ES5;
+        }
   };
 
   /**
    * A CleanupPass implementation that will remove stored scopes from the
-   * MemoizedScopeCreator of the compiler instance for a the hot swapped script.
+   * MemoizedTypedScopeCreator of the compiler instance for a the hot swapped script.
    * <p>
    * This pass will also clear out Source Nodes of Function Types declared on
-   * Vars tracked by MemoizedScopeCreator
+   * Vars tracked by MemoizedTypedScopeCreator
    */
   static class MemoizedScopeCleanupPass implements HotSwapCompilerPass {
 
@@ -108,8 +113,8 @@ class CleanupPasses extends PassConfig {
     @Override
     public void hotSwapScript(Node scriptRoot, Node originalRoot) {
       ScopeCreator creator = compiler.getTypedScopeCreator();
-      if (creator instanceof MemoizedScopeCreator) {
-        MemoizedScopeCreator scopeCreator = (MemoizedScopeCreator) creator;
+      if (creator instanceof MemoizedTypedScopeCreator) {
+        MemoizedTypedScopeCreator scopeCreator = (MemoizedTypedScopeCreator) creator;
         String newSrc = scriptRoot.getSourceFileName();
         for (TypedVar var : scopeCreator.getAllSymbols()) {
           TypeI type = var.getType();

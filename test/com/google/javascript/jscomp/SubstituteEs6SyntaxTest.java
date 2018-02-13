@@ -22,18 +22,14 @@ package com.google.javascript.jscomp;
 public final class SubstituteEs6SyntaxTest extends CompilerTestCase {
 
   @Override
-  public void setUp() {
-    setAcceptedLanguage(CompilerOptions.LanguageMode.ECMASCRIPT6);
+  protected void setUp() throws Exception {
+    super.setUp();
+    setAcceptedLanguage(CompilerOptions.LanguageMode.ECMASCRIPT_2015);
   }
 
   @Override
-  public CompilerPass getProcessor(final Compiler compiler) {
+  protected CompilerPass getProcessor(final Compiler compiler) {
     return new SubstituteEs6Syntax(compiler);
-  }
-
-  @Override
-  protected int getNumRepetitions() {
-    return 1;
   }
 
   public void testArrowFunctions() {
@@ -42,16 +38,28 @@ public final class SubstituteEs6SyntaxTest extends CompilerTestCase {
     testSame("(function() { return arguments[0]; })");
     testSame("(function() { return ()=>this; })");
     testSame("(function() { return ()=>arguments[0]; })");
-    test("(function() { x++; return 5; })", "()=>{x++;return 5}");
-    test("(function() { return 5; })", "()=>5");
+    testSame("(function() { x++; return 5; })");
     test("()=>{ return 5; }", "()=>5");
-    test("(function() { return; })", "()=>undefined");
-    test("(function(x) { return x+1 })", "(x) => x+1");
+    test("()=>{ return; }", "()=>undefined");
+    test("(x)=>{ return x+1 }", "(x) => x+1");
+    test("(x)=>{ return x++,5; }", "(x) => (x++,5)");
   }
 
-  public void testMemberFunctions() {
-    test("({ method : function(){} });", "({ method(){} });");
-    test("({ method : function(){ return this; } });", "({ method(){ return this; } });");
-    testSame("({ method: ()=>this })");
+  public void testObjectPattern() {
+    // Tree comparisons don't fail on node property differences, so compare as strings instead.
+    disableCompareAsTree();
+    test("const {x:x}=y", "const {x}=y");
+    testSame("const {x:y}=z");
+    testSame("const {[x]:x}=y");
+    testSame("const {[\"x\"]:x}=y");
+  }
+
+  public void testObjectLiteral() {
+    // Tree comparisons don't fail on node property differences, so compare as strings instead.
+    disableCompareAsTree();
+    testSame("const o={x:y}");
+    testSame("const o={[x]:x}");
+    testSame("const o={[\"x\"]:x}");
+    test("const o={x:x}", "const o={x}");
   }
 }

@@ -41,12 +41,11 @@ package com.google.javascript.rhino.jstype;
 
 import static com.google.common.base.Preconditions.checkState;
 
-import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.javascript.rhino.ErrorReporter;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
-
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -88,7 +87,7 @@ public class PrototypeObjectType extends ObjectType {
   // by printing all properties.
   private boolean prettyPrint = false;
 
-  private static final int MAX_PRETTY_PRINTED_PROPERTIES = 4;
+  private static final int MAX_PRETTY_PRINTED_PROPERTIES = 10;
 
   /**
    * Creates an object type.
@@ -122,7 +121,7 @@ public class PrototypeObjectType extends ObjectType {
    *        (a.k.a. {@code [[Prototype]]}) as defined by ECMA-262. If the
    *        implicit prototype is {@code null} the implicit prototype will be
    *        set to the {@link JSTypeNative#OBJECT_TYPE}.
-   * @param isAnonymous True if the class is intended to be anonymous.
+   * @param anonymousType True if the class is intended to be anonymous.
    */
   PrototypeObjectType(JSTypeRegistry registry, String className,
       ObjectType implicitPrototype, boolean anonymousType) {
@@ -155,7 +154,7 @@ public class PrototypeObjectType extends ObjectType {
    * Creates an object type, allowing specification of the implicit prototype,
    * whether the object is native, and any templatized types.
    */
-  PrototypeObjectType(JSTypeRegistry registry, String className,
+  private PrototypeObjectType(JSTypeRegistry registry, String className,
       ObjectType implicitPrototype, boolean nativeType,
       TemplateTypeMap templateTypeMap, boolean anonymousType) {
     super(registry, templateTypeMap);
@@ -278,49 +277,56 @@ public class PrototypeObjectType extends ObjectType {
   }
 
   @Override
-  String toStringHelper(boolean forAnnotations) {
+  StringBuilder appendTo(StringBuilder sb, boolean forAnnotations) {
     if (hasReferenceName()) {
-      return getReferenceName();
-    } else if (prettyPrint) {
-      // Don't pretty print recursively.
-      prettyPrint = false;
-
-      // Use a tree set so that the properties are sorted.
-      Set<String> propertyNames = new TreeSet<>();
-      for (ObjectType current = this;
-           current != null && !current.isNativeObjectType() &&
-               propertyNames.size() <= MAX_PRETTY_PRINTED_PROPERTIES;
-           current = current.getImplicitPrototype()) {
-        propertyNames.addAll(current.getOwnPropertyNames());
-      }
-
-      StringBuilder sb = new StringBuilder();
-      sb.append("{");
-
-      int i = 0;
-      for (String property : propertyNames) {
-        if (i > 0) {
-          sb.append(", ");
-        }
-
-        sb.append(property);
-        sb.append(": ");
-        sb.append(getPropertyType(property).toStringHelper(forAnnotations));
-
-        ++i;
-        if (!forAnnotations && i == MAX_PRETTY_PRINTED_PROPERTIES) {
-          sb.append(", ...");
-          break;
-        }
-      }
-
-      sb.append("}");
-
-      prettyPrint = true;
-      return sb.toString();
-    } else {
-      return forAnnotations ? "?" : "{...}";
+      return sb.append(forAnnotations ? getNormalizedReferenceName() : getReferenceName());
     }
+    if (!prettyPrint) {
+      return sb.append(forAnnotations ? "?" : "{...}");
+    }
+    // Don't pretty print recursively.
+    prettyPrint = false;
+
+    // Use a tree set so that the properties are sorted.
+    Set<String> propertyNames = new TreeSet<>();
+    for (ObjectType current = this;
+        current != null && !current.isNativeObjectType() &&
+            propertyNames.size() <= MAX_PRETTY_PRINTED_PROPERTIES;
+        current = current.getImplicitPrototype()) {
+      propertyNames.addAll(current.getOwnPropertyNames());
+    }
+
+    sb.append("{");
+    boolean useNewlines = !forAnnotations && propertyNames.size() > 2;
+
+    int i = 0;
+    for (String property : propertyNames) {
+      if (i > 0) {
+        sb.append(",");
+      }
+      if (useNewlines) {
+        sb.append("\n  ");
+      } else if (i > 0) {
+        sb.append(" ");
+      }
+
+      sb.append(property).append(": ");
+      getPropertyType(property).appendAsNonNull(sb, forAnnotations);
+
+      ++i;
+      if (!forAnnotations && i == MAX_PRETTY_PRINTED_PROPERTIES) {
+        sb.append(", ...");
+        break;
+      }
+    }
+    if (useNewlines) {
+      sb.append("\n");
+    }
+
+    sb.append("}");
+
+    prettyPrint = true;
+    return sb;
   }
 
   void setPrettyPrint(boolean prettyPrint) {
@@ -374,13 +380,13 @@ public class PrototypeObjectType extends ObjectType {
 
   @Override
   public boolean isSubtype(JSType that) {
-    return isSubtype(that, ImplCache.create());
+    return isSubtype(that, ImplCache.create(), SubtypingMode.NORMAL);
   }
 
   @Override
   protected boolean isSubtype(JSType that,
-      ImplCache implicitImplCache) {
-    if (JSType.isSubtypeHelper(this, that, implicitImplCache)) {
+      ImplCache implicitImplCache, SubtypingMode subtypingMode) {
+    if (JSType.isSubtypeHelper(this, that, implicitImplCache, subtypingMode)) {
       return true;
     }
 
@@ -393,7 +399,8 @@ public class PrototypeObjectType extends ObjectType {
 
     // record types
     if (that.isRecordType()) {
-      return RecordType.isSubtype(this, that.toMaybeRecordType(), implicitImplCache);
+      return PrototypeObjectType.isSubtype(
+          this, that.toMaybeRecordType(), implicitImplCache, subtypingMode);
     }
 
     // Interfaces
@@ -404,38 +411,45 @@ public class PrototypeObjectType extends ObjectType {
 
     if (getConstructor() != null && getConstructor().isInterface()) {
       for (ObjectType thisInterface : getCtorExtendedInterfaces()) {
-        if (thisInterface.isSubtype(that, implicitImplCache)) {
+        if (thisInterface.isSubtype(that, implicitImplCache, subtypingMode)) {
           return true;
         }
       }
     } else if (thatCtor != null && thatCtor.isInterface()) {
       Iterable<ObjectType> thisInterfaces = getCtorImplementedInterfaces();
       for (ObjectType thisInterface : thisInterfaces) {
-        if (thisInterface.isSubtype(that, implicitImplCache)) {
+        if (thisInterface.isSubtype(that, implicitImplCache, subtypingMode)) {
           return true;
         }
       }
     }
 
     // other prototype based objects
-    if (isUnknownType() || implicitPrototypeChainIsUnknown()) {
+    if (isUnknownType()) {
       // If unsure, say 'yes', to avoid spurious warnings.
-      // TODO(user): resolve the prototype chain completely in all cases,
-      // to avoid guessing.
       return true;
     }
     return thatObj != null && isImplicitPrototype(thatObj);
   }
 
-  private boolean implicitPrototypeChainIsUnknown() {
-    ObjectType p = getImplicitPrototype();
-    while (p != null) {
-      if (p.isUnknownType()) {
-        return true;
+  /** Determines if typeA is a subtype of typeB */
+  private static boolean isSubtype(ObjectType typeA, RecordType typeB,
+      ImplCache implicitImplCache, SubtypingMode subtypingMode) {
+    // typeA is a subtype of record type typeB iff:
+    // 1) typeA has all the properties declared in typeB.
+    // 2) And for each property of typeB, its type must be
+    //    a super type of the corresponding property of typeA.
+    for (String property : typeB.getOwnPropertyNames()) {
+      if (!typeA.hasProperty(property)) {
+        return false;
       }
-      p = p.getImplicitPrototype();
+      JSType propA = typeA.getPropertyType(property);
+      JSType propB = typeB.getPropertyType(property);
+      if (!propA.isSubtype(propB, implicitImplCache, subtypingMode)) {
+        return false;
+      }
     }
-    return false;
+    return true;
   }
 
   @Override
@@ -451,7 +465,7 @@ public class PrototypeObjectType extends ObjectType {
 
   @Override
   void setOwnerFunction(FunctionType type) {
-    Preconditions.checkState(ownerFunction == null || type == null);
+    checkState(ownerFunction == null || type == null);
     ownerFunction = type;
   }
 
@@ -482,6 +496,15 @@ public class PrototypeObjectType extends ObjectType {
     if (implicitPrototype != null) {
       implicitPrototypeFallback =
           (ObjectType) implicitPrototype.resolve(t, scope);
+      FunctionType ctor = getConstructor();
+      if (ctor != null) {
+        FunctionType superCtor = ctor.getSuperClassConstructor();
+        if (superCtor != null) {
+          // If the super ctor of this prototype object was not known before resolution, then the
+          // subTypes would not have been set. Update them.
+          superCtor.addSubTypeIfNotPresent(ctor);
+        }
+      }
     }
     for (Property prop : properties.values()) {
       prop.setType(safeResolve(prop.getType(), t, scope));
@@ -530,4 +553,12 @@ public class PrototypeObjectType extends ObjectType {
     }
   }
 
+  @Override
+  public int hashCode() {
+    if (isStructuralType()) {
+      return Objects.hash(className, properties);
+    } else {
+      return System.identityHashCode(this);
+    }
+  }
 }

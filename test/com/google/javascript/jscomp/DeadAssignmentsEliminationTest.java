@@ -29,16 +29,17 @@ public final class DeadAssignmentsEliminationTest extends CompilerTestCase {
   }
 
   @Override
-  public void setUp() {
-    super.enableLineNumberCheck(true);
+  protected void setUp() throws Exception {
+    super.setUp();
+    enableNormalize();
   }
 
   @Override
-  public CompilerPass getProcessor(final Compiler compiler) {
+  protected CompilerPass getProcessor(final Compiler compiler) {
     return new CompilerPass() {
       @Override
       public void process(Node externs, Node js) {
-        NodeTraversal.traverse(
+        NodeTraversal.traverseEs6(
             compiler, js, new DeadAssignmentsElimination(compiler));
       }
     };
@@ -58,6 +59,14 @@ public final class DeadAssignmentsEliminationTest extends CompilerTestCase {
     // functions with inner functions.
     inFunction("var a; a=function f(){}");
   }
+
+  public void testArguments() {
+    test("function f(a){ a=1; }", "function f(a){ 1; }");
+    test("function f(a){ a=1+1; }", "function f(a){ 1+1; }");
+    test("function f(a){ a=foo(); }", "function f(a){ foo(); }");
+    test("function f(a){ a=1; a=foo(); }", "function f(a){ 1; foo(); }");
+  }
+
 
   public void testLoops() {
     inFunction("for(var a=0; a<10; a++) {}");
@@ -156,10 +165,44 @@ public final class DeadAssignmentsEliminationTest extends CompilerTestCase {
         "var x; try{1;throw 1;x} finally{x=2}; x");
   }
 
-  public void testDeadVarDeclarations() {
-    // Dead assignments in VAR is _NOT_ supported yet.
+  public void testErrorHandling2() {
+    inFunction(lines(
+        "try {",
+        "} catch (e) {",
+        "  e = 1; ",
+        "  let g = e;",
+        "  print(g)",
+        "}"
+    ));
+
+    inFunction(lines(
+        "try {",
+        "} catch (e) {",
+        "    e = 1;",
+        "    {",
+        "      let g = e;",
+        "      print(g)",
+        "    }",
+        "}"
+    ));
+  }
+
+  public void testDeadVarDeclarations1() {
+    inFunction("var x=1; x=2; x", "var x; 1; x=2; x");
+  }
+
+  public void testDeadVarDeclarations2() {
     inFunction("var x=1;");
-    inFunction("var x=1; x=2; x");
+    inFunction("var x=1; x=2; x", "var x; 1; x=2; x");
+    inFunction("var x=1, y=10; x=2; x", "var x; 1; var y; 10; x=2; x");
+    inFunction("var x=1, y=x; y");
+    inFunction("var x=1, y=x; x=2; x", "var x = 1; var y; x; x=2; x;");
+  }
+
+  public void testDeadVarDeclarations_forLoop() {
+    inFunction("for(var x=1;;);");
+    inFunction("for(var x=1,y=x;;);");
+    inFunction("for(var x=1;10;);");
   }
 
   public void testGlobal() {
@@ -215,8 +258,8 @@ public final class DeadAssignmentsEliminationTest extends CompilerTestCase {
     inFunction("var x; for(;;x -= 1){}");
     inFunction("var x; for(;;x = 0){}", "var x; for(;;0){}");
 
-    inFunction("var x; for(--x;;){}", "var x; for(;;){}");
-    inFunction("var x; for(x--;;){}", "var x; for(;;){}");
+    inFunction("var x; for(--x;;){}", "var x; void 0; for(;;){}");
+    inFunction("var x; for(x--;;){}", "var x; void 0; for(;;){}");
     inFunction("var x; for(x -= 1;;){}", "var x; for(x - 1;;){}");
     inFunction("var x; for(x = 0;;){}", "var x; for(0;;){}");
   }
@@ -445,6 +488,9 @@ public final class DeadAssignmentsEliminationTest extends CompilerTestCase {
          "};");
   }
 
+  public void testInExpression0() {
+    inFunction("var a; return a=(a=(a=a));", "var a; return a;");
+  }
 
   public void testInExpression1() {
     inFunction("var a; return a=(a=(a=3));", "var a; return 3;");
@@ -524,5 +570,295 @@ public final class DeadAssignmentsEliminationTest extends CompilerTestCase {
     // TODO(user): If you look outside of just liveness, x = {} is dead.
     // That probably requires value numbering or SSA to detect that case.
     inFunction("var x, y, z; x = {}; z = {}; for (x in z) { x() }");
+  }
+
+  public void testArrowFunction() {
+    test("() => {var x; x = 1}",
+        "() => {var x; 1}");
+
+    test("(a) => {a = foo()}",
+        "(a) => {foo()}");
+  }
+
+  public void testClassMethods() {
+    test(
+        lines(
+            "class C{",
+            "  func() {",
+            "    var x;",
+            "    x = 1;",
+            "  }",
+            "}"
+        ),
+        lines(
+            "class C{",
+            "  func() {",
+            "    var x;",
+            "    1;",
+            "  }",
+            "}"));
+
+    test(
+        lines(
+            "class C{",
+            "  constructor(x, y) {",
+            "    this.x = x;",
+            "    this.y = y;",
+            "  }",
+            "  func() {",
+            "    var z;",
+            "    z = 1;",
+            "    this.x = 3",
+            "  }",
+            "}"
+        ),
+        lines(
+            "class C{",
+            "  constructor(x, y) {",
+            "    this.x = x;",
+            "    this.y = y;",
+            "  }",
+            "  func() {",
+            "    var z;",
+            "    1;",
+            "    this.x = 3",
+            "  }",
+            "}"));
+  }
+
+  public void testGenerators() {
+    test(
+        lines(
+            "function* f() {",
+            "  var x, y;",
+            "  x = 1; y = 2;",
+            "  yield y;",
+            "}"
+        ),
+        lines(
+            "function* f() {",
+            "  var x, y;",
+            "  1; y = 2;",
+            "  yield y;",
+            "}"));
+  }
+
+  public void testForOf() {
+    inFunction("var x = {}; for (var y of x) { y() }");
+
+    inFunction("var x, y, z; x = {}; z = {}; for (y of x = z) {}",
+        "var x, y, z;   ({}); z = {}; for (y of z)     {}");
+  }
+
+  public void testTemplateStrings() {
+    inFunction("var name; name = 'Foo'; `Hello ${name}`");
+
+    inFunction("var name; name = 'Foo'; name = 'Bar'; `Hello ${name}`",
+        "var name; 'Foo'; name = 'Bar'; `Hello ${name}`");
+  }
+
+  public void testDestructuring() {
+    inFunction("var a, b, c; [a, b, c] = [1, 2, 3];");
+
+    inFunction("var a, b, c; [a, b, c] = [1, 2, 3]; return a + c;");
+
+    inFunction(
+        "var a, b; a = 1; b = 2; [a, b] = [3, 4]; return a + b;",
+        "var a, b; 1; 2; [a, b] = [3, 4]; return a + b;");
+
+    inFunction("var x; x = {}; [x.a] = [3];");
+  }
+
+  public void testDestructuringDeclarationRvalue() {
+    // Test array destructuring
+    inFunction(
+        lines(
+            "let arr = []",
+            "if (CONDITION) {",
+            "  arr = [3];",
+            "}",
+            "let [foo] = arr;",
+            "use(foo);"));
+
+    // Test object destructuring
+    inFunction(
+        lines(
+            "let obj = {}",
+            "if (CONDITION) {",
+            "  obj = {foo: 3};",
+            "}",
+            "let {foo} = obj;",
+            "use(foo);"));
+  }
+
+  public void testDestructuringAssignmentRValue() {
+    // Test array destructuring
+    inFunction(
+        lines(
+            "let arr = []",
+            "if (CONDITION) {",
+            "  arr = [3];",
+            "}",
+            "let foo;",
+            "[foo] = arr;",
+            "use(foo);"));
+
+    // Test object destructuring
+    inFunction(
+        lines(
+            "let obj = {}",
+            "if (CONDITION) {",
+            "  obj = {foo: 3};",
+            "}",
+            "let foo;",
+            "({foo} = obj);",
+            "use(foo);"));
+  }
+
+  public void testForOfWithDestructuring() {
+    inFunction(
+        lines(
+            "let x;",
+            "x = [];",
+            "var y = 5;", // Don't eliminate because if arr is empty, y will remain 5.
+            "for ([y = x] of arr) { y; }",
+            "y;"));
+
+    inFunction(
+        lines(
+            "let x;",
+            "x = [];",
+            "for (let [y = x] of arr) { y; }"));
+
+    inFunction("for (let [key, value] of arr) {}");
+    inFunction("for (let [key, value] of arr) { key; value; }");
+    inFunction(
+        "var a; a = 3; for (let [a] of arr) { a; }", "var a; 3; for (let [a] of arr) { a; }");
+  }
+
+  public void testReferenceInDestructuringPatternDefaultValue() {
+    inFunction(
+        lines(
+            "let bar = [];",
+            "const {foo = bar} = obj;",
+            "foo;"));
+
+    inFunction(
+        lines(
+            "let bar;",
+            "bar = [];",
+            "const {foo = bar} = obj;",
+            "foo;"));
+
+    inFunction("let bar; bar = 3; const [foo = bar] = arr; foo;");
+    inFunction("let foo, bar; bar = 3; [foo = bar] = arr; foo;");
+  }
+
+  public void testReferenceInDestructuringPatternComputedProperty() {
+    inFunction("let str; str = 'bar'; const {[str + 'baz']: foo} = obj; foo;");
+
+    inFunction(
+        lines(
+            "let obj = {};",
+            "let str, foo;",
+            "str = 'bar';",
+            "({[str + 'baz']: foo} = obj);",
+            "foo;"));
+  }
+
+  public void testDefaultParameter() {
+    test(
+        lines(
+            "function f(x, y = 12) {",
+            "  var z;",
+            "  z = y;",
+            "}"
+        ),
+        lines(
+            "function f(x, y = 12) {",
+            "  var z;",
+            "  y;",
+            "}"));
+  }
+
+  public void testObjectLiterals() {
+    test(
+        lines(
+            "var obj = {",
+            "  f() {",
+            "  var x;",
+            "  x = 2;",
+            "  }",
+            "}"
+        ),
+        lines(
+            "var obj = {",
+            "  f() {",
+            "  var x;",
+            "  2;",
+            "  }",
+            "}"));
+  }
+
+  public void testObjectLiteralsComputedProperties() {
+    inFunction("let a; a = 2; let obj = {[a]: 3}; obj");
+  }
+
+  public void testLet() {
+    inFunction("let a; a = 2;",
+        "let a; 2;");
+
+    inFunction("let a; let b; a = foo(); b = 2; return b;",
+        "let a; let b; foo(); b = 2; return b;");
+  }
+
+  public void testConst1() {
+    inFunction("const a = 1;");
+  }
+
+  public void testConst2() {
+    test(
+        "async function f(d) { if (d) { d = 5; } const a = 1; const b = 2; const [x, y] = b; }",
+        "async function f(d) { if (d) {     5; } const a = 1; const b = 2; const [x, y] = b; }");
+  }
+
+  public void testBlockScoping() {
+    inFunction(
+        lines(
+            "let x;",
+            "{",
+            "  let x;",
+            "  x = 1;",
+            "}",
+            "x = 2;",
+            "return x;"
+        ),
+        lines(
+            "let x;",
+            "{",
+            "  let x$jscomp$1;",
+            "  1;",
+            "}",
+            "x = 2;",
+            "return x;"));
+
+    inFunction(
+        lines(
+            "let x;",
+            "x = 2",
+            "{",
+            "  let x;",
+            "  x = 1;",
+            "}",
+            "print(x);"
+        ),
+        lines(
+            "let x;",
+            "x = 2;",
+            "{",
+            "  let x$jscomp$1;",
+            "  1;",
+            "}",
+            "print(x);"));
   }
 }

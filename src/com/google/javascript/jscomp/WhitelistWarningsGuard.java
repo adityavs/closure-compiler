@@ -16,10 +16,11 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkNotNull;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
+import com.google.common.annotations.GwtIncompatible;
 import com.google.common.base.Joiner;
-import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
@@ -28,7 +29,6 @@ import com.google.common.collect.TreeMultimap;
 import com.google.common.io.CharSource;
 import com.google.common.io.CharStreams;
 import com.google.common.io.Files;
-
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
@@ -49,6 +49,7 @@ import java.util.regex.Pattern;
  * @author anatol@google.com (Anatol Pomazau)
  * @author bashir@google.com (Bashir Sadjad)
  */
+@GwtIncompatible("java.io, java.util.regex")
 public class WhitelistWarningsGuard extends WarningsGuard {
   private static final Splitter LINE_SPLITTER = Splitter.on('\n');
 
@@ -65,14 +66,14 @@ public class WhitelistWarningsGuard extends WarningsGuard {
   /**
    * This class depends on an input set that contains the white-list. The format
    * of each white-list string is:
-   * <file-name>:<line-number>?  <warning-description>
-   * # <optional-comment>
+   * {@code <file-name>:<line-number>?  <warning-description>}
+   * {@code # <optional-comment>}
    *
    * @param whitelist The set of JS-warnings that are white-listed. This is
    *     expected to have similar format as {@code formatWarning(JSError)}.
    */
   public WhitelistWarningsGuard(Set<String> whitelist) {
-    Preconditions.checkNotNull(whitelist);
+    checkNotNull(whitelist);
     this.whitelist = normalizeWhitelist(whitelist);
   }
 
@@ -157,7 +158,7 @@ public class WhitelistWarningsGuard extends WarningsGuard {
   // TODO(nicksantos): This is a weird API.
   static Set<String> loadWhitelistedJsWarnings(Reader reader)
       throws IOException {
-    Preconditions.checkNotNull(reader);
+    checkNotNull(reader);
     Set<String> result = new HashSet<>();
 
     result.addAll(CharStreams.readLines(reader));
@@ -275,6 +276,10 @@ public class WhitelistWarningsGuard extends WarningsGuard {
       }
 
       for (DiagnosticType type : warningsByType.keySet()) {
+        if (DiagnosticGroups.DEPRECATED.matches(type)) {
+          // Deprecation warnings are not raisable to error, so we don't need them in whitelists.
+          continue;
+        }
         out.append("\n# Warning ")
             .append(type.key)
             .append(": ")

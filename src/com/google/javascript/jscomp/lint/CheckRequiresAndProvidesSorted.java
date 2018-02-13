@@ -15,104 +15,211 @@
  */
 package com.google.javascript.jscomp.lint;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
+import com.google.common.base.Function;
 import com.google.common.collect.Ordering;
 import com.google.javascript.jscomp.AbstractCompiler;
-import com.google.javascript.jscomp.CompilerPass;
 import com.google.javascript.jscomp.DiagnosticType;
+import com.google.javascript.jscomp.HotSwapCompilerPass;
+import com.google.javascript.jscomp.JSError;
 import com.google.javascript.jscomp.NodeTraversal;
 import com.google.javascript.jscomp.NodeTraversal.AbstractShallowCallback;
+import com.google.javascript.jscomp.NodeUtil;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
-
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Checks that goog.require() and goog.provide() calls are sorted alphabetically.
- * TODO(tbreisacher): Add automatic fixes for these.
  */
 public final class CheckRequiresAndProvidesSorted extends AbstractShallowCallback
-    implements CompilerPass {
+    implements HotSwapCompilerPass {
   public static final DiagnosticType REQUIRES_NOT_SORTED =
-      DiagnosticType.warning(
-          "JSC_REQUIRES_NOT_SORTED", "goog.require() statements are not sorted.");
+      DiagnosticType.warning("JSC_REQUIRES_NOT_SORTED",
+      "goog.require() statements are not sorted."
+          + " The correct order is:\n\n{0}\n");
 
   public static final DiagnosticType PROVIDES_NOT_SORTED =
-      DiagnosticType.warning(
-          "JSC_PROVIDES_NOT_SORTED", "goog.provide() statements are not sorted.");
+      DiagnosticType.warning("JSC_PROVIDES_NOT_SORTED",
+          "goog.provide() statements are not sorted."
+              + " The correct order is:\n\n{0}\n");
 
   public static final DiagnosticType PROVIDES_AFTER_REQUIRES =
       DiagnosticType.warning(
           "JSC_PROVIDES_AFTER_REQUIRES",
           "goog.provide() statements should be before goog.require() statements.");
 
-  public static final DiagnosticType MULTIPLE_MODULES_IN_FILE =
-      DiagnosticType.warning(
-          "JSC_MULTIPLE_MODULES_IN_FILE",
-          "There should only be a single goog.module() statement per file.");
+  public static final DiagnosticType DUPLICATE_REQUIRE =
+      DiagnosticType.warning("JSC_DUPLICATE_REQUIRE", "''{0}'' required more than once.");
 
-  public static final DiagnosticType MODULE_AND_PROVIDES =
-      DiagnosticType.warning(
-          "JSC_MODULE_AND_PROVIDES",
-          "A file using goog.module() may not also use goog.provide() statements.");
+  private final List<Node> requires;
+  private final List<Node> provides;
 
-  private List<String> requiredNamespaces;
-  private List<String> providedNamespaces;
-  private List<String> moduleNamespaces;
   private final AbstractCompiler compiler;
 
   public CheckRequiresAndProvidesSorted(AbstractCompiler compiler) {
     this.compiler = compiler;
-    this.requiredNamespaces = new ArrayList<>();
-    this.providedNamespaces = new ArrayList<>();
-    this.moduleNamespaces = new ArrayList<>();
+    this.requires = new ArrayList<>();
+    this.provides = new ArrayList<>();
   }
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, this);
+    NodeTraversal.traverseEs6(compiler, root, this);
   }
 
   @Override
+  public void hotSwapScript(Node scriptRoot, Node originalRoot) {
+    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
+  }
+
+  public static final Function<Node, String> getSortKey =
+      new Function<Node, String>() {
+        @Override
+        public String apply(Node n) {
+          String key = null;
+          boolean isForwardDeclare = false;
+          if (NodeUtil.isNameDeclaration(n)) {
+            if (n.getFirstChild().isName()) {
+              // Case 1:
+              //   var x = goog.require('w.x');
+              // or
+              //   var x = goog.forwardDeclare('w.x');
+              key = n.getFirstChild().getString();
+              if (n.getFirstFirstChild()
+                  .getFirstChild()
+                  .matchesQualifiedName("goog.forwardDeclare")) {
+                isForwardDeclare = true;
+              }
+            } else if (n.getFirstChild().isDestructuringLhs()) {
+              // Case 2: var {y} = goog.require('w.x');
+              // All case 2 nodes should come after all case 1 nodes. ('{' sorts after a-z)
+              Node pattern = n.getFirstFirstChild();
+              checkState(pattern.isObjectPattern(), pattern);
+              Node call = n.getFirstChild().getLastChild();
+              checkState(call.isCall(), call);
+              checkState(
+                  call.getFirstChild().matchesQualifiedName("goog.require"), call.getFirstChild());
+              if (!pattern.hasChildren()) {
+                key = "{";
+              } else {
+                key = "{" + pattern.getFirstChild().getString();
+              }
+            }
+          } else if (n.isExprResult()) {
+            // Case 3, one of:
+            //   goog.provide('a.b.c');
+            //   goog.require('a.b.c');
+            //   goog.forwardDeclare('a.b.c');
+            // All case 3 nodes should come after case 1 and 2 nodes, so prepend
+            // '|' which sorts after '{'
+            key = "|" + n.getFirstChild().getLastChild().getString();
+            if (n.getFirstFirstChild().matchesQualifiedName("goog.forwardDeclare")) {
+              isForwardDeclare = true;
+            }
+          } else {
+            throw new IllegalArgumentException("Unexpected node " + n);
+          }
+          // Make sure all forwardDeclares come after all requires.
+          return (isForwardDeclare ? "z" : "a") + checkNotNull(key);
+        }
+      };
+
+  private static final String getNamespace(Node requireStatement) {
+    if (requireStatement.isExprResult()) {
+      // goog.require('a.b.c');
+      return requireStatement.getFirstChild().getLastChild().getString();
+    } else if (NodeUtil.isNameDeclaration(requireStatement)) {
+      if (requireStatement.getFirstChild().isName()) {
+        // const x = goog.require('a.b.c');
+        return requireStatement.getFirstFirstChild().getLastChild().getString();
+      } else if (requireStatement.getFirstChild().isDestructuringLhs()) {
+        // const {x} = goog.require('a.b.c');
+        return requireStatement.getFirstChild().getLastChild().getLastChild().getString();
+      }
+    }
+    throw new IllegalArgumentException("Unexpected node " + requireStatement);
+  }
+
+  private final Ordering<Node> alphabetical = Ordering.natural().onResultOf(getSortKey);
+
+  @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
-    switch (n.getType()) {
-      case Token.SCRIPT:
-        if (!Ordering.natural().isOrdered(requiredNamespaces)) {
-          t.report(n, REQUIRES_NOT_SORTED);
-        }
-        if (!Ordering.natural().isOrdered(providedNamespaces)) {
-          t.report(n, PROVIDES_NOT_SORTED);
-        }
-        if (!moduleNamespaces.isEmpty() && !providedNamespaces.isEmpty()) {
-          t.report(n, MODULE_AND_PROVIDES);
-        }
-        if (moduleNamespaces.size() > 1) {
-          t.report(n, MULTIPLE_MODULES_IN_FILE);
+    switch (n.getToken()) {
+      case SCRIPT:
+        // Duplicate provides are already checked in ProcessClosurePrimitives.
+        checkForDuplicates(requires);
+        reportIfOutOfOrder(requires, REQUIRES_NOT_SORTED);
+        reportIfOutOfOrder(provides, PROVIDES_NOT_SORTED);
+        reset();
+        break;
+      case CALL:
+        Node callee = n.getFirstChild();
+        if (!callee.matchesQualifiedName("goog.require")
+            && !callee.matchesQualifiedName("goog.forwardDeclare")
+            && !callee.matchesQualifiedName("goog.provide")
+            && !callee.matchesQualifiedName("goog.module")) {
+          return;
         }
 
-        requiredNamespaces.clear();
-        providedNamespaces.clear();
-        moduleNamespaces.clear();
-        break;
-      case Token.CALL:
-        if (parent.isExprResult() && parent.getParent().isScript()) {
-          String req = compiler.getCodingConvention().extractClassNameIfRequire(n, parent);
-          if (req != null) {
-            requiredNamespaces.add(req);
+        if (parent.isExprResult() && NodeUtil.isTopLevel(parent.getParent())) {
+          Node namespaceNode = n.getLastChild();
+          if (!namespaceNode.isString()) {
+            return;
           }
-          String prov = compiler.getCodingConvention().extractClassNameIfProvide(n, parent);
-          if (prov != null) {
-            if (!requiredNamespaces.isEmpty()) {
+          String namespace = namespaceNode.getString();
+          if (namespace == null) {
+            return;
+          }
+          if (callee.matchesQualifiedName("goog.require")
+              || callee.matchesQualifiedName("goog.forwardDeclare")) {
+            requires.add(parent);
+          } else {
+            if (!requires.isEmpty()) {
               t.report(n, PROVIDES_AFTER_REQUIRES);
             }
-            if (n.getFirstChild().matchesQualifiedName("goog.module")) {
-              moduleNamespaces.add(prov);
-            } else {
-              providedNamespaces.add(prov);
+            if (callee.matchesQualifiedName("goog.provide")) {
+              provides.add(parent);
             }
           }
+        } else if (NodeUtil.isNameDeclaration(parent.getParent())
+            && (callee.matchesQualifiedName("goog.require")
+                || callee.matchesQualifiedName("goog.forwardDeclare"))) {
+          requires.add(parent.getParent());
         }
         break;
+      default:
+        break;
     }
+  }
+
+  private void reportIfOutOfOrder(List<Node> requiresOrProvides, DiagnosticType warning) {
+    if (!alphabetical.isOrdered(requiresOrProvides)) {
+      StringBuilder correctOrder = new StringBuilder();
+      for (Node n : alphabetical.sortedCopy(requiresOrProvides)) {
+        correctOrder.append(compiler.toSource(n));
+      }
+      compiler.report(
+          JSError.make(requiresOrProvides.get(0), warning, correctOrder.toString()));
+    }
+  }
+
+  private void checkForDuplicates(List<Node> requires) {
+    Set<String> namespaces = new HashSet<>();
+    for (Node require : requires) {
+      String namespace = getNamespace(require);
+      if (!namespaces.add(namespace)) {
+        compiler.report(JSError.make(require, DUPLICATE_REQUIRE, namespace));
+      }
+    }
+  }
+
+  private void reset() {
+    requires.clear();
+    provides.clear();
   }
 }

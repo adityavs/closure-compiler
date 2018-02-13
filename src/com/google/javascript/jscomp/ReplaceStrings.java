@@ -16,6 +16,9 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.HashMultimap;
@@ -27,10 +30,8 @@ import com.google.common.collect.Multimap;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.TypeI;
 import com.google.javascript.rhino.TypeIRegistry;
-
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -50,12 +51,14 @@ import java.util.Set;
  */
 class ReplaceStrings extends AbstractPostOrderCallback
     implements CompilerPass {
+
   static final DiagnosticType BAD_REPLACEMENT_CONFIGURATION =
       DiagnosticType.warning(
           "JSC_BAD_REPLACEMENT_CONFIGURATION",
           "Bad replacement configuration.");
 
   private static final String DEFAULT_PLACEHOLDER_TOKEN = "`";
+  public static final String EXCLUSION_PREFIX = ":!";
   private final String placeholderToken;
   private static final String REPLACE_ONE_MARKER = "?";
   private static final String REPLACE_ALL_MARKER = "*";
@@ -66,7 +69,7 @@ class ReplaceStrings extends AbstractPostOrderCallback
   //
   private final Map<String, Config> functions = new HashMap<>();
   private final Multimap<String, String> methods = HashMultimap.create();
-  private final NameGenerator nameGenerator;
+  private final DefaultNameGenerator nameGenerator;
   private final Map<String, Result> results = new LinkedHashMap<>();
 
   /**
@@ -78,11 +81,15 @@ class ReplaceStrings extends AbstractPostOrderCallback
     // classes.
     final String name;
     final List<Integer> parameters;
+    final ImmutableSet<String> excludedFilenameSuffixes;
+
     static final int REPLACE_ALL_VALUE = 0;
 
-    Config(String name, List<Integer> replacementParameters) {
+    Config(String name, List<Integer> replacementParameters, ImmutableSet<String>
+        excludedFilenameSuffixes) {
       this.name = name;
       this.parameters = replacementParameters;
+      this.excludedFilenameSuffixes = excludedFilenameSuffixes;
     }
 
     public boolean isReplaceAll() {
@@ -110,13 +117,16 @@ class ReplaceStrings extends AbstractPostOrderCallback
    * @param placeholderToken Separator to use between string parts. Used to replace
    *     non-static string content.
    * @param functionsToInspect A list of function configurations in the form of
-   *     function($,,,)
+   *     function($,,,):exclued_filename_suffix1,excluded_filename_suffix2,...
    *   or
-   *     class.prototype.method($,,,)
+   *     class.prototype.method($,,,):exclued_filename_suffix1,excluded_filename_suffix2,...
    * @param blacklisted A set of names that should not be used as replacement
    *     strings.  Useful to prevent unwanted strings for appearing in the
    *     final output.
    * where '$' is used to indicate which parameter should be replaced.
+   *
+   * excluded_filename_suffix is a list of files whose callsites for a given function
+   * pattern should be ignored.
    */
   ReplaceStrings(
       AbstractCompiler compiler, String placeholderToken,
@@ -181,22 +191,21 @@ class ReplaceStrings extends AbstractPostOrderCallback
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, this);
+    NodeTraversal.traverseEs6(compiler, root, this);
   }
 
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
-    // TODO(johnlenz): Determine if it is necessary to support ".call" or
-    // ".apply".
-    switch (n.getType()) {
-      case Token.NEW: // e.g. new Error('msg');
-      case Token.CALL: // e.g. Error('msg');
+    // TODO(johnlenz): Determine if it is necessary to support ".call" or ".apply".
+    switch (n.getToken()) {
+      case NEW: // e.g. new Error('msg');
+      case CALL: // e.g. Error('msg');
         Node calledFn = n.getFirstChild();
 
         // Look for calls to static functions.
-        String name = calledFn.getQualifiedName();
+        String name = calledFn.getOriginalQualifiedName();
         if (name != null) {
-          Config config = findMatching(name);
+          Config config = findMatching(name, n.getSourceFileName());
           if (config != null) {
             doSubstitutions(t, config, n);
             return;
@@ -208,8 +217,7 @@ class ReplaceStrings extends AbstractPostOrderCallback
           Node rhs = calledFn.getLastChild();
           if (rhs.isName() || rhs.isString()) {
             String methodName = rhs.getString();
-            String originalMethodName =
-                (String) rhs.getParent().getProp(Node.ORIGINALNAME_PROP);
+            String originalMethodName = rhs.getParent().getOriginalName();
             Collection<String> classes;
             if (originalMethodName != null) {
               classes = methods.get(originalMethodName);
@@ -230,18 +238,28 @@ class ReplaceStrings extends AbstractPostOrderCallback
           }
         }
         break;
+      default:
+        break;
     }
   }
 
   /**
    * @param name The function name to find.
+   * @param callsiteSourceFileName the filename containing the callsite
    * @return The Config object for the name or null if no match was found.
    */
-  private Config findMatching(String name) {
+  private Config findMatching(String name, String callsiteSourceFileName) {
     Config config = functions.get(name);
     if (config == null) {
       name = name.replace('$', '.');
       config = functions.get(name);
+    }
+    if (config != null) {
+      for (String excludedSuffix : config.excludedFilenameSuffixes) {
+        if (callsiteSourceFileName.endsWith(excludedSuffix)) {
+          return null;
+        }
+      }
     }
     return config;
   }
@@ -252,7 +270,7 @@ class ReplaceStrings extends AbstractPostOrderCallback
    */
   private Config findMatchingClass(
       TypeI callClassType, Collection<String> declarationNames) {
-    if (!callClassType.isBottom() && !callClassType.isUnknownType()) {
+    if (!callClassType.isBottom() && !callClassType.isSomeUnknownType()) {
       for (String declarationName : declarationNames) {
         String className = getClassFromDeclarationName(declarationName);
         TypeI methodClassType = registry.getType(className);
@@ -269,8 +287,7 @@ class ReplaceStrings extends AbstractPostOrderCallback
    * Replace the parameters specified in the config, if possible.
    */
   private void doSubstitutions(NodeTraversal t, Config config, Node n) {
-    Preconditions.checkState(
-        n.isNew() || n.isCall());
+    checkState(n.isNew() || n.isCall());
 
     if (!config.isReplaceAll()) {
       // Note: the first child is the function, but the parameter id is 1 based.
@@ -282,7 +299,7 @@ class ReplaceStrings extends AbstractPostOrderCallback
       }
     } else {
       // Replace all parameters.
-      Node firstParam = n.getFirstChild().getNext();
+      Node firstParam = n.getSecondChild();
       for (Node arg = firstParam; arg != null; arg = arg.getNext()) {
         arg = replaceExpression(t, arg, n);
       }
@@ -302,13 +319,13 @@ class ReplaceStrings extends AbstractPostOrderCallback
     Node replacement;
     String key = null;
     String replacementString;
-    switch (expr.getType()) {
-      case Token.STRING:
+    switch (expr.getToken()) {
+      case STRING:
         key = expr.getString();
         replacementString = getReplacement(key);
         replacement = IR.string(replacementString);
         break;
-      case Token.ADD:
+      case ADD:
         StringBuilder keyBuilder = new StringBuilder();
         Node keyNode = IR.string("");
         replacement = buildReplacement(expr, keyNode, keyBuilder);
@@ -316,7 +333,7 @@ class ReplaceStrings extends AbstractPostOrderCallback
         replacementString = getReplacement(key);
         keyNode.setString(replacementString);
         break;
-      case Token.NAME:
+      case NAME:
         // If the referenced variable is a constant, use its value.
         Var var = t.getScope().getVar(expr.getString());
         if (var != null && var.isInferredConst()) {
@@ -335,12 +352,13 @@ class ReplaceStrings extends AbstractPostOrderCallback
         return expr;
     }
 
-    Preconditions.checkNotNull(key);
-    Preconditions.checkNotNull(replacementString);
+    checkNotNull(key);
+    checkNotNull(replacementString);
     recordReplacement(key);
 
+    replacement.useSourceInfoIfMissingFromForTree(expr);
     parent.replaceChild(expr, replacement);
-    compiler.reportCodeChange();
+    t.reportCodeChange();
     return replacement;
   }
 
@@ -364,7 +382,7 @@ class ReplaceStrings extends AbstractPostOrderCallback
    */
   private void recordReplacement(String key) {
     Result result = results.get(key);
-    Preconditions.checkState(result != null);
+    checkState(result != null);
 
     result.didReplacement = true;
   }
@@ -384,13 +402,13 @@ class ReplaceStrings extends AbstractPostOrderCallback
    */
   private Node buildReplacement(
       Node expr, Node prefix, StringBuilder keyBuilder) {
-    switch (expr.getType()) {
-      case Token.ADD:
+    switch (expr.getToken()) {
+      case ADD:
         Node left = expr.getFirstChild();
         Node right = left.getNext();
         prefix = buildReplacement(left, prefix, keyBuilder);
         return buildReplacement(right, prefix, keyBuilder);
-      case Token.STRING:
+      case STRING:
         keyBuilder.append(expr.getString());
         return prefix;
       default:
@@ -405,7 +423,7 @@ class ReplaceStrings extends AbstractPostOrderCallback
    */
   private static String getMethodFromDeclarationName(String fullDeclarationName) {
     String[] parts = fullDeclarationName.split("\\.prototype\\.");
-    Preconditions.checkState(parts.length == 1 || parts.length == 2);
+    checkState(parts.length == 1 || parts.length == 2);
     if (parts.length == 2) {
       return parts[1];
     }
@@ -417,7 +435,7 @@ class ReplaceStrings extends AbstractPostOrderCallback
    */
   private static String getClassFromDeclarationName(String fullDeclarationName) {
     String[] parts = fullDeclarationName.split("\\.prototype\\.");
-    Preconditions.checkState(parts.length == 1 || parts.length == 2);
+    checkState(parts.length == 1 || parts.length == 2);
     if (parts.length == 2) {
       return parts[0];
     }
@@ -453,9 +471,10 @@ class ReplaceStrings extends AbstractPostOrderCallback
     // Looks like this function_name(,$,)
     int first = function.indexOf('(');
     int last = function.indexOf(')');
+    int colon = function.indexOf(EXCLUSION_PREFIX);
 
     // TODO(johnlenz): Make parsing precondition checks JSErrors reports.
-    Preconditions.checkState(first != -1 && last != -1);
+    checkState(first != -1 && last != -1);
 
     String name = function.substring(0, first);
     String params = function.substring(first + 1, last);
@@ -466,12 +485,11 @@ class ReplaceStrings extends AbstractPostOrderCallback
     for (String param : parts) {
       paramCount++;
       if (param.equals(REPLACE_ALL_MARKER)) {
-        Preconditions.checkState(paramCount == 1 && parts.length == 1);
+        checkState(paramCount == 1 && parts.length == 1);
         replacementParameters.add(Config.REPLACE_ALL_VALUE);
       } else if (param.equals(REPLACE_ONE_MARKER)) {
         // TODO(johnlenz): Support multiple.
-        Preconditions.checkState(!replacementParameters.contains(
-            Config.REPLACE_ALL_VALUE));
+        checkState(!replacementParameters.contains(Config.REPLACE_ALL_VALUE));
         replacementParameters.add(paramCount);
       } else {
         // TODO(johnlenz): report an error.
@@ -479,18 +497,26 @@ class ReplaceStrings extends AbstractPostOrderCallback
       }
     }
 
-    Preconditions.checkState(!replacementParameters.isEmpty());
-    return new Config(name, replacementParameters);
+    checkState(!replacementParameters.isEmpty());
+
+    return new Config(
+        name,
+        replacementParameters,
+        colon == -1
+            ? ImmutableSet.<String>of()
+            : ImmutableSet.copyOf(
+                function.substring(colon + EXCLUSION_PREFIX.length()).split(",")));
   }
 
   /**
    * Use a name generate to create names so the names overlap with the names
    * used for variable and properties.
    */
-  private static NameGenerator createNameGenerator(Iterable<String> reserved) {
+  private static DefaultNameGenerator createNameGenerator(
+        Iterable<String> reserved) {
     final String namePrefix = "";
     final char[] reservedChars = new char[0];
-    return new NameGenerator(
+    return new DefaultNameGenerator(
         ImmutableSet.copyOf(reserved), namePrefix, reservedChars);
   }
 }

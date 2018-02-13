@@ -16,14 +16,15 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.jscomp.NodeTraversal.ScopedCallback;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
-import java.util.LinkedList;
 import java.util.List;
 
 /**
@@ -55,7 +56,7 @@ class OptimizeArgumentsArray implements CompilerPass, ScopedCallback {
       "JSCompiler_OptimizeArgumentsArray_p";
 
   // The prefix for the newly introduced parameter name.
-  private final String paramPredix;
+  private final String paramPrefix;
 
   // To make each parameter name unique in the function. We append an
   // unique integer at the end.
@@ -83,18 +84,18 @@ class OptimizeArgumentsArray implements CompilerPass, ScopedCallback {
    *     pass introduces
    */
   OptimizeArgumentsArray(AbstractCompiler compiler, String paramPrefix) {
-    this.compiler = Preconditions.checkNotNull(compiler);
-    this.paramPredix = Preconditions.checkNotNull(paramPrefix);
+    this.compiler = checkNotNull(compiler);
+    this.paramPrefix = checkNotNull(paramPrefix);
   }
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, Preconditions.checkNotNull(root), this);
+    NodeTraversal.traverseEs6(compiler, checkNotNull(root), this);
   }
 
   @Override
   public void enterScope(NodeTraversal traversal) {
-    Preconditions.checkNotNull(traversal);
+    checkNotNull(traversal);
 
     // This optimization is valid only within a function so we are going to
     // skip over the initial entry to the global scope.
@@ -108,12 +109,12 @@ class OptimizeArgumentsArray implements CompilerPass, ScopedCallback {
     if (currentArgumentsAccess != null) {
       argumentsAccessStack.push(currentArgumentsAccess);
     }
-    currentArgumentsAccess = new LinkedList<>();
+    currentArgumentsAccess = new ArrayList<>();
   }
 
   @Override
   public void exitScope(NodeTraversal traversal) {
-    Preconditions.checkNotNull(traversal);
+    checkNotNull(traversal);
 
     // This is the case when we are exiting the global scope where we had never
     // collected argument access list. Since we do not perform this optimization
@@ -122,10 +123,17 @@ class OptimizeArgumentsArray implements CompilerPass, ScopedCallback {
       return;
     }
 
+    Node function = traversal.getScopeRoot();
+    if (!function.isFunction()) {
+      return;
+    } else if (function.isArrowFunction()) {
+      return;
+    }
+
     // Attempt to replace the argument access and if the AST has been change,
     // report back to the compiler.
     if (tryReplaceArguments(traversal.getScope())) {
-      traversal.getCompiler().reportCodeChange();
+      traversal.reportCodeChange();
     }
 
     // After the attempt to replace the arguments. The currentArgumentsAccess
@@ -149,9 +157,8 @@ class OptimizeArgumentsArray implements CompilerPass, ScopedCallback {
 
   @Override
   public void visit(NodeTraversal traversal, Node node, Node parent) {
-    Preconditions.checkNotNull(traversal);
-    Preconditions.checkNotNull(node);
-
+    checkNotNull(traversal);
+    checkNotNull(node);
 
     // Searches for all the references to the arguments array.
 
@@ -177,25 +184,52 @@ class OptimizeArgumentsArray implements CompilerPass, ScopedCallback {
    * @return true if any modification has been done to the AST
    */
   private boolean tryReplaceArguments(Scope scope) {
-
-    Node parametersList = scope.getRootNode().getFirstChild().getNext();
-    Preconditions.checkState(parametersList.isParamList());
+    Node parametersList = scope.getRootNode().getSecondChild();
+    checkState(parametersList.isParamList());
 
     // Keep track of rather this function modified the AST and needs to be
     // reported back to the compiler later.
-    boolean changed = false;
 
     // Number of parameter that can be accessed without using the arguments
     // array.
-    int numNamedParameter = parametersList.getChildCount();
+    int numParameters = parametersList.getChildCount();
 
     // We want to guess what the highest index that has been access from the
     // arguments array. We will guess that it does not use anything index higher
     // than the named parameter list first until we see other wise.
-    int highestIndex = numNamedParameter - 1;
+    int highestIndex = numParameters - 1;
+    highestIndex = getHighestIndex(highestIndex);
+    if (highestIndex < 0) {
+      return false;
+    }
 
-    // Iterate through all the references to arguments array in the function to
-    // determine the real highestIndex.
+    // Number of extra arguments we need.
+    // For example: function() { arguments[3] } access index 3 so
+    // it will need 4 extra named arguments to changed into:
+    // function(a,b,c,d) { d }.
+    int numExtraArgs = highestIndex - numParameters + 1;
+
+    // Temporary holds the new names as string for quick access later.
+    String[] argNames = new String[numExtraArgs];
+
+    boolean changed = false;
+    boolean changedSignature = changeMethodSignature(numExtraArgs, parametersList, argNames);
+    boolean changedBody = changeBody(numParameters, argNames, parametersList);
+    changed = changedSignature;
+    if (changedBody) {
+      changed = changedBody;
+    }
+    return changed;
+  }
+
+  /**
+   * Iterate through all the references to arguments array in the
+   * function to determine the real highestIndex. Returns -1 when we should not
+   * be replacing any arguments for this scope - we should exit tryReplaceArguments
+   *
+   * @param highestIndex highest index that has been accessed from the arguments array
+   */
+  private int getHighestIndex(int highestIndex) {
     for (Node ref : currentArgumentsAccess) {
 
       Node getElem = ref.getParent();
@@ -204,29 +238,33 @@ class OptimizeArgumentsArray implements CompilerPass, ScopedCallback {
       // TODO(user): We might not need to bail out all the time, there might
       // be more cases that we can cover.
       if (!getElem.isGetElem() || ref != getElem.getFirstChild()) {
-        return false;
+        return -1;
       }
 
       Node index = ref.getNext();
 
       // We have something like arguments[x] where x is not a constant. That
       // means at least one of the access is not known.
-      if (!index.isNumber()) {
+      if (!index.isNumber() || index.getDouble() < 0) {
         // TODO(user): Its possible not to give up just yet. The type
         // inference did a 'semi value propagation'. If we know that string
         // is never a subclass of the type of the index. We'd know that
         // it is never 'callee'.
-        return false; // Give up.
+        return -1; // Give up.
+      }
+
+      //We want to bail out if someone tries to access arguments[0.5] for example
+      if (index.getDouble() != Math.floor(index.getDouble())){
+        return -1;
       }
 
       Node getElemParent = getElem.getParent();
       // When we have argument[0](), replacing it with a() is semantically
       // different if argument[0] is a function call that refers to 'this'
-      if (getElemParent.isCall() &&
-          getElemParent.getFirstChild() == getElem) {
+      if (getElemParent.isCall() && getElemParent.getFirstChild() == getElem) {
         // TODO(user): We can consider using .call() if aliasing that
         // argument allows shorter alias for other arguments.
-        return false;
+        return -1;
       }
 
       // Replace the highest index if we see an access that has a higher index
@@ -236,55 +274,91 @@ class OptimizeArgumentsArray implements CompilerPass, ScopedCallback {
         highestIndex = value;
       }
     }
+    return highestIndex;
+  }
 
-    // Number of extra arguments we need.
-    // For example: function() { arguments[3] } access index 3 so
-    // it will need 4 extra named arguments to changed into:
-    // function(a,b,c,d) { d }.
-    int numExtraArgs = highestIndex - numNamedParameter + 1;
+  /**
+   * Insert the formal parameter to the method's signature. Example: function() -->
+   * function(r0, r1, r2)
+   *
+   * @param numExtraArgs num extra method parameters needed to replace all the arguments[i]
+   * @param parametersList node representing the function signature
+   * @param argNames holds the replacement names in a String array
+   */
+  private boolean changeMethodSignature(int numExtraArgs, Node parametersList, String[] argNames) {
 
-    // Temporary holds the new names as string for quick access later.
-    String[] argNames = new String[numExtraArgs];
+    boolean changed = false;
 
-    // Insert the formal parameter to the method's signature.
-    // Example: function() --> function(r0, r1, r2)
     for (int i = 0; i < numExtraArgs; i++) {
       String name = getNewName();
       argNames[i] = name;
-      parametersList.addChildrenToBack(IR.name(name));
+      parametersList.addChildToBack(
+          IR.name(name).useSourceInfoIfMissingFrom(parametersList));
       changed = true;
     }
+    return changed;
+  }
 
-    // This loop performs the replacement of arguments[x] -> a if x is known.
-    for (Node ref : currentArgumentsAccess) {
-      Node index = ref.getNext();
+  /**
+   * Performs the replacement of arguments[x] -> a if x is known.
+   */
+  private boolean changeBody(int numNamedParameter, String[] argNames, Node parametersList) {
+    boolean changed = false;
+    boolean nextArguments = true;
 
-      // Skip if it is unknown.
-      if (!index.isNumber()) {
-        continue;
-      }
-      int value = (int) index.getDouble();
+    while (nextArguments) {
 
-      // Unnamed parameter.
-      if (value >= numNamedParameter) {
-        ref.getParent().getParent().replaceChild(ref.getParent(),
-            IR.name(argNames[value - numNamedParameter]));
-      } else {
+      nextArguments = false;
 
-        // Here, for no apparent reason, the user is accessing a named parameter
-        // with arguments[idx]. We can replace it with the actual name for them.
-        Node name = parametersList.getFirstChild();
-
-        // This is a linear search for the actual name from the signature.
-        // It is not necessary to make this fast because chances are the user
-        // will not deliberately write code like this.
-        for (int i = 0; i < value; i++) {
-          name = name.getNext();
+      for (Node ref : currentArgumentsAccess) {
+        if (NodeUtil.getEnclosingFunction(ref).isArrowFunction()) {
+          nextArguments = true;
         }
-        ref.getParent().getParent().replaceChild(ref.getParent(),
-            IR.name(name.getString()));
+
+        Node index = ref.getNext();
+        Node grandParent = ref.getGrandparent();
+        Node parent = ref.getParent();
+
+        // Skip if it is unknown.
+        if (!index.isNumber()) {
+          continue;
+        }
+        int value = (int) index.getDouble();
+
+        // Unnamed parameter.
+        if (value >= numNamedParameter) {
+          grandParent.replaceChild(parent, IR.name(argNames[value - numNamedParameter]));
+          compiler.reportChangeToEnclosingScope(grandParent);
+        } else {
+
+          // Here, for no apparent reason, the user is accessing a named parameter
+          // with arguments[idx]. We can replace it with the actual name for them.
+          Node name = parametersList.getFirstChild();
+
+          // This is a linear search for the actual name from the signature.
+          // It is not necessary to make this fast because chances are the user
+          // will not deliberately write code like this.
+          for (int i = 0; i < value; i++) {
+            name = parametersList.getChildAtIndex(value);
+          }
+          grandParent.replaceChild(parent, IR.name(name.getString()));
+          compiler.reportChangeToEnclosingScope(grandParent);
+        }
+        changed = true;
       }
-      changed = true;
+
+      if (nextArguments) {
+        // After the attempt to replace the arguments. The currentArgumentsAccess
+        // is stale and as we exit the Scope, no longer holds all the access to the
+        // current scope anymore. We'll pop the access list from the outer scope
+        // and set it as currentArgumentsAccess if the outer scope is not the global
+        // scope.
+        if (!argumentsAccessStack.isEmpty()) {
+          currentArgumentsAccess = argumentsAccessStack.pop();
+        } else {
+          currentArgumentsAccess = null;
+        }
+      }
     }
 
     return changed;
@@ -294,6 +368,6 @@ class OptimizeArgumentsArray implements CompilerPass, ScopedCallback {
    * Generate a unique name for the next parameter.
    */
   private String getNewName() {
-    return paramPredix + uniqueId++;
+    return paramPrefix + uniqueId++;
   }
 }

@@ -39,7 +39,6 @@ import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Node.TypeDeclarationNode;
 import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.TypeDeclarationsIR;
-
 import junit.framework.TestCase;
 
 /**
@@ -67,9 +66,7 @@ public final class TypeSyntaxTest extends TestCase {
 
   private void testNotEs6TypedFullError(String source, String error) {
     expectErrors(error);
-    parse(source, LanguageMode.ECMASCRIPT6);
-    expectErrors(error);
-    parse(source, LanguageMode.ECMASCRIPT6_STRICT);
+    parse(source, LanguageMode.ECMASCRIPT_2015);
   }
 
   private void testNotEs6Typed(String source, String... features) {
@@ -80,9 +77,7 @@ public final class TypeSyntaxTest extends TestCase {
               + ". Use --language_in=ECMASCRIPT6_TYPED to enable ES6 typed features.";
     }
     expectErrors(features);
-    parse(source, LanguageMode.ECMASCRIPT6);
-    expectErrors(features);
-    parse(source, LanguageMode.ECMASCRIPT6_STRICT);
+    parse(source, LanguageMode.ECMASCRIPT_2015);
   }
 
   public void testVariableDeclaration() {
@@ -111,15 +106,30 @@ public final class TypeSyntaxTest extends TestCase {
     parse("var /** string */ foo: string = 'hello';");
   }
 
+  public void testTypedGetterSetterDeclaration() {
+    Node n = parse("var x = {get a(): number {\n}};", LanguageMode.ECMASCRIPT6_TYPED);
+    assertDeclaredType("number type", numberType(),
+        n.getFirstFirstChild().getFirstFirstChild().getFirstChild());
+    n = parse("var x = {set a(v: number) {\n}};", LanguageMode.ECMASCRIPT6_TYPED);
+    assertDeclaredType("number type", numberType(),
+        n.getFirstFirstChild().getFirstFirstChild().getFirstChild().getSecondChild()
+            .getFirstChild());
+  }
+
+  public void testSetterDeclarationWithReturnType() {
+    expectErrors("Parse error. setter should not have any returns");
+    parse("var x = {set a(x): number {\n}};", LanguageMode.ECMASCRIPT6_TYPED);
+  }
+
   public void testFunctionParamDeclaration() {
     Node fn = parse("function foo(x: string) {\n}").getFirstChild();
-    Node param = fn.getFirstChild().getNext().getFirstChild();
+    Node param = fn.getSecondChild().getFirstChild();
     assertDeclaredType("string type", stringType(), param);
   }
 
   public void testFunctionParamDeclaration_defaultValue() {
     Node fn = parse("function foo(x: string = 'hello') {\n}").getFirstChild();
-    Node param = fn.getFirstChild().getNext().getFirstChild();
+    Node param = fn.getSecondChild().getFirstChild();
     assertDeclaredType("string type", stringType(), param);
   }
 
@@ -137,9 +147,9 @@ public final class TypeSyntaxTest extends TestCase {
     parse("function foo({x}: any) {\n}");
   }
 
-  public void testFunctionParamDeclaration_arrow() {
-    Node fn = parse("(x: string) => 'hello' + x;").getFirstChild().getFirstChild();
-    Node param = fn.getFirstChild().getNext().getFirstChild();
+  public void disabled_testFunctionParamDeclaration_arrow() {
+    Node fn = parse("(x: string) => 'hello' + x;").getFirstFirstChild();
+    Node param = fn.getSecondChild().getFirstChild();
     assertDeclaredType("string type", stringType(), param);
   }
 
@@ -157,8 +167,8 @@ public final class TypeSyntaxTest extends TestCase {
     assertDeclaredType("string type", stringType(), fn);
   }
 
-  public void testFunctionReturn_arrow() {
-    Node fn = parse("(): string => 'hello';").getFirstChild().getFirstChild();
+  public void disabled_testFunctionReturn_arrow() {
+    Node fn = parse("(): string => 'hello';").getFirstFirstChild();
     assertDeclaredType("string type", stringType(), fn);
   }
 
@@ -169,7 +179,7 @@ public final class TypeSyntaxTest extends TestCase {
 
   public void testFunctionReturn_typeInJsdocOnly() {
     parse("function /** string */ foo() { return 'hello'; }",
-        "function/** string */foo() {\n  return 'hello';\n}");
+        "function/** string */ foo() {\n  return 'hello';\n}");
   }
 
   public void testCompositeType() {
@@ -265,7 +275,7 @@ public final class TypeSyntaxTest extends TestCase {
 
     Node ast = parse("var x: string | number[] | Array<Foo>;");
     TypeDeclarationNode union = (TypeDeclarationNode)
-        (ast.getFirstChild().getFirstChild().getProp(Node.DECLARED_TYPE_EXPR));
+        (ast.getFirstFirstChild().getProp(Node.DECLARED_TYPE_EXPR));
     assertEquals(3, union.getChildCount());
   }
 
@@ -299,21 +309,21 @@ public final class TypeSyntaxTest extends TestCase {
     parse("var n: (p1: string, p2: number) => boolean;");
     parse("var n: () => () => number;");
     parse("var n: (p1: string) => {};");
-    parse("(number): () => number => number;");
+    // parse("(number): () => number => number;");
 
     Node ast = parse("var n: (p1: string, p2: number) => boolean[];");
     TypeDeclarationNode function = (TypeDeclarationNode)
-        (ast.getFirstChild().getFirstChild().getProp(Node.DECLARED_TYPE_EXPR));
+        (ast.getFirstFirstChild().getProp(Node.DECLARED_TYPE_EXPR));
     assertNode(function).hasType(Token.FUNCTION_TYPE);
 
     Node ast2 = parse("var n: (p1: string, p2: number) => boolean | number;");
     TypeDeclarationNode function2 = (TypeDeclarationNode)
-        (ast2.getFirstChild().getFirstChild().getProp(Node.DECLARED_TYPE_EXPR));
+        (ast2.getFirstFirstChild().getProp(Node.DECLARED_TYPE_EXPR));
     assertNode(function2).hasType(Token.FUNCTION_TYPE);
 
     Node ast3 = parse("var n: (p1: string, p2: number) => Array<Foo>;");
     TypeDeclarationNode function3 = (TypeDeclarationNode)
-        (ast3.getFirstChild().getFirstChild().getProp(Node.DECLARED_TYPE_EXPR));
+        (ast3.getFirstFirstChild().getProp(Node.DECLARED_TYPE_EXPR));
     assertNode(function3).hasType(Token.FUNCTION_TYPE);
   }
 
@@ -386,8 +396,8 @@ public final class TypeSyntaxTest extends TestCase {
   }
 
   public void testFunctionType_notEs6Typed() {
-    testNotEs6Typed("var n: (p1:string) => boolean;", "type annotation");
-    testNotEs6Typed("var n: (p1?) => boolean;", "type annotation", "optional parameter");
+    testNotEs6TypedFullError("var n: (p1:string) => boolean;", "Parse error. ')' expected");
+    testNotEs6TypedFullError("var n: (p1?) => boolean;", "Parse error. ')' expected");
   }
 
   public void testInterface() {
@@ -403,10 +413,9 @@ public final class TypeSyntaxTest extends TestCase {
     expectErrors("Parse error. '}' expected");
     parse("if (true) { interface I {} }");
 
-    // TODO(moz): Enable these
-    //parse("interface I {\n  (p: boolean): string;\n}");
-    //parse("interface I {\n  new (p: boolean): string;\n}");
-    //parse("interface I {\n  [foo: string]: number;\n}");
+    parse("interface I {\n  (p: boolean): string;\n}");
+    parse("interface I {\n  new (p: boolean): string;\n}");
+    parse("interface I {\n  [foo: string]: number;\n}");
   }
 
   public void testInterface_notEs6Typed() {
@@ -462,8 +471,8 @@ public final class TypeSyntaxTest extends TestCase {
   }
 
   public void testMemberVariable_notEs6Typed() {
-    testNotEs6Typed("class Foo {\n  foo;\n}", "member variable in class");
-    testNotEs6Typed("class Foo {\n  ['foo'];\n}", "member variable in class", "computed property");
+    testNotEs6TypedFullError("class Foo {\n  foo;\n}", "Parse error. '(' expected");
+    testNotEs6TypedFullError("class Foo {\n  ['foo'];\n}", "Parse error. '(' expected");
   }
 
   public void testMethodType() {
@@ -474,7 +483,7 @@ public final class TypeSyntaxTest extends TestCase {
         + "  }\n"
         + "}").getFirstChild();
     Node members = classDecl.getChildAtIndex(2);
-    Node method = members.getFirstChild().getFirstChild();
+    Node method = members.getFirstFirstChild();
     assertDeclaredType("string return type", stringType(), method);
   }
 
@@ -496,7 +505,7 @@ public final class TypeSyntaxTest extends TestCase {
 
   public void testGenericFunction() {
     parse("function foo<T>() {\n}");
-    parse("var x = <K, V>(p) => 3;");
+    // parse("var x = <K, V>(p) => 3;");
     parse("class Foo {\n  f<T>() {\n  }\n}");
     parse("(function<T>() {\n})();");
     parse("function* foo<T>() {\n}");
@@ -519,7 +528,7 @@ public final class TypeSyntaxTest extends TestCase {
     parse("class Foo implements Bar, Baz {\n}");
     parse("class Foo extends Bar implements Baz {\n}");
 
-    testNotEs6Typed("class Foo implements Bar {\n}", "implements");
+    testNotEs6TypedFullError("class Foo implements Bar {\n}", "Parse error. '{' expected");
   }
 
   public void testTypeAlias() {
@@ -533,17 +542,23 @@ public final class TypeSyntaxTest extends TestCase {
 
   public void testAmbientDeclaration() {
     parse("declare var x, y;");
+    parse("declare var x;\ndeclare var y;");
     parse("declare let x;");
     parse("declare const x;");
     parse("declare function foo();");
-    parse("declare class Foo {\n  constructor();\n  foo();\n};");
-    parse("declare class Foo {\n  static *foo(bar: string);\n};");
-    parse("declare enum Foo {\n};");
+    parse("declare class Foo {\n  constructor();\n  foo();\n}");
+    parse("declare class Foo {\n  static *foo(bar: string);\n}");
+    parse("declare class Foo {\n}\ndeclare class Bar {\n}");
+    parse("declare enum Foo {\n}");
+    parse("declare namespace foo {\n}");
+    parse("declare namespace foo {\n  class A {\n  }\n  class B extends A {\n  }\n}");
 
     expectErrors("Parse error. Ambient variable declaration may not have initializer");
     parse("declare var x = 3;");
     expectErrors("Parse error. Ambient variable declaration may not have initializer");
     parse("declare const x = 3;");
+    expectErrors("Parse error. Semi-colon expected");
+    parse("declare var x declare var y;");
     expectErrors("Parse error. Semi-colon expected");
     parse("declare function foo() {}");
     expectErrors("Parse error. Semi-colon expected");
@@ -552,6 +567,14 @@ public final class TypeSyntaxTest extends TestCase {
     parse("declare class Foo {\n  constructor() {}\n};");
 
     testNotEs6Typed("declare var x;", "ambient declaration");
+  }
+
+  public void testExportDeclaration() {
+    parse("export interface I {\n}\nexport class C implements I {\n}");
+    parse("export declare class A {\n}\nexport declare class B extends A {\n}");
+
+    expectErrors("Parse error. Semi-colon expected");
+    parse("export var x export var y");
   }
 
   public void testTypeQuery() {
@@ -585,24 +608,25 @@ public final class TypeSyntaxTest extends TestCase {
     parse("class Foo { static private constructor() {}}");
 
 
+    String accessModifierInterpretedAsPropertyNameErrorMessage = "Parse error. '(' expected";
     testNotEs6TypedFullError(
         "class Foo { private constructor() {} }",
-        "Parse error. Accessibility modifier is only supported in ES6 typed mode");
+        accessModifierInterpretedAsPropertyNameErrorMessage);
     testNotEs6TypedFullError(
         "class Foo { protected bar; }",
-        "Parse error. Accessibility modifier is only supported in ES6 typed mode");
+        accessModifierInterpretedAsPropertyNameErrorMessage);
     testNotEs6TypedFullError(
         "class Foo { protected bar() {} }",
-        "Parse error. Accessibility modifier is only supported in ES6 typed mode");
+        accessModifierInterpretedAsPropertyNameErrorMessage);
     testNotEs6TypedFullError(
         "class Foo { private get() {} }",
-        "Parse error. Accessibility modifier is only supported in ES6 typed mode");
+        accessModifierInterpretedAsPropertyNameErrorMessage);
     testNotEs6TypedFullError(
         "class Foo { private set() {} }",
-        "Parse error. Accessibility modifier is only supported in ES6 typed mode");
+        accessModifierInterpretedAsPropertyNameErrorMessage);
     testNotEs6TypedFullError(
         "class Foo { private [Symbol.iterator]() {} }",
-        "Parse error. Accessibility modifier is only supported in ES6 typed mode");
+        accessModifierInterpretedAsPropertyNameErrorMessage);
   }
 
   public void testOptionalProperty() {
@@ -641,7 +665,7 @@ public final class TypeSyntaxTest extends TestCase {
 
   public void testIndexSignature() {
     parse("interface I {\n  [foo: number]: number;\n}");
-    parse("var i: {[foo: number]: number;};");
+    parse("var i: {[foo: number]: number;\n};");
     parse("class C {\n  [foo: number]: number;\n}");
 
     expectErrors("Parse error. ':' expected");
@@ -651,14 +675,13 @@ public final class TypeSyntaxTest extends TestCase {
     expectErrors("Parse error. Index signature parameter type must be 'string' or 'number'");
     parse("interface I {\n  [foo: any]: number;\n}");
 
-    testNotEs6Typed("class C {\n  [foo: number]: number;\n}",
-        "index signature", "type annotation", "type annotation");
+    testNotEs6TypedFullError("class C {\n  [foo: number]: number;\n}", "Parse error. ']' expected");
   }
 
   public void testCallSignature() {
     parse("interface I {\n  (foo: number): number;\n}");
     parse("interface I {\n  <T>(foo: number): number;\n}");
-    parse("var i: {(foo: number): number;};");
+    parse("var i: {(foo: number): number;\n};");
 
     testNotEs6Typed("interface I { (foo); }", "interface", "call signature");
   }
@@ -666,7 +689,7 @@ public final class TypeSyntaxTest extends TestCase {
   public void testConstructSignature() {
     parse("interface I {\n  new (foo: number): number;\n}");
     parse("interface I {\n  new <T>(foo: number): number;\n}");
-    parse("var i: {new (foo: number): number;};");
+    parse("var i: {new (foo: number): number;\n};");
 
     testNotEs6Typed("interface I { new (foo); }", "interface", "constructor signature");
   }
@@ -679,16 +702,83 @@ public final class TypeSyntaxTest extends TestCase {
     parse("var x: 'string'");
   }
 
+  public void testNamespace() {
+    parse("namespace foo {\n}");
+    parse("namespace foo.bar.baz {\n}");
+
+    parse("namespace foo {\n  interface I {\n  }\n}");
+    parse("namespace foo {\n  class C {\n  }\n}");
+    parse("namespace foo {\n  enum E {\n  }\n}");
+    parse("namespace foo {\n  function f() {\n  }\n}");
+    parse("namespace foo {\n  declare var foo\n}");
+    parse("namespace foo {\n  namespace bar {\n  }\n}");
+    parse("namespace foo {\n  interface I {\n  }\n  class C {\n  }\n}");
+    parse("namespace foo {\n  type Foo = number;\n}");
+
+    parse("namespace foo {\n  export interface I {\n  }\n}");
+    parse("namespace foo {\n  export class C {\n  }\n}");
+    parse("namespace foo {\n  export enum E {\n  }\n}");
+    parse("namespace foo {\n  export function f() {\n  }\n}");
+    parse("namespace foo {\n  export declare var foo\n}");
+    parse("namespace foo {\n  export namespace bar {\n  }\n}");
+    parse("namespace foo {\n  export type Foo = number;\n}");
+
+    expectErrors("Parse error. Semi-colon expected");
+    parse("namespace {}");
+    expectErrors("Parse error. Semi-colon expected");
+    parse("namespace 'foo' {}"); // External modules are not supported
+
+    testNotEs6Typed("namespace foo {}", "namespace declaration");
+  }
+
+  public void testAmbientNameSpace() {
+    parse("declare namespace foo {\n}");
+    parse("declare namespace foo.bar.baz {\n}");
+
+    parse("declare namespace foo {\n  interface I {\n  }\n}");
+    parse("declare namespace foo {\n  class I {\n    bar();\n  }\n}");
+    parse("declare namespace foo {\n  class I {\n    static bar();\n  }\n}");
+    parse("declare namespace foo {\n  class I {\n    async bar();\n  }\n}");
+    parse("declare namespace foo {\n  class I {\n    static async bar();\n  }\n}");
+    parse("declare namespace foo {\n  enum E {\n  }\n}");
+    parse("declare namespace foo {\n  function f();\n}");
+    parse("declare namespace foo {\n  var foo;\n}");
+    parse("declare namespace foo {\n  namespace bar {\n  }\n}");
+    parse("declare namespace foo {\n  interface I {\n  }\n  class C {\n  }\n}");
+
+    parse("declare namespace foo {\n  export interface I {\n  }\n}");
+    parse("declare namespace foo {\n  export class I {\n    bar();\n  }\n}");
+    parse("declare namespace foo {\n  export enum E {\n  }\n}");
+    parse("declare namespace foo {\n  export function f();\n}");
+    parse("declare namespace foo {\n  export var foo\n}");
+    parse("declare namespace foo {\n  export namespace bar {\n  }\n}");
+    parse("declare namespace foo {\n  export interface I {\n  }\n  export class C {\n  }\n}");
+
+    expectErrors("Parse error. Semi-colon expected");
+    parse("declare namespace foo { class C { bar() {} }}");
+    expectErrors("Parse error. Ambient variable declaration may not have initializer");
+    parse("declare namespace foo { var a = 3; }");
+    expectErrors("Parse error. Ambient variable declaration may not have initializer");
+    parse("declare namespace foo { export var a = 3; }");
+    expectErrors("Parse error. Semi-colon expected");
+    parse("declare namespace foo { function bar() {} }");
+    expectErrors("Parse error. '}' expected");
+    parse("declare namespace foo { type Foo = number; }");
+
+    testNotEs6Typed("declare namespace foo {}", "ambient declaration", "namespace declaration");
+  }
+
   private void assertVarType(String message, TypeDeclarationNode expectedType, String source) {
     Node varDecl = parse(source, source).getFirstChild();
     assertDeclaredType(message, expectedType, varDecl.getFirstChild());
   }
 
-  private void assertDeclaredType(String message, TypeDeclarationNode expectedType, Node typed) {
+  private static void assertDeclaredType(
+      String message, TypeDeclarationNode expectedType, Node typed) {
     assertTreeEquals(message, expectedType, typed.getDeclaredTypeExpression());
   }
 
-  private void assertTreeEquals(String message, Node expected, Node actual) {
+  private static void assertTreeEquals(String message, Node expected, Node actual) {
     String treeDiff = expected.checkTreeEquals(actual);
     assertNull(message + ": " + treeDiff, treeDiff);
   }

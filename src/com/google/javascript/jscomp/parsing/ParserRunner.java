@@ -19,7 +19,11 @@ package com.google.javascript.jscomp.parsing;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.javascript.jscomp.parsing.Config.JsDocParsing;
 import com.google.javascript.jscomp.parsing.Config.LanguageMode;
+import com.google.javascript.jscomp.parsing.Config.RunMode;
+import com.google.javascript.jscomp.parsing.Config.StrictMode;
+import com.google.javascript.jscomp.parsing.parser.FeatureSet;
 import com.google.javascript.jscomp.parsing.parser.Parser;
 import com.google.javascript.jscomp.parsing.parser.Parser.Config.Mode;
 import com.google.javascript.jscomp.parsing.parser.SourceFile;
@@ -28,12 +32,13 @@ import com.google.javascript.jscomp.parsing.parser.trees.ProgramTree;
 import com.google.javascript.jscomp.parsing.parser.util.SourcePosition;
 import com.google.javascript.rhino.ErrorReporter;
 import com.google.javascript.rhino.Node;
+import com.google.javascript.rhino.SimpleSourceFile;
 import com.google.javascript.rhino.StaticSourceFile;
-
 import java.util.HashSet;
 import java.util.List;
 import java.util.ResourceBundle;
 import java.util.Set;
+import javax.annotation.Nullable;
 
 /** parser runner */
 public final class ParserRunner {
@@ -49,17 +54,25 @@ public final class ParserRunner {
   // Should never need to instantiate class of static methods.
   private ParserRunner() {}
 
-  public static Config createConfig(boolean isIdeMode,
-                                    LanguageMode languageMode,
-                                    Set<String> extraAnnotationNames) {
+  public static Config createConfig(
+      LanguageMode languageMode, Set<String> extraAnnotationNames, StrictMode strictMode) {
     return createConfig(
-        isIdeMode, isIdeMode, languageMode, extraAnnotationNames);
+        languageMode,
+        JsDocParsing.TYPES_ONLY,
+        RunMode.STOP_AFTER_ERROR,
+        extraAnnotationNames,
+        true,
+        strictMode);
   }
 
-  public static Config createConfig(boolean isIdeMode,
-                                    boolean parseJsDocDocumentation,
-                                    LanguageMode languageMode,
-                                    Set<String> extraAnnotationNames) {
+  public static Config createConfig(
+      LanguageMode languageMode,
+      JsDocParsing jsdocParsingMode,
+      RunMode runMode,
+      Set<String> extraAnnotationNames,
+      boolean parseInlineSourceMaps,
+      StrictMode strictMode) {
+
     initResourceConfig();
     Set<String> effectiveAnnotationNames;
     if (extraAnnotationNames == null) {
@@ -68,8 +81,15 @@ public final class ParserRunner {
       effectiveAnnotationNames = new HashSet<>(annotationNames);
       effectiveAnnotationNames.addAll(extraAnnotationNames);
     }
-    return new Config(effectiveAnnotationNames, suppressionNames,
-        isIdeMode, parseJsDocDocumentation, languageMode);
+    return Config.builder()
+        .setExtraAnnotationNames(effectiveAnnotationNames)
+        .setJsDocParsingMode(jsdocParsingMode)
+        .setRunMode(runMode)
+        .setSuppressionNames(suppressionNames)
+        .setLanguageMode(languageMode)
+        .setParseInlineSourceMaps(parseInlineSourceMaps)
+        .setStrictMode(strictMode)
+        .build();
   }
 
   public static Set<String> getReservedVars() {
@@ -88,7 +108,7 @@ public final class ParserRunner {
     reservedVars = extractList(config.getString("compiler.reserved.vars"));
   }
 
-  private static Set<String> extractList(String configProp) {
+  private static ImmutableSet<String> extractList(String configProp) {
     return ImmutableSet.copyOf(Splitter.on(',').trimResults().split(configProp));
   }
 
@@ -98,45 +118,103 @@ public final class ParserRunner {
       Config config,
       ErrorReporter errorReporter) {
     // TODO(johnlenz): unify "SourceFile", "Es6ErrorReporter" and "Config"
-    SourceFile file = new SourceFile(sourceFile.getName(), sourceString);
-    Es6ErrorReporter es6ErrorReporter =
-        new Es6ErrorReporter(errorReporter, file, config);
-    com.google.javascript.jscomp.parsing.parser.Parser.Config es6config =
-        new com.google.javascript.jscomp.parsing.parser.Parser.Config(mode(
-            config.languageMode));
-    Parser p = new Parser(es6config, es6ErrorReporter, file);
-    ProgramTree tree = p.parseProgram();
-    Node root = null;
-    List<Comment> comments = ImmutableList.of();
-    if (tree != null && (!es6ErrorReporter.hadError() || config.isIdeMode)) {
-      root = IRFactory.transformTree(
-          tree, sourceFile, sourceString, config, errorReporter);
-      root.setIsSyntheticBlock(true);
 
-      if (config.isIdeMode) {
-        comments = p.getComments();
+    String sourceName = sourceFile.getName();
+    try {
+      SourceFile file = new SourceFile(sourceName, sourceString);
+      boolean keepGoing = config.runMode() == Config.RunMode.KEEP_GOING;
+      Es6ErrorReporter es6ErrorReporter = new Es6ErrorReporter(errorReporter, keepGoing);
+      com.google.javascript.jscomp.parsing.parser.Parser.Config es6config = newParserConfig(config);
+      Parser p = new Parser(es6config, es6ErrorReporter, file);
+      ProgramTree tree = p.parseProgram();
+      Node root = null;
+      List<Comment> comments = ImmutableList.of();
+      FeatureSet features = p.getFeatures();
+      if (tree != null && (!es6ErrorReporter.hadError() || keepGoing)) {
+        IRFactory factory =
+            IRFactory.transformTree(tree, sourceFile, sourceString, config, errorReporter);
+        root = factory.getResultNode();
+        features = features.union(factory.getFeatures());
+        root.putProp(Node.FEATURE_SET, features);
+
+        if (config.jsDocParsingMode().shouldParseDescriptions()) {
+          comments = p.getComments();
+        }
       }
+      return new ParseResult(root, comments, features, p.getSourceMapURL());
+    } catch (Throwable t) {
+      throw new RuntimeException("Exception parsing \"" + sourceName + "\"", t);
     }
-    return new ParseResult(root, comments);
+  }
+
+  private static com.google.javascript.jscomp.parsing.parser.Parser.Config newParserConfig(
+      Config config) {
+    LanguageMode languageMode = config.languageMode();
+    boolean isStrictMode = config.strictMode().isStrict();
+    Mode parserConfigLanguageMode;
+    switch (languageMode) {
+      case TYPESCRIPT:
+        parserConfigLanguageMode = Mode.TYPESCRIPT;
+        break;
+
+      case ECMASCRIPT3:
+        parserConfigLanguageMode = Mode.ES3;
+        break;
+
+      case ECMASCRIPT5:
+        parserConfigLanguageMode = Mode.ES5;
+        break;
+
+      case ECMASCRIPT6:
+        parserConfigLanguageMode = Mode.ES6;
+        break;
+      case ECMASCRIPT7:
+        parserConfigLanguageMode = Mode.ES7;
+        break;
+      case ECMASCRIPT8:
+        parserConfigLanguageMode = Mode.ES8_OR_GREATER;
+        break;
+      case ES_NEXT:
+        parserConfigLanguageMode = Mode.ES_NEXT;
+        break;
+
+      default:
+        throw new IllegalStateException("unexpected language mode: " + languageMode);
+    }
+    return new com.google.javascript.jscomp.parsing.parser.Parser.Config(
+        parserConfigLanguageMode, isStrictMode);
+  }
+
+  // TODO(sdh): this is less useful if we end up needing the node for library version detection
+  public static FeatureSet detectFeatures(String sourcePath, String sourceString) {
+    SourceFile file = new SourceFile(sourcePath, sourceString);
+    ErrorReporter reporter = IRFactory.NULL_REPORTER;
+    com.google.javascript.jscomp.parsing.parser.Parser.Config config =
+        newParserConfig(IRFactory.NULL_CONFIG);
+    Parser p = new Parser(config, new Es6ErrorReporter(reporter, false), file);
+    ProgramTree tree = p.parseProgram();
+    StaticSourceFile simpleSourceFile = new SimpleSourceFile(sourcePath, false);
+    return IRFactory.detectFeatures(tree, simpleSourceFile, sourceString).union(p.getFeatures());
   }
 
   private static class Es6ErrorReporter
       extends com.google.javascript.jscomp.parsing.parser.util.ErrorReporter {
-    private ErrorReporter reporter;
+    private final ErrorReporter reporter;
     private boolean errorSeen = false;
-    private boolean isIdeMode;
+    private final boolean reportAllErrors;
 
     Es6ErrorReporter(
         ErrorReporter reporter,
-        SourceFile source,
-        Config config) {
+        boolean reportAllErrors) {
       this.reporter = reporter;
-      this.isIdeMode = config.isIdeMode;
+      this.reportAllErrors = reportAllErrors;
     }
 
     @Override
     protected void reportError(SourcePosition location, String message) {
-      if (isIdeMode || !errorSeen) {
+      // In normal usage, only the first parse error should be reported, but
+      // sometimes it is useful to keep going.
+      if (reportAllErrors || !errorSeen) {
         errorSeen = true;
         this.reporter.error(
             message, location.source.name,
@@ -152,35 +230,20 @@ public final class ParserRunner {
     }
   }
 
-  private static Mode mode(LanguageMode mode) {
-    switch (mode) {
-      case ECMASCRIPT3:
-        return Mode.ES3;
-      case ECMASCRIPT5:
-        return Mode.ES5;
-      case ECMASCRIPT5_STRICT:
-        return Mode.ES5_STRICT;
-      case ECMASCRIPT6:
-        return Mode.ES6;
-      case ECMASCRIPT6_STRICT:
-        return Mode.ES6_STRICT;
-      case ECMASCRIPT6_TYPED:
-        return Mode.ES6_TYPED;
-      default:
-        throw new IllegalStateException("unexpected language mode: " + mode);
-    }
-  }
-
   /**
    * Holds results of parsing.
    */
   public static class ParseResult {
     public final Node ast;
     public final List<Comment> comments;
+    public final FeatureSet features;
+    @Nullable public final String sourceMapURL;
 
-    public ParseResult(Node ast, List<Comment> comments) {
+    public ParseResult(Node ast, List<Comment> comments, FeatureSet features, String sourceMapURL) {
       this.ast = ast;
       this.comments = comments;
+      this.features = features;
+      this.sourceMapURL = sourceMapURL;
     }
   }
 }

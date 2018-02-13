@@ -46,11 +46,9 @@ import com.google.javascript.rhino.jstype.JSTypeRegistry;
 import com.google.javascript.rhino.jstype.ObjectType;
 import com.google.javascript.rhino.jstype.StaticTypedSlot;
 import com.google.javascript.rhino.testing.Asserts;
-
-import junit.framework.TestCase;
-
 import java.util.HashMap;
 import java.util.Map;
+import junit.framework.TestCase;
 
 /**
  * Tests {@link TypeInference}.
@@ -107,7 +105,7 @@ public final class TypeInferenceTest extends TestCase {
         Joiner.on(", ").join(compiler.getErrors()),
         0, compiler.getErrorCount());
 
-    Node n = root.getFirstChild().getFirstChild();
+    Node n = root.getFirstFirstChild();
     // Create the scope with the assumptions.
     TypedScopeCreator scopeCreator = new TypedScopeCreator(compiler);
     TypedScope assumedScope = scopeCreator.createScope(
@@ -1133,7 +1131,7 @@ public final class TypeInferenceTest extends TestCase {
 
   public void testRecordInference() {
     inFunction(
-        "/** @param {{a: (boolean|undefined)}|{b: (string|undefined)}} x */" +
+        "/** @param {{a: boolean}|{b: string}} x */" +
         "function f(x) {}" +
         "var out = {};" +
         "f(out);");
@@ -1208,7 +1206,7 @@ public final class TypeInferenceTest extends TestCase {
         + " */\n"
         + "function f(){}\n"
         + "var result = f(10);");
-      verify("result", JSTypeNative.NO_TYPE);
+      verify("result", JSTypeNative.UNKNOWN_TYPE);
   }
 
   public void testTypeTransformationUnionType() {
@@ -1496,12 +1494,41 @@ public final class TypeInferenceTest extends TestCase {
     verify("r", getType("e"));
   }
 
+  public void testTypeTransformationIsTemplatizedPartially() {
+    inFunction(
+        Joiner.on('\n').join(
+            "/**",
+            " * @constructor",
+            " * @template T, U",
+            " */",
+            "function Foo() {}",
+            "/**",
+            " * @template T := cond(isTemplatized(type('Foo', 'number')), 'number', 'string') =:",
+            " * @return {T}",
+            " */",
+            "function f() { return 123; }",
+            "var x = f();"));
+    assertTrue(getType("x").isNumber());
+  }
+
   public void testAssertTypeofProp() {
     assuming("x", createNullableType(OBJECT_TYPE));
     inFunction(
         "goog.asserts.assert(typeof x.prop != 'undefined');" +
         "out = x.prop;");
     verify("out", CHECKED_UNKNOWN_TYPE);
+  }
+
+  public void testIsArray() {
+    assuming("x", createNullableType(OBJECT_TYPE));
+    inFunction("goog.asserts.assert(Array.isArray(x));");
+    verify("x", ARRAY_TYPE);
+  }
+
+  public void testNotIsArray() {
+    assuming("x", createUnionType(ARRAY_TYPE, NUMBER_TYPE));
+    inFunction("goog.asserts.assert(!Array.isArray(x));");
+    verify("x", NUMBER_TYPE);
   }
 
   private ObjectType getNativeObjectType(JSTypeNative t) {

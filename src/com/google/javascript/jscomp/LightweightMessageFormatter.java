@@ -15,9 +15,9 @@
  */
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.javascript.jscomp.SourceExcerptProvider.SourceExcerpt.LINE;
 
-import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.debugging.sourcemap.proto.Mapping.OriginalMapping;
 import com.google.javascript.jscomp.SourceExcerptProvider.ExcerptFormatter;
@@ -30,9 +30,11 @@ import com.google.javascript.rhino.TokenUtil;
  *
  */
 public final class LightweightMessageFormatter extends AbstractMessageFormatter {
-  private SourceExcerpt excerpt;
+  private final SourceExcerpt excerpt;
   private static final ExcerptFormatter excerptFormatter =
       new LineNumberingFormatter();
+  private boolean includeLocation = true;
+  private boolean includeLevel = true;
 
   /**
    * A constructor for when the client doesn't care about source information.
@@ -49,12 +51,22 @@ public final class LightweightMessageFormatter extends AbstractMessageFormatter 
   public LightweightMessageFormatter(SourceExcerptProvider source,
       SourceExcerpt excerpt) {
     super(source);
-    Preconditions.checkNotNull(source);
+    checkNotNull(source);
     this.excerpt = excerpt;
   }
 
-  static LightweightMessageFormatter withoutSource() {
+  public static LightweightMessageFormatter withoutSource() {
     return new LightweightMessageFormatter();
+  }
+
+  public LightweightMessageFormatter setIncludeLocation(boolean includeLocation) {
+    this.includeLocation = includeLocation;
+    return this;
+  }
+
+  public LightweightMessageFormatter setIncludeLevel(boolean includeLevel) {
+    this.includeLevel = includeLevel;
+    return this;
   }
 
   @Override
@@ -79,41 +91,59 @@ public final class LightweightMessageFormatter extends AbstractMessageFormatter 
     String nonMappedPosition = formatPosition(sourceName, lineNumber);
 
     // Check if we can reverse-map the source.
-    OriginalMapping mapping = source == null ? null : source.getSourceMapping(
-        error.sourceName, error.lineNumber, error.getCharno());
-    if (mapping == null) {
-      boldLine.append(nonMappedPosition);
-    } else {
-      sourceName = mapping.getOriginalFile();
-      lineNumber = mapping.getLineNumber();
-      charno = mapping.getColumnPosition();
+    if (includeLocation) {
+      OriginalMapping mapping = source == null ? null : source.getSourceMapping(
+          error.sourceName, error.lineNumber, error.getCharno());
+      if (mapping == null) {
+        boldLine.append(nonMappedPosition);
+      } else {
+        sourceName = mapping.getOriginalFile();
+        lineNumber = mapping.getLineNumber();
+        charno = mapping.getColumnPosition();
 
-      b.append(nonMappedPosition);
-      b.append("\nOriginally at:\n");
-      boldLine.append(formatPosition(sourceName, lineNumber));
+        b.append(nonMappedPosition);
+        b.append("\nOriginally at:\n");
+        boldLine.append(formatPosition(sourceName, lineNumber));
+      }
     }
 
-    // extract source excerpt
-    String sourceExcerpt = source == null ? null :
-        excerpt.get(
-            source, sourceName, lineNumber, excerptFormatter);
-
-    boldLine.append(getLevelName(warning ? CheckLevel.WARNING : CheckLevel.ERROR));
-    boldLine.append(" - ");
+    if (includeLevel) {
+      boldLine.append(getLevelName(warning ? CheckLevel.WARNING : CheckLevel.ERROR));
+      boldLine.append(" - ");
+    }
 
     boldLine.append(error.description);
 
     b.append(maybeEmbolden(boldLine.toString()));
     b.append('\n');
+
+    String sourceExcerptWithPositionIndicator =
+        getExcerptWithPosition(error, sourceName, lineNumber, charno);
+    if (sourceExcerptWithPositionIndicator != null) {
+      b.append(sourceExcerptWithPositionIndicator);
+    }
+    return b.toString();
+  }
+
+  String getExcerptWithPosition(JSError error) {
+    return getExcerptWithPosition(error, error.sourceName, error.lineNumber, error.getCharno());
+  }
+
+  String getExcerptWithPosition(JSError error, String sourceName, int lineNumber, int charno) {
+    StringBuilder b = new StringBuilder();
+
+    SourceExcerptProvider source = getSource();
+    String sourceExcerpt =
+        source == null ? null : excerpt.get(source, sourceName, lineNumber, excerptFormatter);
+
     if (sourceExcerpt != null) {
       b.append(sourceExcerpt);
       b.append('\n');
 
       // padding equal to the excerpt and arrow at the end
-      // charno == sourceExpert.length() means something is missing
+      // charno == sourceExcerpt.length() means something is missing
       // at the end of the line
-      if (excerpt.equals(LINE)
-          && 0 <= charno && charno <= sourceExcerpt.length()) {
+      if (excerpt.equals(LINE) && 0 <= charno && charno <= sourceExcerpt.length()) {
         for (int i = 0; i < charno; i++) {
           char c = sourceExcerpt.charAt(i);
           if (TokenUtil.isWhitespace(c)) {
@@ -122,13 +152,22 @@ public final class LightweightMessageFormatter extends AbstractMessageFormatter 
             b.append(' ');
           }
         }
-        b.append("^\n");
+        if (error.node == null) {
+          b.append("^");
+        } else {
+          int length =
+              Math.max(1, Math.min(error.node.getLength(), sourceExcerpt.length() - charno));
+          for (int i = 0; i < length; i++) {
+            b.append("^");
+          }
+        }
+        b.append("\n");
       }
     }
     return b.toString();
   }
 
-  private String formatPosition(String sourceName, int lineNumber) {
+  private static String formatPosition(String sourceName, int lineNumber) {
     StringBuilder b = new StringBuilder();
     if (sourceName != null) {
       b.append(sourceName);
@@ -143,9 +182,13 @@ public final class LightweightMessageFormatter extends AbstractMessageFormatter 
 
   /**
    * Formats a region by appending line numbers in front, e.g.
-   * <pre>   9| if (foo) {
+   *
+   * <pre>
+   *    9| if (foo) {
    *   10|   alert('bar');
-   *   11| }</pre>
+   *   11| }
+   * </pre>
+   *
    * and return line excerpt without any modification.
    */
   static class LineNumberingFormatter implements ExcerptFormatter {

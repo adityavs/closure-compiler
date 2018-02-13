@@ -16,19 +16,20 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-import com.google.common.base.Preconditions;
+import com.google.common.annotations.GwtIncompatible;
+import com.google.common.base.Ascii;
 import com.google.javascript.jscomp.parsing.parser.util.format.SimpleFormat;
-
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
 import javax.annotation.Nullable;
 
 /**
@@ -106,8 +107,8 @@ public final class JsMessage {
       String id, List<CharSequence> parts, Set<String> placeholders,
       String desc, boolean hidden, String meaning) {
 
-    Preconditions.checkState(key != null);
-    Preconditions.checkState(id != null);
+    checkState(key != null);
+    checkState(id != null);
 
     this.key = key;
     this.id = id;
@@ -163,7 +164,7 @@ public final class JsMessage {
    * Gets the meaning annotated to the message, intended to force different
    * translations.
    */
-  String getMeaning() {
+  public String getMeaning() {
     return meaning;
   }
 
@@ -277,9 +278,8 @@ public final class JsMessage {
 
     @Override
     public boolean equals(Object o) {
-      return o == this ||
-             o instanceof PlaceholderReference &&
-             name.equals(((PlaceholderReference) o).name);
+      return o == this
+          || (o instanceof PlaceholderReference && name.equals(((PlaceholderReference) o).name));
     }
 
     @Override
@@ -293,12 +293,13 @@ public final class JsMessage {
    * keys and fingerprints for a message that must stay constant over time.
    *
    * This implementation correctly processes unnamed messages and creates a key
-   * for them that looks like MSG_<fingerprint value>.
+   * for them that looks like {@code MSG_<fingerprint value>};.
    */
+  @GwtIncompatible("java.util.regex")
   public static class Builder {
 
-    private static final Pattern MSG_EXTERNAL_PATTERN =
-        Pattern.compile("MSG_EXTERNAL_(\\d+)");
+    // Allow arbitrary suffixes to allow for local variable disambiguation.
+    private static final Pattern MSG_EXTERNAL_PATTERN = Pattern.compile("MSG_EXTERNAL_(\\d+).*");
 
     /**
      * @return an external message id or null if this is not an
@@ -316,8 +317,8 @@ public final class JsMessage {
     private String desc;
     private boolean hidden;
 
-    private List<CharSequence> parts = new LinkedList<>();
-    private Set<String> placeholders = new HashSet<>();
+    private final List<CharSequence> parts = new ArrayList<>();
+    private final Set<String> placeholders = new HashSet<>();
 
     private String sourceName;
 
@@ -356,7 +357,7 @@ public final class JsMessage {
      * Appends a placeholder reference to the message
      */
     public Builder appendPlaceholderReference(String name) {
-      Preconditions.checkNotNull(name, "Placeholder name could not be null");
+      checkNotNull(name, "Placeholder name could not be null");
       parts.add(new PlaceholderReference(name));
       placeholders.add(name);
       return this;
@@ -364,8 +365,7 @@ public final class JsMessage {
 
     /** Appends a translatable string literal to the message. */
     public Builder appendStringPart(String part) {
-      Preconditions.checkNotNull(part,
-          "String part of the message could not be null");
+      checkNotNull(part, "String part of the message could not be null");
       parts.add(part);
       return this;
     }
@@ -453,7 +453,7 @@ public final class JsMessage {
         }
       }
       long nonnegativeHash = Long.MAX_VALUE & Hash.hash64(sb.toString());
-      return Long.toString(nonnegativeHash, 36).toUpperCase();
+      return Ascii.toUpperCase(Long.toString(nonnegativeHash, 36));
     }
   }
 

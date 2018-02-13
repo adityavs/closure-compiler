@@ -25,19 +25,28 @@ public final class CheckRegExpTest extends CompilerTestCase {
   CheckRegExp last = null;
 
   public CheckRegExpTest() {
-    super("var RegExp;", true);
+    super("var RegExp;");
+  }
+
+  @Override
+  protected CompilerOptions getOptions(CompilerOptions options) {
+    super.getOptions(options);
+    options.setWarningLevel(DiagnosticGroups.CHECK_REGEXP, CheckLevel.WARNING);
+    return options;
   }
 
   @Override
   protected CompilerPass getProcessor(Compiler compiler) {
-    compiler.options.setWarningLevel(
-        DiagnosticGroups.CHECK_REGEXP, CheckLevel.WARNING);
     last = new CheckRegExp(compiler);
     return last;
   }
 
   private void testReference(String code, boolean expected) {
-    testSame(code, (expected) ? CheckRegExp.REGEXP_REFERENCE : null);
+    if (expected) {
+      testWarning(code, CheckRegExp.REGEXP_REFERENCE);
+    } else {
+      testSame(code);
+    }
     assertEquals(expected, last.isGlobalRegExpPropertiesUsed());
   }
 
@@ -82,7 +91,7 @@ public final class CheckRegExpTest extends CompilerTestCase {
     testReference("f(RegExp);", true);
     testReference("new f(RegExp);", true);
     testReference("var x = RegExp; x.test()", true);
-    setAcceptedLanguage(LanguageMode.ECMASCRIPT6);
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2015);
     testReference("let x = RegExp;", true);
     testReference("const x = RegExp;", true);
 
@@ -98,8 +107,8 @@ public final class CheckRegExpTest extends CompilerTestCase {
     testReference("var x = {RegExp: {}}; x.RegExp.$1;", false);
 
     // Class property is also OK.
-    setAcceptedLanguage(LanguageMode.ECMASCRIPT6);
-    testReference(LINE_JOINER.join(
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2015);
+    testReference(lines(
         "class x {",
         "  constructor() {this.RegExp = {};}",
         "  method() {",
@@ -110,6 +119,6 @@ public final class CheckRegExpTest extends CompilerTestCase {
   }
 
   public void testInvalidRange() {
-    testSame("\"asdf\".match(/[z-a]/)", CheckRegExp.MALFORMED_REGEXP);
+    this.testWarning("\"asdf\".match(/[z-a]/)", CheckRegExp.MALFORMED_REGEXP);
   }
 }

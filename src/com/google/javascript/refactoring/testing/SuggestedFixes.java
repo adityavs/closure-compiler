@@ -25,14 +25,10 @@ import com.google.common.collect.SetMultimap;
 import com.google.javascript.refactoring.ApplySuggestedFixes;
 import com.google.javascript.refactoring.CodeReplacement;
 import com.google.javascript.refactoring.SuggestedFix;
-
 import java.util.List;
 import java.util.Set;
 
-
-/**
- * Utilities for testing SuggestedFix-related code.
- */
+/** Utilities for testing SuggestedFix-related code. */
 public final class SuggestedFixes {
   private SuggestedFixes() {}
 
@@ -43,7 +39,7 @@ public final class SuggestedFixes {
   private static void assertReplacements(
       SuggestedFix fix, Set<CodeReplacement> expectedReplacements) {
     SetMultimap<String, CodeReplacement> replacementMap = fix.getReplacements();
-    assertEquals(1, replacementMap.size());
+    assertThat(replacementMap).hasSize(1);
     Set<CodeReplacement> replacements = replacementMap.get("test");
     assertThat(replacements).hasSize(expectedReplacements.size());
     assertEquals(expectedReplacements, replacements);
@@ -57,8 +53,9 @@ public final class SuggestedFixes {
   public static void assertChanges(
       List<SuggestedFix> fixes, String externs, String originalCode, String expectedCode) {
     assertThat(fixes).isNotEmpty();
-    String newCode = ApplySuggestedFixes.applySuggestedFixesToCode(
-        fixes, ImmutableMap.of("test", originalCode)).get("test");
+    String newCode =
+        ApplySuggestedFixes.applySuggestedFixesToCode(fixes, ImmutableMap.of("test", originalCode))
+            .get("test");
     assertEquals(expectedCode, newCode);
   }
 }

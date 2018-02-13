@@ -16,10 +16,10 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.Node;
-
 import java.util.HashSet;
 import java.util.Set;
 
@@ -39,7 +39,7 @@ class GatherRawExports extends AbstractPostOrderCallback
   // collapse properties, so the two entries here protect goog.global in the
   // two common cases "collapse properties and renaming on" or both off
   // but not the case where only property renaming is on.
-  private static final String GLOBAL_THIS_NAMES[] = {
+  private static final String[] GLOBAL_THIS_NAMES = {
     "window", "top", "goog$global", "goog.global" };
 
   private final Set<String> exportedVariables = new HashSet<>();
@@ -50,8 +50,8 @@ class GatherRawExports extends AbstractPostOrderCallback
 
   @Override
   public void process(Node externs, Node root) {
-    Preconditions.checkState(compiler.getLifeCycleStage().isNormalized());
-    NodeTraversal.traverse(compiler, root, this);
+    checkState(compiler.getLifeCycleStage().isNormalized());
+    NodeTraversal.traverseEs6(compiler, root, this);
   }
 
   @Override
@@ -65,7 +65,7 @@ class GatherRawExports extends AbstractPostOrderCallback
 
   private static boolean isGlobalThisObject(NodeTraversal t, Node n) {
     if (n.isThis()) {
-      return t.inGlobalScope();
+      return t.inGlobalHoistScope();
     } else if (n.isQualifiedName()) {
       int items = GLOBAL_THIS_NAMES.length;
       for (int i = 0; i < items; i++) {

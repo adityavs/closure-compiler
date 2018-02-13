@@ -39,6 +39,9 @@
 
 package com.google.javascript.rhino.jstype;
 
+import com.google.common.collect.ImmutableList;
+import javax.annotation.Nullable;
+
 /**
  * An unresolved type that was forward declared. So we know it exists,
  * but that it wasn't pulled into this binary.
@@ -51,11 +54,37 @@ package com.google.javascript.rhino.jstype;
  *
  * @author nicksantos@google.com (Nick Santos)
  */
-class NoResolvedType extends NoType {
+public class NoResolvedType extends NoType {
   private static final long serialVersionUID = 1L;
+  /** The name originally used to reference this type, or {@code null} if none. */
+  @Nullable private String referenceName;
+  /**
+   * Any template arguments to this type, or {@code null} if none.
+   * This field is not used for JSCompiler's type checking; it is only needed by Clutz.
+   */
+  @Nullable private ImmutableList<JSType> templateTypes;
 
   NoResolvedType(JSTypeRegistry registry) {
     super(registry);
+  }
+
+  NoResolvedType(
+      JSTypeRegistry registry, String referenceName, ImmutableList<JSType> templateTypes) {
+    this(registry);
+    this.referenceName = referenceName;
+    this.templateTypes = templateTypes;
+  }
+
+  @Override
+  @Nullable
+  public String getReferenceName() {
+    return referenceName;
+  }
+
+  @Override
+  @Nullable
+  public ImmutableList<JSType> getTemplateTypes() {
+    return templateTypes;
   }
 
   @Override
@@ -75,13 +104,13 @@ class NoResolvedType extends NoType {
 
   @Override
   public boolean isSubtype(JSType that) {
-    return isSubtype(that, ImplCache.create());
+    return isSubtype(that, ImplCache.create(), SubtypingMode.NORMAL);
   }
 
   @Override
   protected boolean isSubtype(JSType that,
-      ImplCache implicitImplCache) {
-    if (JSType.isSubtypeHelper(this, that, implicitImplCache)) {
+      ImplCache implicitImplCache, SubtypingMode subtypingMode) {
+    if (JSType.isSubtypeHelper(this, that, implicitImplCache, subtypingMode)) {
       return true;
     } else {
       return !that.isNoType();
@@ -89,7 +118,7 @@ class NoResolvedType extends NoType {
   }
 
   @Override
-  String toStringHelper(boolean forAnnotations) {
-    return forAnnotations ? "?" : "NoResolvedType";
+  StringBuilder appendTo(StringBuilder sb, boolean forAnnotations) {
+    return sb.append(forAnnotations ? "?" : "NoResolvedType");
   }
 }

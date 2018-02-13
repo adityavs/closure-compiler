@@ -13,24 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.google.javascript.jscomp;
 
 public final class InlineSimpleMethodsTest extends CompilerTestCase {
 
-  public InlineSimpleMethodsTest() {
-    super("", false);
+  @Override
+  protected CompilerPass getProcessor(Compiler compiler) {
+    return new InlineSimpleMethods(compiler);
   }
 
   @Override
   protected void setUp() throws Exception {
     super.setUp();
-    super.enableLineNumberCheck(true);
-  }
-
-  @Override
-  protected CompilerPass getProcessor(Compiler compiler) {
-    return new InlineSimpleMethods(compiler);
+    enableNormalize();
   }
 
   /**
@@ -180,10 +175,10 @@ public final class InlineSimpleMethodsTest extends CompilerTestCase {
   }
 
   public void testEmptyMethodInline() {
-    testWithPrefix("function Foo(){}" +
-        "Foo.prototype.bar=function(a){};",
-        "var x=new Foo; x.bar();",
-        "var x=new Foo");
+    testWithPrefix(
+        "function Foo(){} Foo.prototype.bar=function(a){};",
+        "var x = new Foo(); x.bar();",
+        "var x = new Foo();;");
   }
 
   public void testEmptyMethodInlineWithSideEffects() {
@@ -216,18 +211,17 @@ public final class InlineSimpleMethodsTest extends CompilerTestCase {
 
   public void testNoInlineOfExternMethods1() {
     testSame("var external={};external.charAt;",
-        "external.charAt()", null);
+        "external.charAt()");
   }
 
   public void testNoInlineOfExternMethods2() {
     testSame("var external={};external.charAt=function(){};",
-        "external.charAt()", null);
+        "external.charAt()");
   }
 
   public void testNoInlineOfExternMethods3() {
     testSame("var external={};external.bar=function(){};",
-        "function Foo(){}Foo.prototype.bar=function(){};(new Foo).bar()",
-        null);
+        "function Foo(){}Foo.prototype.bar=function(){};(new Foo).bar()");
   }
 
   public void testNoInlineOfDangerousProperty() {
@@ -260,45 +254,131 @@ public final class InlineSimpleMethodsTest extends CompilerTestCase {
              "(new Foo).bar()");
   }
 
-  public void testObjectLitExtern() {
+  public void testObjectLit3() {
+    testSame("var blah={bar(){}};"
+        + "(new Foo).bar()");
+  }
+
+  public void testObjectLit4() {
+    testSame("var key='bar';"
+        + "var blah={[key]:a};"
+        + "(new Foo).bar");
+  }
+
+  public void testObjectLitExtern1() {
     String externs = "window.bridge={_sip:function(){}};";
-    testSame(externs, "window.bridge._sip()", null);
+    testSame(externs, "window.bridge._sip()");
+  }
+
+  public void testObjectLitExtern2() {
+    String externs = "window.bridge={_sip(){}};";
+    testSame(externs, "window.bridge._sip()");
+  }
+
+  public void testClassExtern() {
+    String externs = "window.bridge= class { _sip() {} };";
+    testSame(externs, "window.bridge._sip()");
   }
 
   public void testExternFunction() {
     String externs = "function emptyFunction() {}";
     testSame(externs,
         "function Foo(){this.empty=emptyFunction}" +
-        "(new Foo).empty()", null);
+        "(new Foo).empty()");
   }
 
   public void testIssue2508576_1() {
     // Method defined by an extern should be left alone.
     String externs = "function alert(a) {}";
-    testSame(externs, "({a:alert,b:alert}).a(\"a\")", null);
+    testSame(externs, "({a:alert,b:alert}).a('a')");
   }
 
   public void testIssue2508576_2() {
     // Anonymous object definition with a side-effect should be left alone.
-    testSame("({a:function(){},b:x()}).a(\"a\")");
+    testSame("({a:function(){},b:x()}).a('a')");
   }
 
   public void testIssue2508576_3() {
     // Anonymous object definition without side-effect should be removed.
-    test("({a:function(){},b:alert}).a(\"a\")", "");
+    test("({a:function(){},b:alert}).a('a')", ";");
+  }
+
+  // When there are two methods with the same name, one on an ES3-style class, and one on an
+  // ES6-style class, make sure the right one gets inlined into the right place, if inlining happens
+  // at all.
+  public void testEs6Issue1() {
+    testSame(
+        lines(
+            "/** @constructor */",
+            "function OldClass() {}",
+            "",
+            "OldClass.prototype.foo = function() { return this.oldbar; };",
+            "",
+            "class NewClass {",
+            "  foo() { return this.newbar; }",
+            "}",
+            "",
+            "var x = new OldClass;",
+            "x.foo();",
+            "x = new NewClass;",
+            "x.foo();"));
+  }
+
+  public void testEs6Issue2() {
+    testSame(
+        lines(
+            "/** @constructor */",
+            "function OldClass() {}",
+            "",
+            "OldClass.prototype.foo = function() { return this.oldbar; };",
+            "",
+            "class NewClass {",
+            "  foo() { return this.newbar; }",
+            "}",
+            "",
+            "var x = new OldClass;",
+            "x.foo();",
+            "var y = new NewClass;",
+            "y.foo();"));
   }
 
   public void testAnonymousGet() {
     // Anonymous object definition without side-effect should be removed.
-    testSame("({get a(){return function(){}},b:alert}).a(\"a\")");
-    testSame("({get a(){},b:alert}).a(\"a\")");
+    testSame("({get a(){return function(){}},b:alert}).a('a')");
+    testSame("({get a(){},b:alert}).a('a')");
     testSame("({get a(){},b:alert}).a");
   }
 
   public void testAnonymousSet() {
     // Anonymous object definition without side-effect should be removed.
-    testSame("({set a(b){return function(){}},b:alert}).a(\"a\")");
-    testSame("({set a(b){},b:alert}).a(\"a\")");
+    testSame("({set a(b){return function(){}},b:alert}).a('a')");
+    testSame("({set a(b){},b:alert}).a('a')");
     testSame("({set a(b){},b:alert}).a");
+  }
+
+  public void testInlinesEvenIfClassEscapes() {
+    // The purpose of this test is to record an unsafe assumption made by the
+    // pass. In practice, it's usually safe to inline even if the class
+    // escapes, because method definitions aren't commonly mutated.
+    test(
+        externs("var esc;"),
+        srcs(
+            lines(
+                "/** @constructor */",
+                "function Foo() {",
+                "  this.prop = 123;",
+                "}",
+                "Foo.prototype.m = function() {",
+                "  return this.prop;",
+                "}",
+                "(new Foo).m();",
+                "esc(Foo);")),
+        expected(
+            lines(
+                "/** @constructor */",
+                "function Foo(){this.prop=123}",
+                "Foo.prototype.m=function(){return this.prop}",
+                "(new Foo).m();",
+                "esc(Foo)")));
   }
 }

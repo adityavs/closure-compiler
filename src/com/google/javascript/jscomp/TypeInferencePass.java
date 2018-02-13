@@ -16,12 +16,12 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.jscomp.CodingConvention.AssertionFunctionSpec;
 import com.google.javascript.jscomp.NodeTraversal.AbstractScopedCallback;
 import com.google.javascript.jscomp.type.ReverseAbstractInterpreter;
 import com.google.javascript.rhino.Node;
-
 import java.util.HashMap;
 import java.util.Map;
 
@@ -31,19 +31,19 @@ import java.util.Map;
  */
 class TypeInferencePass implements CompilerPass {
 
-  static final DiagnosticType DATAFLOW_ERROR = DiagnosticType.warning(
+  static final DiagnosticType DATAFLOW_ERROR = DiagnosticType.error(
       "JSC_INTERNAL_ERROR_DATAFLOW",
       "non-monotonic data-flow analysis");
 
   private final AbstractCompiler compiler;
   private final ReverseAbstractInterpreter reverseInterpreter;
   private final TypedScope topScope;
-  private final MemoizedScopeCreator scopeCreator;
+  private final MemoizedTypedScopeCreator scopeCreator;
   private final Map<String, AssertionFunctionSpec> assertionFunctionsMap;
 
   TypeInferencePass(AbstractCompiler compiler,
       ReverseAbstractInterpreter reverseInterpreter,
-      TypedScope topScope, MemoizedScopeCreator scopeCreator) {
+      TypedScope topScope, MemoizedTypedScopeCreator scopeCreator) {
     this.compiler = compiler;
     this.reverseInterpreter = reverseInterpreter;
     this.topScope = topScope;
@@ -66,9 +66,8 @@ class TypeInferencePass implements CompilerPass {
   @Override
   public void process(Node externsRoot, Node jsRoot) {
     Node externsAndJs = jsRoot.getParent();
-    Preconditions.checkState(externsAndJs != null);
-    Preconditions.checkState(
-        externsRoot == null || externsAndJs.hasChild(externsRoot));
+    checkState(externsAndJs != null);
+    checkState(externsRoot == null || externsAndJs.hasChild(externsRoot));
 
     inferAllScopes(externsAndJs);
   }

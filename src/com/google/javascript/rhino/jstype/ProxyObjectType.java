@@ -39,11 +39,13 @@
 
 package com.google.javascript.rhino.jstype;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.javascript.rhino.ErrorReporter;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
-
 import java.util.Collections;
 
 /**
@@ -66,7 +68,7 @@ public class ProxyObjectType extends ObjectType {
   ProxyObjectType(JSTypeRegistry registry, JSType referencedType,
                   TemplateTypeMap templateTypeMap) {
     super(registry, templateTypeMap);
-    setReferencedType(referencedType);
+    setReferencedType(checkNotNull(referencedType));
   }
 
   @Override
@@ -93,6 +95,13 @@ public class ProxyObjectType extends ObjectType {
   }
 
   @Override
+  public boolean setValidator(Predicate<JSType> validator) {
+    // The referenced type might have specialized behavior for validation, e.g. {@link NamedType}
+    // defers validation until after named type resolution.
+    return referencedType.setValidator(validator);
+  }
+
+  @Override
   public String getReferenceName() {
     return referencedObjType == null ?
         "" : referencedObjType.getReferenceName();
@@ -100,8 +109,8 @@ public class ProxyObjectType extends ObjectType {
 
   @Override
   public boolean hasReferenceName() {
-    return referencedObjType == null ?
-        null : referencedObjType.hasReferenceName();
+    checkNotNull(referencedObjType);
+    return referencedObjType.hasReferenceName();
   }
 
   @Override
@@ -122,6 +131,11 @@ public class ProxyObjectType extends ObjectType {
   @Override
   public boolean canBeCalled() {
     return referencedType.canBeCalled();
+  }
+
+  @Override
+  public boolean isStructuralType() {
+    return referencedType.isStructuralType();
   }
 
   @Override
@@ -152,6 +166,11 @@ public class ProxyObjectType extends ObjectType {
   @Override
   public boolean isNullable() {
     return referencedType.isNullable();
+  }
+
+  @Override
+  public boolean isVoidable() {
+    return referencedType.isVoidable();
   }
 
   @Override
@@ -232,13 +251,13 @@ public class ProxyObjectType extends ObjectType {
 
   @Override
   public boolean isSubtype(JSType that) {
-    return referencedType.isSubtype(that, ImplCache.create());
+    return referencedType.isSubtype(that, ImplCache.create(), SubtypingMode.NORMAL);
   }
 
   @Override
   protected boolean isSubtype(JSType that,
-      ImplCache implicitImplCache) {
-    return referencedType.isSubtype(that, implicitImplCache);
+      ImplCache implicitImplCache, SubtypingMode subtypingMode) {
+    return referencedType.isSubtype(that, implicitImplCache, subtypingMode);
   }
 
   @Override
@@ -254,13 +273,20 @@ public class ProxyObjectType extends ObjectType {
   }
 
   @Override
+  public Iterable<ObjectType> getCtorExtendedInterfaces() {
+    return this.referencedObjType == null
+        ? Collections.<ObjectType>emptyList()
+        : this.referencedObjType.getCtorExtendedInterfaces();
+  }
+
+  @Override
   public int hashCode() {
     return referencedType.hashCode();
   }
 
   @Override
-  String toStringHelper(boolean forAnnotations) {
-    return referencedType.toStringHelper(forAnnotations);
+  StringBuilder appendTo(StringBuilder sb, boolean forAnnotations) {
+    return referencedType.appendTo(sb, forAnnotations);
   }
 
   @Override
@@ -270,11 +296,9 @@ public class ProxyObjectType extends ObjectType {
   }
 
   @Override
-  boolean defineProperty(String propertyName, JSType type,
-      boolean inferred, Node propertyNode) {
-    return referencedObjType == null ? true :
-        referencedObjType.defineProperty(
-            propertyName, type, inferred, propertyNode);
+  boolean defineProperty(String propertyName, JSType type, boolean inferred, Node propertyNode) {
+    return referencedObjType == null
+        || referencedObjType.defineProperty(propertyName, type, inferred, propertyNode);
   }
 
   @Override

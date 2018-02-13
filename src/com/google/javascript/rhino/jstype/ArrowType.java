@@ -43,12 +43,12 @@ import static com.google.javascript.rhino.jstype.JSTypeNative.UNKNOWN_TYPE;
 
 import com.google.javascript.rhino.ErrorReporter;
 import com.google.javascript.rhino.Node;
+import java.util.Objects;
 
 /**
- * The arrow type is an internal type that models the functional arrow type
- * seen in typical functional programming languages.  It is used solely for
- * separating the management of the arrow type from the complex
- * {@link FunctionType} that models JavaScript's notion of functions.
+ * The arrow type models a "bare" function type: from some parameter types to
+ * a return type. JavaScript functions include more things like properties, type
+ * of THIS, etc, and are modeled by {@link FunctionType}.
  */
 final class ArrowType extends JSType {
   private static final long serialVersionUID = 1L;
@@ -77,12 +77,12 @@ final class ArrowType extends JSType {
 
   @Override
   public boolean isSubtype(JSType that) {
-    return isSubtype(that, ImplCache.create());
+    return isSubtype(that, ImplCache.create(), SubtypingMode.NORMAL);
   }
 
   @Override
   protected boolean isSubtype(JSType other,
-      ImplCache implicitImplCache) {
+      ImplCache implicitImplCache, SubtypingMode subtypingMode) {
     if (!(other instanceof ArrowType)) {
       return false;
     }
@@ -93,7 +93,7 @@ final class ArrowType extends JSType {
     // Section 3.4.7: Subtyping Function Types.
 
     // this.returnType <: that.returnType (covariant)
-    if (!this.returnType.isSubtype(that.returnType, implicitImplCache)) {
+    if (!this.returnType.isSubtype(that.returnType, implicitImplCache, subtypingMode)) {
       return false;
     }
 
@@ -123,7 +123,7 @@ final class ArrowType extends JSType {
       JSType thatParamType = thatParam.getJSType();
       if (thisParamType != null) {
         if (thatParamType == null ||
-            !thatParamType.isSubtype(thisParamType, implicitImplCache)) {
+            !thatParamType.isSubtype(thisParamType, implicitImplCache, subtypingMode)) {
           return false;
         }
       }
@@ -174,7 +174,7 @@ final class ArrowType extends JSType {
    * @return True if our parameter spec is equal to {@code that}'s parameter
    *     spec.
    */
-  boolean hasEqualParameters(ArrowType that, EquivalenceMethod eqMethod) {
+  boolean hasEqualParameters(ArrowType that, EquivalenceMethod eqMethod, EqCache eqCache) {
     Node thisParam = parameters.getFirstChild();
     Node otherParam = that.parameters.getFirstChild();
     while (thisParam != null && otherParam != null) {
@@ -183,8 +183,7 @@ final class ArrowType extends JSType {
       if (thisParamType != null) {
         // Both parameter lists give a type for this param, it should be equal
         if (otherParamType != null &&
-            !thisParamType.checkEquivalenceHelper(
-                otherParamType, eqMethod)) {
+            !thisParamType.checkEquivalenceHelper(otherParamType, eqMethod, eqCache)) {
           return false;
         }
       } else {
@@ -211,30 +210,22 @@ final class ArrowType extends JSType {
   }
 
   boolean checkArrowEquivalenceHelper(
-      ArrowType that, EquivalenceMethod eqMethod) {
+      ArrowType that, EquivalenceMethod eqMethod, EqCache eqCache) {
     // Please keep this method in sync with the hashCode() method below.
-    if (!returnType.checkEquivalenceHelper(that.returnType, eqMethod)) {
+    if (!returnType.checkEquivalenceHelper(
+        that.returnType, eqMethod, eqCache)) {
       return false;
     }
-    return hasEqualParameters(that, eqMethod);
+    return hasEqualParameters(that, eqMethod, eqCache);
   }
 
   @Override
   public int hashCode() {
-    int hashCode = 0;
-    if (returnType != null) {
-      hashCode += returnType.hashCode();
-    }
-    if (returnTypeInferred) {
-      hashCode += 1;
-    }
+    int hashCode = Objects.hashCode(returnType);
     if (parameters != null) {
       Node param = parameters.getFirstChild();
       while (param != null) {
-        JSType paramType = param.getJSType();
-        if (paramType != null) {
-          hashCode += paramType.hashCode();
-        }
+        hashCode = hashCode * 31 + Objects.hashCode(param.getJSType());
         param = param.getNext();
       }
     }
@@ -296,8 +287,8 @@ final class ArrowType extends JSType {
   }
 
   @Override
-  String toStringHelper(boolean forAnnotations) {
-    return "[ArrowType]";
+  StringBuilder appendTo(StringBuilder sb, boolean forAnnotations) {
+    return sb.append("[ArrowType]");
   }
 
   @Override

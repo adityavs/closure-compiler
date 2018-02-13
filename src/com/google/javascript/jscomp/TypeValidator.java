@@ -16,6 +16,9 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Strings.nullToEmpty;
 import static com.google.javascript.rhino.jstype.JSTypeNative.ARRAY_TYPE;
 import static com.google.javascript.rhino.jstype.JSTypeNative.BOOLEAN_TYPE;
 import static com.google.javascript.rhino.jstype.JSTypeNative.NO_OBJECT_TYPE;
@@ -27,12 +30,13 @@ import static com.google.javascript.rhino.jstype.JSTypeNative.STRING_TYPE;
 import static com.google.javascript.rhino.jstype.JSTypeNative.UNKNOWN_TYPE;
 import static com.google.javascript.rhino.jstype.JSTypeNative.VOID_TYPE;
 
-import com.google.common.base.Preconditions;
+import com.google.common.base.Joiner;
 import com.google.javascript.jscomp.parsing.parser.util.format.SimpleFormat;
-import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
+import com.google.javascript.rhino.TypeI.Nullability;
 import com.google.javascript.rhino.jstype.FunctionType;
 import com.google.javascript.rhino.jstype.JSType;
+import com.google.javascript.rhino.jstype.JSType.SubtypingMode;
 import com.google.javascript.rhino.jstype.JSTypeNative;
 import com.google.javascript.rhino.jstype.JSTypeRegistry;
 import com.google.javascript.rhino.jstype.ObjectType;
@@ -40,13 +44,14 @@ import com.google.javascript.rhino.jstype.StaticTypedSlot;
 import com.google.javascript.rhino.jstype.TemplateTypeMap;
 import com.google.javascript.rhino.jstype.TemplateTypeMapReplacer;
 import com.google.javascript.rhino.jstype.UnknownType;
-
+import java.io.Serializable;
 import java.text.MessageFormat;
 import java.util.ArrayList;
-import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Objects;
-
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import javax.annotation.Nullable;
 
 /**
@@ -59,21 +64,22 @@ import javax.annotation.Nullable;
  *
  * @author nicksantos@google.com (Nick Santos)
  */
-class TypeValidator {
-
-  private final AbstractCompiler compiler;
+class TypeValidator implements Serializable {
+  private final transient AbstractCompiler compiler;
   private final JSTypeRegistry typeRegistry;
   private final JSType allValueTypes;
   private final JSType nullOrUndefined;
-  private final boolean reportUnnecessaryCasts;
+
+  // In TypeCheck, when we are analyzing a file with .java.js suffix, we set
+  // this field to IGNORE_NULL_UNDEFINED
+  private SubtypingMode subtypingMode = SubtypingMode.NORMAL;
 
   // TODO(nicksantos): Provide accessors to better filter the list of type
   // mismatches. For example, if we pass (Cake|null) where only Cake is
   // allowed, that doesn't mean we should invalidate all Cakes.
   private final List<TypeMismatch> mismatches = new ArrayList<>();
   // the detection logic of this one is similar to this.mismatches
-  private final List<TypeMismatch> implicitStructuralInterfaceUses =
-      new ArrayList<>();
+  private final List<TypeMismatch> implicitInterfaceUses = new ArrayList<>();
 
   // User warnings
   private static final String FOUND_REQUIRED =
@@ -81,15 +87,16 @@ class TypeValidator {
       "found   : {1}\n" +
       "required: {2}";
 
+  private static final String FOUND_REQUIRED_MISSING =
+      "{0}\n"
+      + "found   : {1}\n"
+      + "required: {2}\n"
+      + "missing : [{3}]\n"
+      + "mismatch: [{4}]";
+
   static final DiagnosticType INVALID_CAST =
       DiagnosticType.warning("JSC_INVALID_CAST",
           "invalid cast - must be a subtype or supertype\n" +
-          "from: {0}\n" +
-          "to  : {1}");
-
-  static final DiagnosticType UNNECESSARY_CAST =
-      DiagnosticType.disabled("JSC_UNNECESSARY_CAST",
-          "unnecessary cast\n" +
           "from: {0}\n" +
           "to  : {1}");
 
@@ -112,13 +119,6 @@ class TypeValidator {
           "variable {0} redefined with type {1}, " +
           "original definition at {2}:{3} with type {4}");
 
-  static final DiagnosticType HIDDEN_PROPERTY_MISMATCH =
-      DiagnosticType.warning("JSC_HIDDEN_PROPERTY_MISMATCH",
-          "mismatch of the {0} property type and the type " +
-          "of the property it overrides from superclass {1}\n" +
-          "original: {2}\n" +
-          "override: {3}");
-
   static final DiagnosticType INTERFACE_METHOD_NOT_IMPLEMENTED =
       DiagnosticType.warning(
           "JSC_INTERFACE_METHOD_NOT_IMPLEMENTED",
@@ -126,11 +126,16 @@ class TypeValidator {
 
   static final DiagnosticType HIDDEN_INTERFACE_PROPERTY_MISMATCH =
       DiagnosticType.warning(
-        "JSC_HIDDEN_INTERFACE_PROPERTY_MISMATCH",
-        "mismatch of the {0} property type and the type " +
-        "of the property it overrides from interface {1}\n" +
-        "original: {2}\n" +
-        "override: {3}");
+          "JSC_HIDDEN_INTERFACE_PROPERTY_MISMATCH",
+          "mismatch of the {0} property on type {1} and the type "
+              + "of the property it overrides from interface {2}\n"
+              + "original: {3}\n"
+              + "override: {4}");
+
+  static final DiagnosticType ABSTRACT_METHOD_NOT_IMPLEMENTED =
+      DiagnosticType.warning(
+          "JSC_ABSTRACT_METHOD_NOT_IMPLEMENTED",
+          "property {0} on abstract class {1} is not implemented by type {2}");
 
   static final DiagnosticType UNKNOWN_TYPEOF_VALUE =
       DiagnosticType.warning("JSC_UNKNOWN_TYPEOF_VALUE", "unknown type: {0}");
@@ -140,12 +145,12 @@ class TypeValidator {
                              "Cannot do {0} access on a {1}");
 
   static final DiagnosticGroup ALL_DIAGNOSTICS = new DiagnosticGroup(
+      ABSTRACT_METHOD_NOT_IMPLEMENTED,
       INVALID_CAST,
       TYPE_MISMATCH_WARNING,
       MISSING_EXTENDS_TAG_WARNING,
       DUP_VAR_DECLARATION,
       DUP_VAR_DECLARATION_TYPE_MISMATCH,
-      HIDDEN_PROPERTY_MISMATCH,
       INTERFACE_METHOD_NOT_IMPLEMENTED,
       HIDDEN_INTERFACE_PROPERTY_MISMATCH,
       UNKNOWN_TYPEOF_VALUE,
@@ -158,8 +163,6 @@ class TypeValidator {
         STRING_TYPE, NUMBER_TYPE, BOOLEAN_TYPE, NULL_TYPE, VOID_TYPE);
     this.nullOrUndefined = typeRegistry.createUnionType(
         NULL_TYPE, VOID_TYPE);
-    this.reportUnnecessaryCasts = ((Compiler) compiler).getOptions().enables(
-        DiagnosticGroups.UNNECESSARY_CASTS);
   }
 
   /**
@@ -198,13 +201,17 @@ class TypeValidator {
     return mismatches;
   }
 
+  void setSubtypingMode(SubtypingMode mode) {
+    this.subtypingMode = mode;
+  }
+
   /**
-   * all uses of implicitly implemented structural interfaces,
+   * all uses of implicitly implemented interfaces,
    * captured during type validation and type checking
    * (uses of explicitly @implemented structural interfaces are excluded)
    */
-  public Iterable<TypeMismatch> getImplicitStructuralInterfaceUses() {
-    return implicitStructuralInterfaceUses;
+  public Iterable<TypeMismatch> getImplicitInterfaceUses() {
+    return implicitInterfaceUses;
   }
 
   // All non-private methods should have the form:
@@ -317,7 +324,7 @@ class TypeValidator {
       // }
       // In this case, we incorrectly type x because of how we
       // infer properties locally. See issue 109.
-      // http://code.google.com/p/closure-compiler/issues/detail?id=109
+      // http://blickly.github.io/closure-compiler-issues/#109
       //
       // We do not do this inference globally.
       if (n.isGetProp() &&
@@ -362,7 +369,8 @@ class TypeValidator {
         && (caseType.autoboxesTo() == null
         || !caseType.autoboxesTo()
         .isSubtypeWithoutStructuralTyping(switchType))) {
-      recordStructuralInterfaceUses(caseType, switchType);
+      TypeMismatch.recordImplicitInterfaceUses(this.implicitInterfaceUses, n, caseType, switchType);
+      TypeMismatch.recordImplicitUseOfNativeObject(this.mismatches, n, caseType, switchType);
     }
   }
 
@@ -378,9 +386,9 @@ class TypeValidator {
    */
   void expectIndexMatch(NodeTraversal t, Node n, JSType objType,
                         JSType indexType) {
-    Preconditions.checkState(n.isGetElem());
+    checkState(n.isGetElem(), n);
     Node indexNode = n.getLastChild();
-    if (objType.isStruct()) {
+    if (objType.isStruct() && !isWellKnownSymbol(indexNode)) {
       report(JSError.make(indexNode,
                           ILLEGAL_PROPERTY_ACCESS, "'[]'", "struct"));
     }
@@ -388,17 +396,11 @@ class TypeValidator {
       expectStringOrNumber(t, indexNode, indexType, "property access");
     } else {
       ObjectType dereferenced = objType.dereference();
-      if (dereferenced != null && typeRegistry.isInstanceOfIObject(objType)) {
-        // make sure that the indexType is consistent with the
-        // type declared in <KEY1> from IObject<KEY1, VALUE1>
-        expectCanAssignTo(t, indexNode, indexType, dereferenced
-            .getTemplateTypeMap().getTemplateType(typeRegistry.getIObjectKeyKey()),
-            "restricted index type");
-      } else if (dereferenced != null && dereferenced
+      if (dereferenced != null && dereferenced
           .getTemplateTypeMap()
           .hasTemplateKey(typeRegistry.getObjectIndexKey())) {
         expectCanAssignTo(t, indexNode, indexType, dereferenced
-            .getTemplateTypeMap().getTemplateType(typeRegistry.getObjectIndexKey()),
+            .getTemplateTypeMap().getResolvedTemplateType(typeRegistry.getObjectIndexKey()),
             "restricted index type");
       } else if (dereferenced != null && dereferenced.isArrayType()) {
         expectNumber(t, indexNode, indexType, "array access");
@@ -410,6 +412,14 @@ class TypeValidator {
             typeRegistry.createUnionType(ARRAY_TYPE, OBJECT_TYPE));
       }
     }
+  }
+
+  // TODO(sdh): Replace isWellKnownSymbol with a real type-based
+  // check once the type system understands the symbol primitive.
+  // Any @const symbol reference should be allowed for a @struct.
+  private static boolean isWellKnownSymbol(Node n) {
+    return n.isGetProp() && n.getFirstChild().isName()
+        && n.getFirstChild().getString().equals("Symbol");
   }
 
   /**
@@ -445,9 +455,9 @@ class TypeValidator {
           typeRegistry.getReadableTypeName(owner),
           rightType, leftType);
       return false;
-    } else if (!leftType.isNoType()
-        && !rightType.isSubtypeWithoutStructuralTyping(leftType)){
-      recordStructuralInterfaceUses(rightType, leftType);
+    } else if (!leftType.isNoType() && !rightType.isSubtypeWithoutStructuralTyping(leftType)){
+      TypeMismatch.recordImplicitInterfaceUses(this.implicitInterfaceUses, n, rightType, leftType);
+      TypeMismatch.recordImplicitUseOfNativeObject(this.mismatches, n, rightType, leftType);
     }
     return true;
   }
@@ -469,7 +479,8 @@ class TypeValidator {
       mismatch(t, n, msg, rightType, leftType);
       return false;
     } else if (!rightType.isSubtypeWithoutStructuralTyping(leftType)) {
-      recordStructuralInterfaceUses(rightType, leftType);
+      TypeMismatch.recordImplicitInterfaceUses(this.implicitInterfaceUses, n, rightType, leftType);
+      TypeMismatch.recordImplicitUseOfNativeObject(this.mismatches, n, rightType, leftType);
     }
     return true;
   }
@@ -494,7 +505,8 @@ class TypeValidator {
               typeRegistry.getReadableTypeNameNoDeref(callNode.getFirstChild())),
           argType, paramType);
     } else if (!argType.isSubtypeWithoutStructuralTyping(paramType)){
-      recordStructuralInterfaceUses(argType, paramType);
+      TypeMismatch.recordImplicitInterfaceUses(this.implicitInterfaceUses, n, argType, paramType);
+      TypeMismatch.recordImplicitUseOfNativeObject(this.mismatches, n, argType, paramType);
     }
   }
 
@@ -520,8 +532,9 @@ class TypeValidator {
         !(superObject instanceof UnknownType) &&
         !declaredSuper.isEquivalentTo(superObject)) {
       if (declaredSuper.isEquivalentTo(getNativeType(OBJECT_TYPE))) {
-        registerMismatch(superObject, declaredSuper, report(
-            t.makeError(n, MISSING_EXTENDS_TAG_WARNING, subObject.toString())));
+        TypeMismatch.registerMismatch(this.mismatches, this.implicitInterfaceUses,
+            superObject, declaredSuper,
+            report(t.makeError(n, MISSING_EXTENDS_TAG_WARNING, subObject.toString())));
       } else {
         mismatch(n, "mismatch in declaration of superclass type",
             superObject, declaredSuper);
@@ -540,42 +553,17 @@ class TypeValidator {
    *
    * @param t The node traversal.
    * @param n The node where warnings should point.
-   * @param type The type being cast from.
-   * @param castType The type being cast to.
+   * @param targetType The type being cast to.
+   * @param sourceType The type being cast from.
    */
-  void expectCanCast(NodeTraversal t, Node n, JSType castType, JSType type) {
-    if (!type.canCastTo(castType)) {
-      registerMismatch(type, castType, report(t.makeError(n, INVALID_CAST,
-          type.toString(), castType.toString())));
-    } else if (!type.isSubtypeWithoutStructuralTyping(castType)){
-      recordStructuralInterfaceUses(type, castType);
-    }
-  }
-
-  /**
-   * Expect that casting type to castType is necessary. A cast is considered
-   * unnecessary if type is a subtype of castType, or identical to castType.
-   *
-   * @param t The node traversal.
-   * @param n The node where warnings should point.
-   * @param castType The type being cast to.
-   * @param type The type being cast from.
-   */
-  void expectCastIsNecessary(NodeTraversal t, Node n, JSType castType, JSType type) {
-    if (!reportUnnecessaryCasts) {
-      return;
-    }
-
-    // If either type is "no resolved type" don't report an error, because we can't
-    // know if the cast is necessary or not.
-    if (type.isNoResolvedType() || castType.isNoResolvedType()) {
-      return;
-    }
-
-    if (type.isEquivalentTo(castType) ||
-        (type.isSubtype(castType) && !castType.isSubtype(type))) {
-      report(t.makeError(n, UNNECESSARY_CAST,
-          type.toString(), castType.toString()));
+  void expectCanCast(NodeTraversal t, Node n, JSType targetType, JSType sourceType) {
+    if (!sourceType.canCastTo(targetType)) {
+      TypeMismatch.registerMismatch(
+          this.mismatches, this.implicitInterfaceUses, sourceType, targetType,
+          report(t.makeError(n, INVALID_CAST, sourceType.toString(), targetType.toString())));
+    } else if (!sourceType.isSubtypeWithoutStructuralTyping(targetType)){
+      TypeMismatch.recordImplicitInterfaceUses(
+          this.implicitInterfaceUses, n, sourceType, targetType);
     }
   }
 
@@ -596,17 +584,6 @@ class TypeValidator {
   TypedVar expectUndeclaredVariable(String sourceName, CompilerInput input,
       Node n, Node parent, TypedVar var, String variableName, JSType newType) {
     TypedVar newVar = var;
-    boolean allowDupe = false;
-    if (n.isGetProp() ||
-        NodeUtil.isObjectLitKey(n)) {
-      JSDocInfo info = n.getJSDocInfo();
-      if (info == null) {
-        info = parent.getJSDocInfo();
-      }
-      allowDupe =
-          info != null && info.getSuppressions().contains("duplicate");
-    }
-
     JSType varType = var.getType();
 
     // Only report duplicate declarations that have types. Other duplicates
@@ -632,28 +609,38 @@ class TypeValidator {
             n.getFirstChild().setJSType(varType);
           }
         } else {
-          Preconditions.checkState(parent.isFunction());
+          checkState(parent.isFunction());
           parent.setJSType(varType);
         }
       } else {
-        // Always warn about duplicates if the overridden type does not
-        // match the original type.
-        //
-        // If the types match, suppress the warning iff there was a @suppress
-        // tag, or if the original declaration was a stub.
-        if (!(allowDupe ||
-              var.getParentNode().isExprResult()) ||
-            !newType.isEquivalentTo(varType)) {
-
-          if (newType.isEquivalentTo(varType)) {
-            report(JSError.make(n, DUP_VAR_DECLARATION,
-                variableName, var.getInputName(),
-                String.valueOf(var.nameNode.getLineno())));
-          } else {
-            report(JSError.make(n, DUP_VAR_DECLARATION_TYPE_MISMATCH,
-                variableName, newType.toString(), var.getInputName(),
-                String.valueOf(var.nameNode.getLineno()),
-                varType.toString()));
+        // Check for @suppress duplicate or similar warnings guard on the previous variable
+        // declaration location.
+        boolean allowDupe = hasDuplicateDeclarationSuppression(compiler, var.getNameNode());
+        // If the previous definition doesn't suppress the warning, emit it here (i.e. always emit
+        // on the second of the duplicate definitions). The warning might still be suppressed by an
+        // @suppress tag on this declaration.
+        if (!allowDupe) {
+          // Report specifically if it is not just a duplicate, but types also don't mismatch.
+          if (!newType.isEquivalentTo(varType)) {
+            report(
+                JSError.make(
+                    n,
+                    DUP_VAR_DECLARATION_TYPE_MISMATCH,
+                    variableName,
+                    newType.toString(),
+                    var.getInputName(),
+                    String.valueOf(var.nameNode.getLineno()),
+                    varType.toString()));
+          } else if (!var.getParentNode().isExprResult()) {
+            // If the type matches and the previous declaration was a stub declaration
+            // (isExprResult), then ignore the duplicate, otherwise emit an error.
+            report(
+                JSError.make(
+                    n,
+                    DUP_VAR_DECLARATION,
+                    variableName,
+                    var.getInputName(),
+                    String.valueOf(var.nameNode.getLineno())));
           }
         }
       }
@@ -689,11 +676,19 @@ class TypeValidator {
     if (propSlot == null) {
       // Not implemented
       String sourceName = n.getSourceFileName();
-      sourceName = sourceName == null ? "" : sourceName;
-      registerMismatch(instance, implementedInterface,
-          report(JSError.make(n,
-          INTERFACE_METHOD_NOT_IMPLEMENTED,
-          prop, implementedInterface.toString(), instance.toString())));
+      sourceName = nullToEmpty(sourceName);
+      TypeMismatch.registerMismatch(
+          this.mismatches,
+          this.implicitInterfaceUses,
+          instance,
+          implementedInterface,
+          report(
+              JSError.make(
+                  n,
+                  INTERFACE_METHOD_NOT_IMPLEMENTED,
+                  prop,
+                  implementedInterface.toString(),
+                  instance.toString())));
     } else {
       Node propNode = propSlot.getDeclaration() == null ?
           null : propSlot.getDeclaration().getNode();
@@ -715,101 +710,149 @@ class TypeValidator {
       }
       required = required.restrictByNotNullOrUndefined();
 
-      if (!found.isSubtype(required)) {
+      if (!found.isSubtype(required, this.subtypingMode)) {
         // Implemented, but not correctly typed
         FunctionType constructor =
             implementedInterface.toObjectType().getConstructor();
-        registerMismatch(found, required, report(t.makeError(propNode,
-            HIDDEN_INTERFACE_PROPERTY_MISMATCH, prop,
-            constructor.getTopMostDefiningType(prop).toString(),
-            required.toString(), found.toString())));
+        JSError err =
+            t.makeError(
+                propNode,
+                HIDDEN_INTERFACE_PROPERTY_MISMATCH,
+                prop,
+                instance.toString(),
+                constructor.getTopMostDefiningType(prop).toString(),
+                required.toString(),
+                found.toString());
+        TypeMismatch.registerMismatch(
+            this.mismatches, this.implicitInterfaceUses, found, required, err);
+        report(err);
       }
     }
   }
 
   /**
-   * Report a type mismatch
+   * For a concrete class, expect that all abstract methods that haven't been implemented by any of
+   * the super classes on the inheritance chain are implemented.
    */
-  private void mismatch(NodeTraversal t, Node n,
-                        String msg, JSType found, JSType required) {
+  void expectAbstractMethodsImplemented(Node n, FunctionType ctorType) {
+    checkArgument(ctorType.isConstructor());
+
+    Map<String, ObjectType> abstractMethodSuperTypeMap = new LinkedHashMap<>();
+    FunctionType currSuperCtor = ctorType.getSuperClassConstructor();
+    if (currSuperCtor == null || !currSuperCtor.isAbstract()) {
+      return;
+    }
+
+    while (currSuperCtor != null && currSuperCtor.isAbstract()) {
+      ObjectType superType = currSuperCtor.getInstanceType();
+      for (String prop :
+          currSuperCtor.getInstanceType().getImplicitPrototype().getOwnPropertyNames()) {
+        FunctionType maybeAbstractMethod = superType.findPropertyType(prop).toMaybeFunctionType();
+        if (maybeAbstractMethod != null
+            && maybeAbstractMethod.isAbstract()
+            && !abstractMethodSuperTypeMap.containsKey(prop)) {
+          abstractMethodSuperTypeMap.put(prop, superType);
+        }
+      }
+      currSuperCtor = currSuperCtor.getSuperClassConstructor();
+    }
+
+    ObjectType instance = ctorType.getInstanceType();
+    for (Map.Entry<String, ObjectType> entry : abstractMethodSuperTypeMap.entrySet()) {
+      String method = entry.getKey();
+      ObjectType superType = entry.getValue();
+      FunctionType abstractMethod = instance.findPropertyType(method).toMaybeFunctionType();
+      if (abstractMethod == null || abstractMethod.isAbstract()) {
+        String sourceName = n.getSourceFileName();
+        sourceName = nullToEmpty(sourceName);
+        TypeMismatch.registerMismatch(
+            this.mismatches,
+            this.implicitInterfaceUses,
+            instance,
+            superType,
+            report(
+                JSError.make(
+                    n,
+                    ABSTRACT_METHOD_NOT_IMPLEMENTED,
+                    method,
+                    superType.toString(),
+                    instance.toString())));
+      }
+    }
+  }
+
+  /** Report a type mismatch */
+  private void mismatch(NodeTraversal unusedT, Node n, String msg, JSType found, JSType required) {
     mismatch(n, msg, found, required);
   }
 
-  private void mismatch(NodeTraversal t, Node n,
-                        String msg, JSType found, JSTypeNative required) {
+  private void mismatch(NodeTraversal t, Node n, String msg, JSType found, JSTypeNative required) {
     mismatch(t, n, msg, found, getNativeType(required));
   }
 
   private void mismatch(Node n, String msg, JSType found, JSType required) {
-    registerMismatch(found, required, report(
-        JSError.make(n, TYPE_MISMATCH_WARNING,
-                     formatFoundRequired(msg, found, required))));
-  }
-
-  private void recordStructuralInterfaceUses(JSType found, JSType required) {
-    boolean strictMismatch =
-        !found.isSubtypeWithoutStructuralTyping(required)
-        && !required.isSubtypeWithoutStructuralTyping(found);
-    boolean mismatch = !found.isSubtype(required) && !required.isSubtype(found);
-    if (strictMismatch && !mismatch) {
-      implicitStructuralInterfaceUses.add(new TypeMismatch(found, required, null));
-    }
-  }
-
-  private void registerMismatch(JSType found, JSType required, JSError error) {
-    // Don't register a mismatch for differences in null or undefined or if the
-    // code didn't downcast.
-    found = found.restrictByNotNullOrUndefined();
-    required = required.restrictByNotNullOrUndefined();
-
-    if (found.isSubtype(required) || required.isSubtype(found)) {
-      boolean strictMismatch =
-        !found.isSubtypeWithoutStructuralTyping(required)
-        && !required.isSubtypeWithoutStructuralTyping(found);
-      if (strictMismatch) {
-        implicitStructuralInterfaceUses.add(new TypeMismatch(found, required, error));
+    if (!found.isSubtype(required, this.subtypingMode)) {
+      Set<String> missing = null;
+      Set<String> mismatch = null;
+      if (required.isStructuralType()) {
+        missing = new TreeSet<>();
+        mismatch = new TreeSet<>();
+        ObjectType requiredObject = required.toMaybeObjectType();
+        ObjectType foundObject = found.toMaybeObjectType();
+        if (requiredObject != null && foundObject != null) {
+          for (String property : requiredObject.getPropertyNames()) {
+            JSType propRequired = requiredObject.getPropertyType(property);
+            boolean hasProperty = foundObject.hasProperty(property);
+            if (!propRequired.isExplicitlyVoidable() || hasProperty) {
+              if (hasProperty) {
+                if (!foundObject.getPropertyType(property).isSubtype(propRequired, subtypingMode)) {
+                  mismatch.add(property);
+                }
+              } else {
+                missing.add(property);
+              }
+            }
+          }
+        }
       }
-      return;
-    }
-
-    mismatches.add(new TypeMismatch(found, required, error));
-
-    if (found.isFunctionType() &&
-        required.isFunctionType()) {
-      FunctionType fnTypeA = found.toMaybeFunctionType();
-      FunctionType fnTypeB = required.toMaybeFunctionType();
-      Iterator<Node> paramItA = fnTypeA.getParameters().iterator();
-      Iterator<Node> paramItB = fnTypeB.getParameters().iterator();
-      while (paramItA.hasNext() && paramItB.hasNext()) {
-        registerIfMismatch(paramItA.next().getJSType(),
-            paramItB.next().getJSType(), error);
-      }
-
-      registerIfMismatch(
-          fnTypeA.getReturnType(), fnTypeB.getReturnType(), error);
+      JSError err =
+          JSError.make(
+              n,
+              TYPE_MISMATCH_WARNING,
+              formatFoundRequired(msg, found, required, missing, mismatch));
+      TypeMismatch.registerMismatch(
+          this.mismatches, this.implicitInterfaceUses, found, required, err);
+      report(err);
     }
   }
 
-  private void registerIfMismatch(
-      JSType found, JSType required, JSError error) {
-    if (found != null && required != null &&
-        !found.isSubtypeWithoutStructuralTyping(required)) {
-      registerMismatch(found, required, error);
-    }
-  }
-
-  /**
-   * Formats a found/required error message.
-   */
-  private static String formatFoundRequired(String description, JSType found,
-                                            JSType required) {
+  /** Formats a found/required error message. */
+  private static String formatFoundRequired(
+      String description,
+      JSType found,
+      JSType required,
+      Set<String> missing,
+      Set<String> mismatch) {
     String foundStr = found.toString();
     String requiredStr = required.toString();
     if (foundStr.equals(requiredStr)) {
-      foundStr = found.toAnnotationString();
-      requiredStr = required.toAnnotationString();
+      foundStr = found.toAnnotationString(Nullability.IMPLICIT);
+      requiredStr = required.toAnnotationString(Nullability.IMPLICIT);
     }
-    return MessageFormat.format(FOUND_REQUIRED, description, foundStr, requiredStr);
+    String missingStr = "";
+    String mismatchStr = "";
+    if (missing != null && !missing.isEmpty()) {
+      missingStr = Joiner.on(",").join(missing);
+    }
+    if (mismatch != null && !mismatch.isEmpty()) {
+      mismatchStr = Joiner.on(",").join(mismatch);
+    }
+     if (missingStr.length() > 0 || mismatchStr.length() > 0) {
+      return MessageFormat.format(
+          FOUND_REQUIRED_MISSING, description, foundStr, requiredStr, missingStr, mismatchStr);
+    } else {
+      return MessageFormat.format(FOUND_REQUIRED, description, foundStr, requiredStr);
+    }
   }
 
   /**
@@ -839,45 +882,14 @@ class TypeValidator {
   }
 
   /**
-   * Signals that the first type and the second type have been
-   * used interchangeably.
-   *
-   * Type-based optimizations should take this into account
-   * so that they don't wreck code with type warnings.
+   * @param decl The declaration to check.
+   * @return Whether duplicated declarations warnings should be suppressed for the given node.
    */
-  static class TypeMismatch {
-    final JSType typeA;
-    final JSType typeB;
-    final JSError src;
-
-    /**
-     * It's the responsibility of the class that creates the
-     * {@code TypeMismatch} to ensure that {@code a} and {@code b} are
-     * non-matching types.
-     */
-    TypeMismatch(JSType a, JSType b, JSError src) {
-      this.typeA = a;
-      this.typeB = b;
-      this.src = src;
-    }
-
-    @Override public boolean equals(Object object) {
-      if (object instanceof TypeMismatch) {
-        TypeMismatch that = (TypeMismatch) object;
-        return (that.typeA.isEquivalentTo(this.typeA)
-                && that.typeB.isEquivalentTo(this.typeB))
-            || (that.typeB.isEquivalentTo(this.typeA)
-                && that.typeA.isEquivalentTo(this.typeB));
-      }
-      return false;
-    }
-
-    @Override public int hashCode() {
-      return Objects.hash(typeA, typeB);
-    }
-
-    @Override public String toString() {
-      return "(" + typeA + ", " + typeB + ")";
-    }
+  static boolean hasDuplicateDeclarationSuppression(AbstractCompiler compiler, Node decl) {
+    // NB: DUP_VAR_DECLARATION is somewhat arbitrary here, but it must be one of the errors
+    // suppressed by the "duplicate" group.
+    CheckLevel originalDeclLevel =
+        compiler.getErrorLevel(JSError.make(decl, DUP_VAR_DECLARATION, "dummy", "dummy"));
+    return originalDeclLevel == CheckLevel.OFF;
   }
 }

@@ -16,24 +16,23 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
 import com.google.javascript.jscomp.ControlFlowGraph.AbstractCfgNodeTraversalCallback;
 import com.google.javascript.jscomp.ControlFlowGraph.Branch;
 import com.google.javascript.jscomp.MustBeReachingVariableDef.Definition;
-import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.jscomp.NodeTraversal.AbstractShallowCallback;
 import com.google.javascript.jscomp.NodeTraversal.ScopedCallback;
 import com.google.javascript.jscomp.graph.DiGraph.DiGraphEdge;
 import com.google.javascript.jscomp.graph.DiGraph.DiGraphNode;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
 import java.util.Collection;
-import java.util.HashSet;
-import java.util.LinkedList;
-import java.util.List;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.Set;
 
 /**
@@ -54,14 +53,13 @@ import java.util.Set;
  * this pass does not operate on the global scope due to compilation time.
  *
  */
-class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
-    implements CompilerPass, ScopedCallback {
+class FlowSensitiveInlineVariables implements CompilerPass, ScopedCallback {
 
   /**
    * Implementation:
    *
    * This pass first perform a traversal to gather a list of Candidates that
-   * could be inlined using {@link GatherCandiates}.
+   * could be inlined using {@link GatherCandidates}.
    *
    * The second step involves verifying that each candidate is actually safe
    * to inline with {@link Candidate#canInline(Scope)} and finally perform
@@ -71,51 +69,55 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
    * need two separate dataflow result.
    */
   private final AbstractCompiler compiler;
-  private final Set<Var> inlinedNewDependencies = new HashSet<>();
 
   // These two pieces of data is persistent in the whole execution of enter
   // scope.
   private ControlFlowGraph<Node> cfg;
-  private List<Candidate> candidates;
+  private Set<Candidate> candidates;
   private MustBeReachingVariableDef reachingDef;
   private MaybeReachingVariableUse reachingUses;
 
   private static final Predicate<Node> SIDE_EFFECT_PREDICATE =
-    new Predicate<Node>() {
-      @Override
-      public boolean apply(Node n) {
-        // When the node is null it means, we reached the implicit return
-        // where the function returns (possibly without an return statement)
-        if (n == null) {
-          return false;
-        }
+      new Predicate<Node>() {
+        @Override
+        public boolean apply(Node n) {
+          // When the node is null it means, we reached the implicit return
+          // where the function returns (possibly without an return statement)
+          if (n == null) {
+            return false;
+          }
 
-        // TODO(user): We only care about calls to functions that
-        // passes one of the dependent variable to a non-side-effect free
-        // function.
-        if (n.isCall() && NodeUtil.functionCallHasSideEffects(n)) {
-          return true;
-        }
-
-        if (n.isNew() && NodeUtil.constructorCallHasSideEffects(n)) {
-          return true;
-        }
-
-        if (n.isDelProp()) {
-          return true;
-        }
-
-        for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {
-          if (!ControlFlowGraph.isEnteringNewCfgNode(c) && apply(c)) {
+          // TODO(user): We only care about calls to functions that
+          // passes one of the dependent variable to a non-side-effect free
+          // function.
+          if (n.isCall() && NodeUtil.functionCallHasSideEffects(n)) {
             return true;
           }
+
+          if (n.isNew() && NodeUtil.constructorCallHasSideEffects(n)) {
+            return true;
+          }
+
+          if (n.isDelProp()) {
+            return true;
+          }
+
+          for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {
+            if (!ControlFlowGraph.isEnteringNewCfgNode(c) && apply(c)) {
+              return true;
+            }
+          }
+          return false;
         }
-        return false;
-      }
-  };
+      };
 
   public FlowSensitiveInlineVariables(AbstractCompiler compiler) {
     this.compiler = compiler;
+  }
+
+  @Override
+  public final boolean shouldTraverse(NodeTraversal t, Node n, Node parent) {
+    return !n.isScript() || !t.getInput().isExtern();
   }
 
   @Override
@@ -125,45 +127,98 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
       return; // Don't even brother. All global variables are likely escaped.
     }
 
-    if (LiveVariablesAnalysis.MAX_VARIABLES_TO_ANALYZE <
-        t.getScope().getVarCount()) {
+    if (!t.getScope().isFunctionBlockScope()) {
+      return; // Only want to do the following if its a function block scope.
+    }
+
+    Node functionScopeRoot = t.getScopeRoot().getParent();
+
+    if (!isCandidateFunction(functionScopeRoot)) {
       return;
     }
 
+    if (LiveVariablesAnalysis.MAX_VARIABLES_TO_ANALYZE < t.getScope().getVarCount()) {
+      return;
+    }
+
+    Es6SyntacticScopeCreator scopeCreator = (Es6SyntacticScopeCreator) t.getScopeCreator();
+
     // Compute the forward reaching definition.
     ControlFlowAnalysis cfa = new ControlFlowAnalysis(compiler, false, true);
+
     // Process the body of the function.
-    Preconditions.checkState(t.getScopeRoot().isFunction());
-    cfa.process(null, t.getScopeRoot());
+    cfa.process(null, functionScopeRoot);
     cfg = cfa.getCfg();
-    reachingDef = new MustBeReachingVariableDef(cfg, t.getScope(), compiler);
+
+    reachingDef = new MustBeReachingVariableDef(cfg, t.getScope(), compiler, scopeCreator);
     reachingDef.analyze();
-    candidates = new LinkedList<>();
+    candidates = new LinkedHashSet<>();
 
     // Using the forward reaching definition search to find all the inline
     // candidates
-    new NodeTraversal(compiler, new GatherCandiates()).traverse(
-        t.getScopeRoot().getLastChild());
-
+    NodeTraversal.traverseEs6(compiler, t.getScopeRoot(), new GatherCandidates());
     // Compute the backward reaching use. The CFG can be reused.
-    reachingUses = new MaybeReachingVariableUse(cfg, t.getScope(), compiler);
+    reachingUses = new MaybeReachingVariableUse(cfg, t.getScope(), compiler, scopeCreator);
     reachingUses.analyze();
-    for (Candidate c : candidates) {
+    while (!candidates.isEmpty()) {
+      Candidate c = candidates.iterator().next();
       if (c.canInline(t.getScope())) {
         c.inlineVariable();
+        candidates.remove(c);
 
-        // If definition c has dependencies, then inlining it may have
-        // introduced new dependencies for our other inlining candidates.
-        //
-        // MustBeReachingVariableDef uses this dependency graph in its
-        // analysis, so some of these candidates may no longer be valid.
-        // We keep track of when the variable dependency graph changed
-        // so that we can back off appropriately.
+        // If candidate "c" has dependencies, then inlining it may have introduced new dependencies
+        // for our other inlining candidates. MustBeReachingVariableDef uses a dependency graph in
+        // its analysis. Generating a new dependency graph will need another CFG computation.
+        // Ideally we should iterate to a fixed point, but that can be costly. Therefore, we use
+        // a conservative heuristic here: For each candidate "other", we back off if its set of
+        // dependencies cannot contain all of "c"'s dependencies.
         if (!c.defMetadata.depends.isEmpty()) {
-          inlinedNewDependencies.add(t.getScope().getVar(c.varName));
+          for (Iterator<Candidate> it = candidates.iterator(); it.hasNext();) {
+            Candidate other = it.next();
+            if (other.defMetadata.depends.contains(t.getScope().getVar(c.varName))
+                && !other.defMetadata.depends.containsAll(c.defMetadata.depends)) {
+              it.remove();
+            }
+          }
         }
+      } else {
+        candidates.remove(c);
       }
     }
+  }
+
+  private boolean isCandidateFunction(Node fn) {
+    Node fnBody = fn.getLastChild();
+    return containsCandidateExpressions(fnBody);
+  }
+
+  private static boolean containsCandidateExpressions(Node n) {
+    if (n.isFunction()) {
+      // don't recurse into inner functions or into expressions the can't contain declarations.
+      return false;
+    }
+
+    if (NodeUtil.isNameDeclaration(n) || isAssignmentToName(n)) {
+      // if it is a simple assignment
+      if (n.getFirstChild().isName()) {
+        return true;
+      }
+    }
+
+    for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {
+      if (containsCandidateExpressions(c)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean isAssignmentToName(Node n) {
+    if (NodeUtil.isAssignmentOp(n) || n.isDec() || n.isInc()) {
+      // if it is a simple assignment
+      return (n.getFirstChild().isName());
+    }
+    return false;
   }
 
   @Override
@@ -171,7 +226,8 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
 
   @Override
   public void process(Node externs, Node root) {
-    (new NodeTraversal(compiler, this)).traverseRoots(externs, root);
+    (new NodeTraversal(compiler, this,  new Es6SyntacticScopeCreator(compiler)))
+        .traverseRoots(externs, root);
   }
 
   @Override
@@ -183,6 +239,49 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
     // time.
   }
 
+  private class GatherCandidatesCfgNodeCallback extends AbstractCfgNodeTraversalCallback {
+    Node cfgNode = null;
+
+    public void setCfgNode(Node cfgNode) {
+      this.cfgNode = cfgNode;
+    }
+
+    @Override
+    public void visit(NodeTraversal t, Node n, Node parent) {
+      if (n.isName()) {
+
+        // n.getParent() isn't null. This just the case where n is the root
+        // node that gatherCb started at.
+        if (parent == null) {
+          return;
+        }
+
+        // Make sure that the name node is purely a read.
+        if ((NodeUtil.isAssignmentOp(parent) && parent.getFirstChild() == n)
+            || parent.isVar()
+            || parent.isInc()
+            || parent.isDec()
+            || parent.isParamList()
+            || parent.isCatch()
+            || NodeUtil.isLhsByDestructuring(n)) {
+          return;
+        }
+
+        String name = n.getString();
+        if (compiler.getCodingConvention().isExported(name)) {
+          return;
+        }
+
+        Definition def = reachingDef.getDef(name, cfgNode);
+        // TODO(nicksantos): We need to add some notion of @const outer
+        // scope vars. We can inline those just fine.
+        if (def != null && !reachingDef.dependsOnOuterScopeVars(def)) {
+          candidates.add(new Candidate(name, def, n, cfgNode));
+        }
+      }
+    }
+  };
+
   /**
    * Gathers a list of possible candidates for inlining based only on
    * information from {@link MustBeReachingVariableDef}. The list will be stored
@@ -190,7 +289,9 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
    * be later verified with {@link Candidate#canInline(Scope)} when
    * {@link MaybeReachingVariableUse} has been performed.
    */
-  private class GatherCandiates extends AbstractShallowCallback {
+  private class GatherCandidates extends AbstractShallowCallback {
+    final GatherCandidatesCfgNodeCallback gatherCb = new GatherCandidatesCfgNodeCallback();
+
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
       DiGraphNode<Node, Branch> graphNode = cfg.getDirectedGraphNode(n);
@@ -199,43 +300,9 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
         return;
       }
       final Node cfgNode = n;
-      AbstractCfgNodeTraversalCallback gatherCb =
-          new AbstractCfgNodeTraversalCallback() {
 
-        @Override
-        public void visit(NodeTraversal t, Node n, Node parent) {
-          if (n.isName()) {
-
-            // n.getParent() isn't null. This just the case where n is the root
-            // node that gatherCb started at.
-            if (parent == null) {
-              return;
-            }
-
-            // Make sure that the name node is purely a read.
-            if ((NodeUtil.isAssignmentOp(parent) && parent.getFirstChild() == n)
-                || parent.isVar() || parent.isInc() || parent.isDec() ||
-                parent.isParamList() || parent.isCatch()) {
-              return;
-            }
-
-            String name = n.getString();
-            if (compiler.getCodingConvention().isExported(name)) {
-              return;
-            }
-
-            Definition def = reachingDef.getDef(name, cfgNode);
-            // TODO(nicksantos): We need to add some notion of @const outer
-            // scope vars. We can inline those just fine.
-            if (def != null &&
-                !reachingDef.dependsOnOuterScopeVars(def)) {
-              candidates.add(new Candidate(name, def, n, cfgNode));
-            }
-          }
-        }
-      };
-
-      NodeTraversal.traverse(compiler, cfgNode, gatherCb);
+      gatherCb.setCfgNode(cfgNode);
+      NodeTraversal.traverseEs6(compiler, cfgNode, gatherCb);
     }
   }
 
@@ -260,7 +327,7 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
 
     Candidate(String varName, Definition defMetadata,
         Node use, Node useCfgNode) {
-      Preconditions.checkArgument(use.isName());
+      checkArgument(use.isName());
       this.varName = varName;
       this.defMetadata = defMetadata;
       this.use = use;
@@ -277,15 +344,6 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
         return false;
       }
 
-      // If one of our dependencies has been inlined, then our dependency
-      // graph is wrong. Re-computing it would take another CFG computation,
-      // so we just back off for now.
-      for (Var dependency : defMetadata.depends) {
-        if (inlinedNewDependencies.contains(dependency)) {
-          return false;
-        }
-      }
-
       getDefinition(getDefCfgNode());
       getNumUseInUseCfgNode(useCfgNode);
 
@@ -300,17 +358,17 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
         return false;
       }
 
-      // The right of the definition has side effect:
+      // A subexpression evaluated after the variable has a side effect.
       // Example, for x:
       // x = readProp(b), modifyProp(b); print(x);
-      if (checkRightOf(def, getDefCfgNode(), SIDE_EFFECT_PREDICATE)) {
+      if (checkPostExpressions(def, getDefCfgNode(), SIDE_EFFECT_PREDICATE)) {
         return false;
       }
 
       // Similar check as the above but this time, all the sub-expressions
-      // left of the use of the variable.
+      // evaluated before the variable.
       // x = readProp(b); modifyProp(b), print(x);
-      if (checkLeftOf(use, useCfgNode, SIDE_EFFECT_PREDICATE)) {
+      if (checkPreExpressions(use, useCfgNode, SIDE_EFFECT_PREDICATE)) {
         return false;
       }
 
@@ -335,7 +393,6 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
         return false;
       }
 
-
       Collection<Node> uses = reachingUses.getUses(varName, getDefCfgNode());
 
       if (uses.size() != 1) {
@@ -354,34 +411,37 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
       // TODO(johnlenz): rework catch expression handling when we
       // have lexical scope support so catch expressions don't
       // need to be special cased.
-      if (NodeUtil.has(def.getLastChild(),
+      if (NodeUtil.has(
+          def.getLastChild(),
           new Predicate<Node>() {
-              @Override
-              public boolean apply(Node input) {
-                switch (input.getType()) {
-                  case Token.GETELEM:
-                  case Token.GETPROP:
-                  case Token.ARRAYLIT:
-                  case Token.OBJECTLIT:
-                  case Token.REGEXP:
-                  case Token.NEW:
+            @Override
+            public boolean apply(Node input) {
+              switch (input.getToken()) {
+                case GETELEM:
+                case GETPROP:
+                case ARRAYLIT:
+                case OBJECTLIT:
+                case REGEXP:
+                case NEW:
+                  return true;
+                case NAME:
+                  Var var = scope.getOwnSlot(input.getString());
+                  if (var != null && var.getParentNode().isCatch()) {
                     return true;
-                  case Token.NAME:
-                    Var var = scope.getOwnSlot(input.getString());
-                    if (var != null
-                        && var.getParentNode().isCatch()) {
-                      return true;
-                    }
-                }
-                return false;
+                  }
+                  // fall through
+                default:
+                  break;
               }
+              return false;
+            }
           },
           new Predicate<Node>() {
-              @Override
-              public boolean apply(Node input) {
-                // Recurse if the node is not a function.
-                return !input.isFunction();
-              }
+            @Override
+            public boolean apply(Node input) {
+              // Recurse if the node is not a function.
+              return !input.isFunction();
+            }
           })) {
         return false;
       }
@@ -394,14 +454,14 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
         // else where along the path.
         // x = readProp(b); while(modifyProp(b)) {}; print(x);
         CheckPathsBetweenNodes<Node, ControlFlowGraph.Branch>
-          pathCheck = new CheckPathsBetweenNodes<>(
-                 cfg,
-                 cfg.getDirectedGraphNode(getDefCfgNode()),
-                 cfg.getDirectedGraphNode(useCfgNode),
-                 SIDE_EFFECT_PREDICATE,
-                 Predicates.
-                     <DiGraphEdge<Node, ControlFlowGraph.Branch>>alwaysTrue(),
-                 false);
+            pathCheck = new CheckPathsBetweenNodes<>(
+            cfg,
+            cfg.getDirectedGraphNode(getDefCfgNode()),
+            cfg.getDirectedGraphNode(useCfgNode),
+            SIDE_EFFECT_PREDICATE,
+            Predicates.
+                <DiGraphEdge<Node, ControlFlowGraph.Branch>>alwaysTrue(),
+            false);
         if (pathCheck.somePathsSatisfyPredicate()) {
           return false;
         }
@@ -418,22 +478,29 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
       Node useParent = use.getParent();
       if (def.isAssign()) {
         Node rhs = def.getLastChild();
-        rhs.detachFromParent();
+        rhs.detach();
         // Oh yes! I have grandparent to remove this.
-        Preconditions.checkState(defParent.isExprResult());
+        checkState(defParent.isExprResult());
         while (defParent.getParent().isLabel()) {
           defParent = defParent.getParent();
         }
-        defParent.detachFromParent();
+        compiler.reportChangeToEnclosingScope(defParent);
+        defParent.detach();
         useParent.replaceChild(use, rhs);
-      } else if (defParent.isVar()) {
+      } else if (NodeUtil.isNameDeclaration(defParent)) {
         Node rhs = def.getLastChild();
-        def.removeChild(rhs);
-        useParent.replaceChild(use, rhs);
+        if (defParent.isConst()) {
+          // If it is a const var we don't want to remove the rhs of the variable
+          def.replaceChild(rhs, Node.newString(Token.NAME, "undefined"));
+          useParent.replaceChild(use, rhs);
+        } else {
+          def.removeChild(rhs);
+          useParent.replaceChild(use, rhs);
+        }
       } else {
         throw new IllegalStateException("No other definitions can be inlined.");
       }
-      compiler.reportCodeChange();
+      compiler.reportChangeToEnclosingScope(useParent);
     }
 
     /**
@@ -443,27 +510,29 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
      */
     private void getDefinition(Node n) {
       AbstractCfgNodeTraversalCallback gatherCb =
-        new AbstractCfgNodeTraversalCallback() {
+          new AbstractCfgNodeTraversalCallback() {
 
-        @Override
-        public void visit(NodeTraversal t, Node n, Node parent) {
-          switch (n.getType()) {
-            case Token.NAME:
-              if (n.getString().equals(varName) && n.hasChildren()) {
-                def = n;
-              }
-              return;
+            @Override
+            public void visit(NodeTraversal t, Node n, Node parent) {
+              switch (n.getToken()) {
+                case NAME:
+                  if (n.getString().equals(varName) && n.hasChildren()) {
+                    def = n;
+                  }
+                  return;
 
-            case Token.ASSIGN:
-              Node lhs = n.getFirstChild();
-              if (lhs.isName() && lhs.getString().equals(varName)) {
-                def = n;
+                case ASSIGN:
+                  Node lhs = n.getFirstChild();
+                  if (lhs.isName() && lhs.getString().equals(varName)) {
+                    def = n;
+                  }
+                  return;
+                default:
+                  break;
               }
-              return;
-          }
-        }
-      };
-      NodeTraversal.traverse(compiler, n, gatherCb);
+            }
+          };
+      NodeTraversal.traverseEs6(compiler, n, gatherCb);
     }
 
     /**
@@ -476,47 +545,51 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
       AbstractCfgNodeTraversalCallback gatherCb =
           new AbstractCfgNodeTraversalCallback() {
 
-        @Override
-        public void visit(NodeTraversal t, Node n, Node parent) {
-          if (n.isName() && n.getString().equals(varName)) {
-            // We make a special exception when the entire cfgNode is a chain
-            // of assignments, since in that case the assignment statements
-            // will happen after the inlining of the right hand side.
-            // TODO(blickly): Make the SIDE_EFFECT_PREDICATE check more exact
-            //   and remove this special case.
-            if (parent.isAssign() && (parent.getFirstChild() == n)
-                && isAssignChain(parent, cfgNode)) {
-              // Don't count lhs of top-level assignment chain
-              return;
-            } else {
-              numUsesWithinCfgNode++;
+            @Override
+            public void visit(NodeTraversal t, Node n, Node parent) {
+              if (n.isName() && n.getString().equals(varName)) {
+                // We make a special exception when the entire cfgNode is a chain
+                // of assignments, since in that case the assignment statements
+                // will happen after the inlining of the right hand side.
+                // TODO(blickly): Make the SIDE_EFFECT_PREDICATE check more exact
+                //   and remove this special case.
+                if (parent.isAssign() && (parent.getFirstChild() == n)
+                    && isAssignChain(parent, cfgNode)) {
+                  // Don't count lhs of top-level assignment chain
+                  return;
+                } else {
+                  numUsesWithinCfgNode++;
+                }
+              }
             }
-          }
-        }
 
-        private boolean isAssignChain(Node child, Node ancestor) {
-          for (Node n = child; n != ancestor; n = n.getParent()) {
-            if (!n.isAssign()) {
-              return false;
+            private boolean isAssignChain(Node child, Node ancestor) {
+              for (Node n = child; n != ancestor; n = n.getParent()) {
+                if (!n.isAssign()) {
+                  return false;
+                }
+              }
+              return true;
             }
-          }
-          return true;
-        }
-      };
+          };
 
-      NodeTraversal.traverse(compiler, cfgNode, gatherCb);
+      NodeTraversal.traverseEs6(compiler, cfgNode, gatherCb);
     }
   }
 
   /**
-   * Given an expression by its root and sub-expression n, return true if there
-   * the predicate is true for some expression on the right of n.
+   * Given an expression by its root and sub-expression n, return true if the predicate is true for
+   * some expression evaluated after n.
    *
-   * Example:
+   * <p>NOTE: this doesn't correctly check destructuring patterns, because their order of evaluation
+   * is different from AST traversal order,  but currently this is ok because
+   * FlowSensitiveInlineVariables never inlines variable assignments inside destructuring.
    *
-   * NotChecked(), NotChecked(), n, Checked(), Checked();
+   * <p>Example:
+   *
+   * <p>NotChecked(), NotChecked(), n, Checked(), Checked();
    */
-  private static boolean checkRightOf(
+  private static boolean checkPostExpressions(
       Node n, Node expressionRoot, Predicate<Node> predicate) {
     for (Node p = n; p != expressionRoot; p = p.getParent()) {
       for (Node cur = p.getNext(); cur != null; cur = cur.getNext()) {
@@ -529,18 +602,30 @@ class FlowSensitiveInlineVariables extends AbstractPostOrderCallback
   }
 
   /**
-   * Given an expression by its root and sub-expression n, return true if there
-   * the predicate is true for some expression on the left of n.
+   * Given an expression by its root and sub-expression n, return true if the predicate is true for
+   * some expression evaluated before n.
    *
-   * Example:
+   * <p>In most cases evaluation order follows left-to-right AST order. Destructuring pattern
+   * evaluation is an exception.
    *
-   * Checked(), Checked(), n, NotChecked(), NotChecked();
+   * <p>Example:
+   *
+   * <p>Checked(), Checked(), n, NotChecked(), NotChecked();
    */
-  private static boolean checkLeftOf(
+  private static boolean checkPreExpressions(
       Node n, Node expressionRoot, Predicate<Node> predicate) {
     for (Node p = n; p != expressionRoot; p = p.getParent()) {
-      for (Node cur = p.getParent().getFirstChild(); cur != p;
-          cur = cur.getNext()) {
+      Node oldestSibling = p.getParent().getFirstChild();
+      // Evaluate a destructuring assignment right-to-left.
+      if (oldestSibling.isDestructuringPattern()) {
+        if (p.isDestructuringPattern()) {
+          if (p.getNext() != null && predicate.apply(p.getNext())) {
+            return true;
+          }
+        }
+        continue;
+      }
+      for (Node cur = oldestSibling; cur != p; cur = cur.getNext()) {
         if (predicate.apply(cur)) {
           return true;
         }

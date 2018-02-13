@@ -39,7 +39,9 @@
 
 package com.google.javascript.rhino.testing;
 
+import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.javascript.rhino.JSTypeExpression;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.jstype.FunctionBuilder;
@@ -50,10 +52,11 @@ import com.google.javascript.rhino.jstype.JSTypeRegistry;
 import com.google.javascript.rhino.jstype.ObjectType;
 import com.google.javascript.rhino.jstype.RecordTypeBuilder;
 import com.google.javascript.rhino.jstype.TemplatizedType;
-
 import junit.framework.TestCase;
 
 public abstract class BaseJSTypeTestCase extends TestCase {
+  protected static final Joiner LINE_JOINER = Joiner.on('\n');
+
   protected JSTypeRegistry registry;
   protected TestErrorReporter errorReporter;
 
@@ -116,7 +119,7 @@ public abstract class BaseJSTypeTestCase extends TestCase {
   protected void setUp() throws Exception {
     super.setUp();
     errorReporter = new TestErrorReporter(null, null);
-    registry = new JSTypeRegistry(errorReporter);
+    registry = new JSTypeRegistry(errorReporter, ImmutableSet.of("forwardDeclared"));
     initTypes();
   }
 
@@ -377,6 +380,7 @@ public abstract class BaseJSTypeTestCase extends TestCase {
     addMethod(registry, stringPrototype, "search", numberType);
     addMethod(registry, stringPrototype, "slice", stringType);
     addMethod(registry, stringPrototype, "split", arrayType);
+    addMethod(registry, stringPrototype, "substr", stringType);
     addMethod(registry, stringPrototype, "substring", stringType);
     addMethod(registry, stringPrototype, "toLowerCase", stringType);
     addMethod(registry, stringPrototype, "toLocaleLowerCase", stringType);
@@ -433,6 +437,14 @@ public abstract class BaseJSTypeTestCase extends TestCase {
    */
   protected void assertTypeEquals(JSType expected, JSTypeExpression actual) {
     assertEquals(expected, resolve(actual));
+  }
+
+  protected final void assertTypeEquals(JSType a, JSType b) {
+    Asserts.assertTypeEquals(a, b);
+  }
+
+  protected final void assertTypeEquals(String msg, JSType a, JSType b) {
+    Asserts.assertTypeEquals(msg, a, b);
   }
 
   /**
@@ -591,19 +603,19 @@ public abstract class BaseJSTypeTestCase extends TestCase {
       + " */\n"
       + "function ActiveXObject(progId, opt_location) {}\n";
 
-  protected final void assertTypeEquals(JSType a, JSType b) {
-    Asserts.assertTypeEquals(a, b);
-  }
-
-  protected final void assertTypeEquals(String msg, JSType a, JSType b) {
-    Asserts.assertTypeEquals(msg, a, b);
-  }
-
   protected final void assertTypeNotEquals(JSType a, JSType b) {
     Asserts.assertTypeNotEquals(a, b);
   }
 
   protected final void assertTypeNotEquals(String msg, JSType a, JSType b) {
     Asserts.assertTypeNotEquals(msg, a, b);
+  }
+
+  protected static String lines(String line) {
+    return line;
+  }
+
+  protected static String lines(String ...lines) {
+    return LINE_JOINER.join(lines);
   }
 }

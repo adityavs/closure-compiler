@@ -16,20 +16,19 @@
 
 package com.google.javascript.jscomp;
 
-
-
-
+import com.google.common.annotations.GwtIncompatible;
+import com.google.errorprone.annotations.Immutable;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.StaticSourceFile;
-
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * This describes the Google-specific JavaScript coding conventions.
- * Within Google, variable names are semantically significant.
+ * This describes the Google-specific JavaScript coding conventions. Within Google, variable names
+ * are semantically significant.
  *
  */
+@Immutable
 public class GoogleCodingConvention extends CodingConventions.Proxy {
 
   private static final long serialVersionUID = 1L;
@@ -43,6 +42,8 @@ public class GoogleCodingConvention extends CodingConventions.Proxy {
 
   private static final Pattern PACKAGE_WITH_TEST_DIR =
     Pattern.compile("^(.*)/(?:test|tests|testing)/(?:[^/]+)$");
+
+  private static final Pattern GENFILES_DIR = Pattern.compile("-out/.*/(bin|genfiles)/(.*)$");
 
   /** By default, decorate the ClosureCodingConvention. */
   public GoogleCodingConvention() {
@@ -127,14 +128,14 @@ public class GoogleCodingConvention extends CodingConventions.Proxy {
    */
   @Override
   public boolean isOptionalParameter(Node parameter) {
-    return super.isOptionalParameter(parameter) ||
-        parameter.getString().startsWith(OPTIONAL_ARG_PREFIX);
+    return super.isOptionalParameter(parameter)
+        || parameter.getString().startsWith(OPTIONAL_ARG_PREFIX);
   }
 
   @Override
   public boolean isVarArgsParameter(Node parameter) {
-    return super.isVarArgsParameter(parameter) ||
-        VAR_ARGS_NAME.equals(parameter.getString());
+    return super.isVarArgsParameter(parameter)
+        || VAR_ARGS_NAME.equals(parameter.getString());
   }
 
   /**
@@ -145,20 +146,33 @@ public class GoogleCodingConvention extends CodingConventions.Proxy {
    */
   @Override
   public boolean isExported(String name, boolean local) {
-    return super.isExported(name, local) ||
-        (!local && name.startsWith("_"));
+    return super.isExported(name, local) || (!local && name.startsWith("_"));
+  }
+
+  @Override
+  public boolean isClassFactoryCall(Node callNode) {
+    return super.isClassFactoryCall(callNode)
+        || callNode.getFirstChild().matchesQualifiedName("Polymer");
   }
 
   /**
    * {@inheritDoc}
    *
    * <p>In Google code, the package name of a source file is its file path.
-   * Exception: if a source file's parent directory is "test", "tests", or
+   * Exceptions: if a source file's parent directory is "test", "tests", or
    * "testing", that directory is stripped from the package name.
+   * If a file is generated, strip the "genfiles" prefix to try
+   * to match the package of the generating file.
    */
   @Override
+  @GwtIncompatible // TODO(tdeegan): Remove use of Matcher#group to make this fully GWT compatible.
   public String getPackageName(StaticSourceFile source) {
     String name = source.getName();
+    Matcher genfilesMatcher = GENFILES_DIR.matcher(name);
+    if (genfilesMatcher.find()) {
+      name = genfilesMatcher.group(2);
+    }
+
     Matcher m = PACKAGE_WITH_TEST_DIR.matcher(name);
     if (m.find()) {
       return m.group(1);
@@ -176,6 +190,11 @@ public class GoogleCodingConvention extends CodingConventions.Proxy {
    */
   @Override
   public boolean isPrivate(String name) {
-    return name.endsWith("_") && !isExported(name);
+    return name.endsWith("_") && !name.endsWith("__") && !isExported(name);
+  }
+
+  @Override
+  public boolean hasPrivacyConvention() {
+    return true;
   }
 }

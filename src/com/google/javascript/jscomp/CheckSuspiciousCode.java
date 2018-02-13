@@ -16,10 +16,10 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
 
 /**
  * Checks for common errors, such as misplaced semicolons:
@@ -55,18 +55,24 @@ final class CheckSuspiciousCode extends AbstractPostOrderCallback {
           "JSC_SUSPICIOUS_INSTANCEOF_LEFT",
           "\"instanceof\" with left non-object operand is always false.");
 
+  static final DiagnosticType SUSPICIOUS_NEGATED_LEFT_OPERAND_OF_IN_OPERATOR =
+      DiagnosticType.warning(
+          "JSC_SUSPICIOUS_NEGATED_LEFT_OPERAND_OF_IN_OPERATOR",
+          "Suspicious negated left operand of 'in' operator.");
+
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
     checkMissingSemicolon(t, n);
     checkNaN(t, n);
     checkInvalidIn(t, n);
     checkNonObjectInstanceOf(t, n);
+    checkNegatedLeftOperandOfInOperator(t, n);
   }
 
   private void checkMissingSemicolon(NodeTraversal t, Node n) {
-    switch (n.getType()) {
-      case Token.IF:
-        Node trueCase = n.getFirstChild().getNext();
+    switch (n.getToken()) {
+      case IF:
+        Node trueCase = n.getSecondChild();
         reportIfWasEmpty(t, trueCase);
         Node elseCase = trueCase.getNext();
         if (elseCase != null) {
@@ -74,16 +80,19 @@ final class CheckSuspiciousCode extends AbstractPostOrderCallback {
         }
         break;
 
-      case Token.WHILE:
-      case Token.FOR:
-      case Token.FOR_OF:
+      case WHILE:
+      case FOR:
+      case FOR_IN:
+      case FOR_OF:
         reportIfWasEmpty(t, NodeUtil.getLoopCodeBlock(n));
+        break;
+      default:
         break;
     }
   }
 
   private static void reportIfWasEmpty(NodeTraversal t, Node block) {
-    Preconditions.checkState(block.isBlock());
+    checkState(block.isNormalBlock());
 
     // A semicolon is distinguished from a block without children by
     // annotating it with EMPTY_BLOCK.  Blocks without children are
@@ -95,17 +104,20 @@ final class CheckSuspiciousCode extends AbstractPostOrderCallback {
   }
 
   private void checkNaN(NodeTraversal t, Node n) {
-    switch (n.getType()) {
-      case Token.EQ:
-      case Token.GE:
-      case Token.GT:
-      case Token.LE:
-      case Token.LT:
-      case Token.NE:
-      case Token.SHEQ:
-      case Token.SHNE:
+    switch (n.getToken()) {
+      case EQ:
+      case GE:
+      case GT:
+      case LE:
+      case LT:
+      case NE:
+      case SHEQ:
+      case SHNE:
         reportIfNaN(t, n.getFirstChild());
         reportIfNaN(t, n.getLastChild());
+        break;
+      default:
+        break;
     }
   }
 
@@ -117,13 +129,13 @@ final class CheckSuspiciousCode extends AbstractPostOrderCallback {
   }
 
   private void checkInvalidIn(NodeTraversal t, Node n) {
-    if (n.getType() == Token.IN) {
+    if (n.isIn()) {
       reportIfNonObject(t, n.getLastChild(), SUSPICIOUS_IN_OPERATOR);
     }
   }
 
   private void checkNonObjectInstanceOf(NodeTraversal t, Node n) {
-    if (n.getType() == Token.INSTANCEOF) {
+    if (n.isInstanceOf()) {
       reportIfNonObject(
           t, n.getFirstChild(), SUSPICIOUS_INSTANCEOF_LEFT_OPERAND);
     }
@@ -131,11 +143,16 @@ final class CheckSuspiciousCode extends AbstractPostOrderCallback {
 
   private static boolean reportIfNonObject(
       NodeTraversal t, Node n, DiagnosticType diagnosticType) {
-    if (NodeUtil.isImmutableResult(n) || n.getType() == Token.NOT) {
-      t.getCompiler().report(
-          t.makeError(n.getParent(), diagnosticType));
+    if (n.isAdd() || !NodeUtil.mayBeObject(n)) {
+      t.report(n.getParent(), diagnosticType);
       return true;
     }
     return false;
+  }
+
+  private void checkNegatedLeftOperandOfInOperator(NodeTraversal t, Node n) {
+    if (n.isIn() && n.getFirstChild().isNot()) {
+      t.report(n.getFirstChild(), SUSPICIOUS_NEGATED_LEFT_OPERAND_OF_IN_OPERATOR);
+    }
   }
 }

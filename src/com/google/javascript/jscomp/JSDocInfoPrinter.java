@@ -18,217 +18,349 @@ package com.google.javascript.jscomp;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Ordering;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.JSDocInfo.Visibility;
 import com.google.javascript.rhino.JSTypeExpression;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
-import java.util.Iterator;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Prints a JSDocInfo, used for preserving type annotations in ES6 transpilation.
  *
  */
 public final class JSDocInfoPrinter {
-  public static String print(JSDocInfo info) {
-    StringBuilder sb = new StringBuilder("/**");
-    if (info.isConstructor()) {
-      sb.append("@constructor ");
-    }
-    if (info.isInterface() && !info.usesImplicitMatch()) {
-      sb.append("@interface ");
-    }
-    if (info.isInterface() && info.usesImplicitMatch()) {
-      sb.append("@record ");
-    }
-    if (info.makesDicts()) {
-      sb.append("@dict ");
-    }
-    if (info.makesStructs()) {
-      sb.append("@struct ");
-    }
-    if (info.makesUnrestricted()) {
-      sb.append("@unrestricted ");
-    }
-    if (info.isDefine()) {
-      sb.append("@define {");
-      appendTypeNode(sb, info.getType().getRoot());
-      sb.append("} ");
-    }
 
-    if (info.isOverride()) {
-      sb.append("@override ");
-    }
-    if (info.isConstant()) {
-      sb.append("@const ");
-    }
+  private final boolean useOriginalName;
+
+  JSDocInfoPrinter(boolean useOriginalName) {
+    this.useOriginalName = useOriginalName;
+  }
+
+  public String print(JSDocInfo info) {
+    boolean multiline = false;
+
+    List<String> parts = new ArrayList<>();
+
+    // order:
+    //   export|public|private|package|protected
+    //   abstract
+    //   lends
+    //   const
+    //   final
+    //   desc
+    //   dict|struct|unrestricted
+    //   constructor|interface|record
+    //   extends
+    //   implements
+    //   this
+    //   param
+    //   return
+    //   throws
+    //   template
+    //   override
+    //   type|define|typedef|enum
+    //   implicitCast
+    //   nocollapse
+    //   suppress
+    //   deprecated
+    //   polymer
+    //   polymerBehavior
+    //   mixinFunction
+    parts.add("/**");
+
     if (info.isExport()) {
-      sb.append("@export ");
-    }
-    if (info.isDeprecated()) {
-      sb.append("@deprecated ");
-      sb.append(info.getDeprecationReason() + " ");
-    }
-    if (info.getVisibility() != null
+      parts.add("@export");
+    } else if (info.getVisibility() != null
         && info.getVisibility() != Visibility.INHERITED) {
-      sb.append("@" + info.getVisibility().toString().toLowerCase() + " ");
+      parts.add("@" + info.getVisibility().toString().toLowerCase());
     }
 
-    Iterator<String> suppressions = info.getSuppressions().iterator();
-    if (suppressions.hasNext()) {
-      sb.append("@suppress {");
-      while (suppressions.hasNext()) {
-        sb.append(suppressions.next());
-        if (suppressions.hasNext()) {
-          sb.append(",");
-        }
+    if (info.isAbstract()) {
+      parts.add("@abstract");
+    }
+
+    if (info.getLendsName() != null) {
+      parts.add("@lends {" + info.getLendsName() + "}");
+    }
+
+    if (info.isConstant() && !info.isDefine() && !info.isFinal()) {
+      parts.add("@const");
+    }
+
+    if (info.isFinal()) {
+      parts.add("@final");
+    }
+
+    String description = info.getDescription();
+    if (description != null) {
+      parts.add("@desc " + description + '\n');
+    }
+
+    if (info.makesDicts()) {
+      parts.add("@dict");
+    }
+
+    if (info.makesStructs()) {
+      parts.add("@struct");
+    }
+
+    if (info.makesUnrestricted()) {
+      parts.add("@unrestricted ");
+    }
+
+    if (info.isConstructor()) {
+      parts.add("@constructor");
+    }
+
+    if (info.isInterface() && !info.usesImplicitMatch()) {
+      parts.add("@interface");
+    }
+
+    if (info.isInterface() && info.usesImplicitMatch()) {
+      parts.add("@record");
+    }
+
+    if (info.hasBaseType()) {
+      multiline = true;
+      Node typeNode = stripBang(info.getBaseType().getRoot());
+      parts.add(buildAnnotationWithType("extends", typeNode));
+    }
+
+    for (JSTypeExpression type : info.getExtendedInterfaces()) {
+      multiline = true;
+      Node typeNode = stripBang(type.getRoot());
+      parts.add(buildAnnotationWithType("extends", typeNode));
+    }
+
+    for (JSTypeExpression type : info.getImplementedInterfaces()) {
+      multiline = true;
+      Node typeNode = stripBang(type.getRoot());
+      parts.add(buildAnnotationWithType("implements", typeNode));
+    }
+
+    if (info.hasThisType()) {
+      multiline = true;
+      Node typeNode = stripBang(info.getThisType().getRoot());
+      parts.add(buildAnnotationWithType("this", typeNode));
+    }
+
+    if (info.getParameterCount() > 0) {
+      multiline = true;
+      for (String name : info.getParameterNames()) {
+        parts.add("@param " + buildParamType(name, info.getParameterType(name)));
       }
-      sb.append("} ");
+    }
+
+    if (info.hasReturnType()) {
+      multiline = true;
+      parts.add(buildAnnotationWithType("return", info.getReturnType()));
+    }
+
+    if (!info.getThrownTypes().isEmpty()) {
+      parts.add(buildAnnotationWithType("throws", info.getThrownTypes().get(0)));
     }
 
     ImmutableList<String> names = info.getTemplateTypeNames();
     if (!names.isEmpty()) {
-      sb.append("@template ");
-      Joiner.on(',').appendTo(sb, names);
-      sb.append("\n"); // @template needs a newline afterwards
+      parts.add("@template " + Joiner.on(',').join(names));
+      multiline = true;
     }
 
-    if (info.getParameterCount() > 0) {
-      for (String name : info.getParameterNames()) {
-        sb.append("@param ");
-        if (info.getParameterType(name) != null) {
-          sb.append("{");
-          appendTypeNode(sb, info.getParameterType(name).getRoot());
-          sb.append("} ");
-        }
-        sb.append(name);
-        sb.append(' ');
+    ImmutableMap<String, Node> typeTransformations = info.getTypeTransformations();
+    if (!typeTransformations.isEmpty()) {
+      multiline = true;
+      for (Map.Entry<String, Node> e : typeTransformations.entrySet()) {
+        String name = e.getKey();
+        String tranformationDefinition = new CodePrinter.Builder(e.getValue()).build();
+        parts.add("@template " + name + " := " +  tranformationDefinition  + " =:");
       }
     }
-    if (info.hasReturnType()) {
-      sb.append("@return {");
-      appendTypeNode(sb, info.getReturnType().getRoot());
-      sb.append("} ");
+
+    if (info.isOverride()) {
+      parts.add("@override");
     }
-    if (info.hasThisType()) {
-      sb.append("@this {");
-      Node typeNode = info.getThisType().getRoot();
-      if (typeNode.getType() == Token.BANG) {
-        appendTypeNode(sb, typeNode.getFirstChild());
-      } else {
-        appendTypeNode(sb, typeNode);
-      }
-      sb.append("} ");
-    }
-    if (info.hasBaseType()) {
-      sb.append("@extends {");
-      Node typeNode = info.getBaseType().getRoot();
-      if (typeNode.getType() == Token.BANG) {
-        appendTypeNode(sb, typeNode.getFirstChild());
-      } else {
-        appendTypeNode(sb, typeNode);
-      }
-      sb.append("} ");
-    }
-    for (JSTypeExpression type : info.getImplementedInterfaces()) {
-      sb.append("@implements {");
-      Node typeNode = type.getRoot();
-      if (typeNode.getType() == Token.BANG) {
-        appendTypeNode(sb, typeNode.getFirstChild());
-      } else {
-        appendTypeNode(sb, typeNode);
-      }
-      sb.append("} ");
-    }
-    if (info.hasTypedefType()) {
-      sb.append("@typedef {");
-      appendTypeNode(sb, info.getTypedefType().getRoot());
-      sb.append("} ");
-    }
-    if (info.hasType()) {
+
+   if (info.hasType() && !info.isDefine()) {
       if (info.isInlineType()) {
-        sb.append(" ");
-        appendTypeNode(sb, info.getType().getRoot());
-        sb.append(" ");
+        parts.add(typeNode(info.getType().getRoot()));
       } else {
-        sb.append("@type {");
-        appendTypeNode(sb, info.getType().getRoot());
-        sb.append("} ");
+        parts.add(buildAnnotationWithType("type", info.getType()));
       }
     }
-    if (!info.getThrownTypes().isEmpty()) {
-      sb.append("@throws {");
-      appendTypeNode(sb, info.getThrownTypes().get(0).getRoot());
-      sb.append("} ");
+
+    if (info.isDefine()) {
+      parts.add(buildAnnotationWithType("define", info.getType()));
     }
+
+    if (info.hasTypedefType()) {
+      parts.add(buildAnnotationWithType("typedef", info.getTypedefType()));
+    }
+
     if (info.hasEnumParameterType()) {
-      sb.append("@enum {");
-      appendTypeNode(sb, info.getEnumParameterType().getRoot());
-      sb.append("} ");
+      parts.add(buildAnnotationWithType("enum", info.getEnumParameterType()));
     }
-    sb.append("*/");
+
+    if (info.isImplicitCast()) {
+      parts.add("@implicitCast");
+    }
+
+    if (info.isNoCollapse()) {
+      parts.add("@nocollapse");
+    }
+
+    Set<String> suppressions = info.getSuppressions();
+    if (!suppressions.isEmpty()) {
+      // Print suppressions in sorted order to avoid non-deterministic output.
+      String[] arr = suppressions.toArray(new String[0]);
+      Arrays.sort(arr, Ordering.<String>natural());
+      parts.add("@suppress {" + Joiner.on(',').join(arr) + "}");
+      multiline = true;
+    }
+
+    if (info.isDeprecated()) {
+      parts.add("@deprecated " + info.getDeprecationReason());
+      multiline = true;
+    }
+
+    if (info.isPolymer()) {
+      multiline = true;
+      parts.add("@polymer");
+    }
+    if (info.isPolymerBehavior()) {
+      multiline = true;
+      parts.add("@polymerBehavior");
+    }
+    if (info.isMixinFunction()) {
+      multiline = true;
+      parts.add("@mixinFunction");
+    }
+    if (info.isMixinClass()) {
+      multiline = true;
+      parts.add("@mixinClass");
+    }
+    if (info.isCustomElement()) {
+      multiline = true;
+      parts.add("@customElement");
+    }
+
+    parts.add("*/");
+
+    StringBuilder sb = new StringBuilder();
+    if (multiline) {
+      Joiner.on("\n ").appendTo(sb, parts);
+    } else {
+      Joiner.on(" ").appendTo(sb, parts);
+    }
+    sb.append((multiline) ? "\n" : " ");
     return sb.toString();
   }
 
-  private static void appendTypeNode(StringBuilder sb, Node typeNode) {
-    if (typeNode.getType() == Token.BANG) {
+  private Node stripBang(Node typeNode) {
+    if (typeNode.getToken() == Token.BANG) {
+      typeNode = typeNode.getFirstChild();
+    }
+    return typeNode;
+  }
+
+  private String buildAnnotationWithType(String annotation, JSTypeExpression type) {
+    return buildAnnotationWithType(annotation, type.getRoot());
+  }
+
+  private String buildAnnotationWithType(String annotation, Node type) {
+    StringBuilder sb = new StringBuilder();
+    sb.append("@");
+    sb.append(annotation);
+    sb.append(" {");
+    appendTypeNode(sb, type);
+    sb.append("}");
+    return sb.toString();
+  }
+
+  private String buildParamType(String name, JSTypeExpression type) {
+    if (type != null) {
+      return "{" + typeNode(type.getRoot()) + "} " + name;
+    } else {
+      return name;
+    }
+  }
+
+  private String typeNode(Node typeNode) {
+    StringBuilder sb = new StringBuilder();
+    appendTypeNode(sb, typeNode);
+    return sb.toString();
+  }
+
+  private void appendTypeNode(StringBuilder sb, Node typeNode) {
+    if (useOriginalName && typeNode.getOriginalName() != null) {
+      sb.append(typeNode.getOriginalName());
+      return;
+    }
+    if (typeNode.getToken() == Token.BANG) {
       sb.append("!");
       appendTypeNode(sb, typeNode.getFirstChild());
-    } else if (typeNode.getType() == Token.EQUALS) {
+    } else if (typeNode.getToken() == Token.EQUALS) {
       appendTypeNode(sb, typeNode.getFirstChild());
       sb.append("=");
-    } else if (typeNode.getType() == Token.PIPE) {
+    } else if (typeNode.getToken() == Token.PIPE) {
       sb.append("(");
-      for (int i = 0; i < typeNode.getChildCount() - 1; i++) {
-        appendTypeNode(sb, typeNode.getChildAtIndex(i));
-        sb.append("|");
+      Node lastChild = typeNode.getLastChild();
+      for (Node child = typeNode.getFirstChild(); child != null; child = child.getNext()) {
+        appendTypeNode(sb, child);
+        if (child != lastChild) {
+          sb.append("|");
+        }
       }
-      appendTypeNode(sb, typeNode.getLastChild());
       sb.append(")");
-    } else if (typeNode.getType() == Token.ELLIPSIS) {
+    } else if (typeNode.getToken() == Token.ELLIPSIS) {
       sb.append("...");
+      if (typeNode.hasChildren() && !typeNode.getFirstChild().isEmpty()) {
+        appendTypeNode(sb, typeNode.getFirstChild());
+      }
+    } else if (typeNode.getToken() == Token.STAR) {
+      sb.append("*");
+    } else if (typeNode.getToken() == Token.QMARK) {
+      sb.append("?");
       if (typeNode.hasChildren()) {
         appendTypeNode(sb, typeNode.getFirstChild());
       }
-    } else if (typeNode.getType() == Token.STAR) {
-      sb.append("*");
-    } else if (typeNode.getType() == Token.QMARK) {
-      sb.append("?");
     } else if (typeNode.isFunction()) {
       appendFunctionNode(sb, typeNode);
-    } else if (typeNode.getType() == Token.LC) {
+    } else if (typeNode.getToken() == Token.LC) {
       sb.append("{");
       Node lb = typeNode.getFirstChild();
-      for (int i = 0; i < lb.getChildCount() - 1; i++) {
-        Node colon = lb.getChildAtIndex(i);
+      Node lastColon = lb.getLastChild();
+      for (Node colon = lb.getFirstChild(); colon != null; colon = colon.getNext()) {
         if (colon.hasChildren()) {
-          sb.append(colon.getFirstChild().getString() + ":");
+          sb.append(colon.getFirstChild().getString()).append(":");
           appendTypeNode(sb, colon.getLastChild());
         } else {
           sb.append(colon.getString());
         }
-        sb.append(",");
-      }
-      Node lastColon = lb.getLastChild();
-      if (lastColon.hasChildren()) {
-        sb.append(lastColon.getFirstChild().getString() + ":");
-        appendTypeNode(sb, lastColon.getLastChild());
-      } else {
-        sb.append(lastColon.getString());
+        if (colon != lastColon) {
+          sb.append(",");
+        }
       }
       sb.append("}");
-    } else if (typeNode.getType() == Token.VOID) {
+    } else if (typeNode.isVoid()) {
       sb.append("void");
     } else {
       if (typeNode.hasChildren()) {
         sb.append(typeNode.getString())
             .append("<");
         Node child = typeNode.getFirstChild();
-        appendTypeNode(sb, child.getFirstChild());
-        for (int i = 1; i < child.getChildCount(); i++) {
-          sb.append(",");
-          appendTypeNode(sb, child.getChildAtIndex(i));
+        Node last = child.getLastChild();
+        for (Node type = child.getFirstChild(); type != null; type = type.getNext()) {
+          appendTypeNode(sb, type);
+          if (type != last) {
+            sb.append(",");
+          }
         }
         sb.append(">");
       } else {
@@ -237,7 +369,7 @@ public final class JSDocInfoPrinter {
     }
   }
 
-  private static void appendFunctionNode(StringBuilder sb, Node function) {
+  private void appendFunctionNode(StringBuilder sb, Node function) {
     boolean hasNewOrThis = false;
     sb.append("function(");
     Node first = function.getFirstChild();

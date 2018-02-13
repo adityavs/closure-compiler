@@ -16,6 +16,7 @@
 
 package com.google.javascript.jscomp.parsing.parser.trees;
 
+import com.google.javascript.jscomp.parsing.parser.util.SourcePosition;
 import com.google.javascript.jscomp.parsing.parser.util.SourceRange;
 
 /**
@@ -42,7 +43,14 @@ public class ParseTree {
     this.location = location;
   }
 
-  public ArgumentListTree asArgumentList() { return (ArgumentListTree) this; }
+  public SourcePosition getStart() {
+    return location.start;
+  }
+
+  public SourcePosition getEnd() {
+    return location.end;
+  }
+
   public ArrayLiteralExpressionTree asArrayLiteralExpression() {
     return (ArrayLiteralExpressionTree) this; }
   public ArrayPatternTree asArrayPattern() { return (ArrayPatternTree) this; }
@@ -100,14 +108,12 @@ public class ParseTree {
   public MemberVariableTree asMemberVariable() { return (MemberVariableTree) this; }
   public MissingPrimaryExpressionTree asMissingPrimaryExpression() {
     return (MissingPrimaryExpressionTree) this; }
-  public ModuleImportTree asModuleImport() { return (ModuleImportTree) this; }
   public NewExpressionTree asNewExpression() { return (NewExpressionTree) this; }
   public NullTree asNull() { return (NullTree) this; }
   public ObjectLiteralExpressionTree asObjectLiteralExpression() {
     return (ObjectLiteralExpressionTree) this; }
   public ObjectPatternTree asObjectPattern() { return (ObjectPatternTree) this; }
   public ParenExpressionTree asParenExpression() { return (ParenExpressionTree) this; }
-  public PostfixExpressionTree asPostfixExpression() { return (PostfixExpressionTree) this; }
   public ProgramTree asProgram() { return (ProgramTree) this; }
   public PropertyNameAssignmentTree asPropertyNameAssignment() {
     return (PropertyNameAssignmentTree) this; }
@@ -145,14 +151,28 @@ public class ParseTree {
   public WhileStatementTree asWhileStatement() { return (WhileStatementTree) this; }
   public WithStatementTree asWithStatement() { return (WithStatementTree) this; }
   public YieldExpressionTree asYieldStatement() { return (YieldExpressionTree) this; }
+  public AwaitExpressionTree asAwaitExpression() {
+    return (AwaitExpressionTree) this;
+  }
   public InterfaceDeclarationTree asInterfaceDeclaration() {
     return (InterfaceDeclarationTree) this;
   }
   public EnumDeclarationTree asEnumDeclaration() { return (EnumDeclarationTree) this; }
   public TypeAliasTree asTypeAlias() { return (TypeAliasTree) this; }
   public AmbientDeclarationTree asAmbientDeclaration() { return (AmbientDeclarationTree) this; }
+  public NamespaceDeclarationTree asNamespaceDeclaration() {
+    return (NamespaceDeclarationTree) this;
+  }
   public IndexSignatureTree asIndexSignature() { return (IndexSignatureTree) this; }
   public CallSignatureTree asCallSignature() { return (CallSignatureTree) this; }
+
+  public NewTargetExpressionTree asNewTargetExpression() {
+    return (NewTargetExpressionTree) this;
+  }
+
+  public UpdateExpressionTree asUpdateExpression() {
+    return (UpdateExpressionTree) this;
+  }
 
   public boolean isPattern() {
     ParseTree parseTree = this;
@@ -188,79 +208,16 @@ public class ParseTree {
     }
   }
 
-  // TODO: enable classes and traits
-  public boolean isAssignmentExpression() {
-    switch (this.type) {
-    case FUNCTION_DECLARATION:
-    case BINARY_OPERATOR:
-    case THIS_EXPRESSION:
-    case IDENTIFIER_EXPRESSION:
-    case LITERAL_EXPRESSION:
-    case ARRAY_LITERAL_EXPRESSION:
-    case OBJECT_LITERAL_EXPRESSION:
-    case MISSING_PRIMARY_EXPRESSION:
-    case CONDITIONAL_EXPRESSION:
-    case UNARY_EXPRESSION:
-    case POSTFIX_EXPRESSION:
-    case MEMBER_EXPRESSION:
-    case NEW_EXPRESSION:
-    case CALL_EXPRESSION:
-    case MEMBER_LOOKUP_EXPRESSION:
-    case PAREN_EXPRESSION:
-    case SUPER_EXPRESSION:
-    case TEMPLATE_LITERAL_EXPRESSION:
-      return true;
-    default:
-      return false;
-    }
+  public boolean isAssignmentRestElement() {
+    return this.type == ParseTreeType.ASSIGNMENT_REST_ELEMENT;
   }
 
   public boolean isRestParameter() {
     return this.type == ParseTreeType.REST_PARAMETER;
   }
 
-  public boolean isAssignmentRestElement() {
-    return this.type == ParseTreeType.ASSIGNMENT_REST_ELEMENT;
-  }
-
-  /**
-   * This function reflects the ECMA standard, or what we would expect to become the ECMA standard.
-   * Most places use isStatement instead which reflects where code on the web diverges from the
-   * standard.
-   */
-  public boolean isStatementStandard() {
-    switch (this.type) {
-    case BLOCK:
-    case VARIABLE_STATEMENT:
-    case EMPTY_STATEMENT:
-    case EXPRESSION_STATEMENT:
-    case IF_STATEMENT:
-    case DO_WHILE_STATEMENT:
-    case WHILE_STATEMENT:
-    case FOR_OF_STATEMENT:
-    case FOR_IN_STATEMENT:
-    case FOR_STATEMENT:
-    case CONTINUE_STATEMENT:
-    case BREAK_STATEMENT:
-    case RETURN_STATEMENT:
-    case YIELD_EXPRESSION:
-    case WITH_STATEMENT:
-    case SWITCH_STATEMENT:
-    case LABELLED_STATEMENT:
-    case THROW_STATEMENT:
-    case TRY_STATEMENT:
-    case DEBUGGER_STATEMENT:
-      return true;
-    default:
-      return false;
-    }
-  }
-
-  public boolean isSourceElement() {
-    return isStatementStandard() || this.type == ParseTreeType.FUNCTION_DECLARATION;
-  }
-
-  @Override public String toString() {
+  @Override
+  public String toString() {
     return type + "@" + location;
   }
 }

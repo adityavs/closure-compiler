@@ -15,18 +15,21 @@
  */
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.javascript.jscomp.FunctionArgumentInjector.THIS_MARKER;
 
-import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.javascript.jscomp.MakeDeclaredNamesUnique.InlineRenamer;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -40,9 +43,8 @@ import java.util.Set;
  */
 class FunctionToBlockMutator {
 
-  private AbstractCompiler compiler;
-  private Supplier<String> safeNameIdSupplier;
-
+  private final AbstractCompiler compiler;
+  private final Supplier<String> safeNameIdSupplier;
 
   FunctionToBlockMutator(
       AbstractCompiler compiler, Supplier<String> safeNameIdSupplier) {
@@ -63,22 +65,83 @@ class FunctionToBlockMutator {
    */
   Node mutate(String fnName, Node fnNode, Node callNode,
       String resultName, boolean needsDefaultResult, boolean isCallInLoop) {
+    return mutateInternal(
+        fnName, fnNode, callNode, resultName, needsDefaultResult, isCallInLoop,
+        /* renameLocals */ true);
+  }
+
+  /**
+   * Used where the inlining occurs into an isolated scope such as a module. Renaming is avoided
+   * since the associated JSDoc annotations are not updated.
+   *
+   * @param fnName The name to use when preparing human readable names.
+   * @param fnNode The function to prepare.
+   * @param callNode The call node that will be replaced.
+   * @param resultName Function results should be assigned to this name.
+   * @param needsDefaultResult Whether the result value must be set.
+   * @param isCallInLoop Whether the function body must be prepared to be injected into the body of
+   *     a loop.
+   * @return A clone of the function body mutated to be suitable for injection as a statement into
+   *     another code block.
+   */
+  Node mutateWithoutRenaming(
+      String fnName,
+      Node fnNode,
+      Node callNode,
+      String resultName,
+      boolean needsDefaultResult,
+      boolean isCallInLoop) {
+    return mutateInternal(
+        fnName,
+        fnNode,
+        callNode,
+        resultName,
+        needsDefaultResult,
+        isCallInLoop,
+        /* renameLocals */ false);
+  }
+
+  /**
+   * @param fnName The name to use when preparing human readable names.
+   * @param fnNode The function to prepare.
+   * @param callNode The call node that will be replaced.
+   * @param resultName Function results should be assigned to this name.
+   * @param needsDefaultResult Whether the result value must be set.
+   * @param isCallInLoop Whether the function body must be prepared to be injected into the body of
+   *     a loop.
+   * @param renameLocals If the inlining is part of module rewriting and doesn't require making
+   *     local names unique
+   * @return A clone of the function body mutated to be suitable for injection as a statement into
+   *     another code block.
+   */
+  private Node mutateInternal(
+      String fnName,
+      Node fnNode,
+      Node callNode,
+      String resultName,
+      boolean needsDefaultResult,
+      boolean isCallInLoop,
+      boolean renameLocals) {
     Node newFnNode = fnNode.cloneTree();
-    // Now that parameter names have been replaced, make sure all the local
-    // names are unique, to allow functions to be inlined multiple times
-    // without causing conflicts.
-    makeLocalNamesUnique(newFnNode, isCallInLoop);
+    // Wrap the clone in a script, in a root, so that makeLocalNamesUnique sees a coherent tree.
+    IR.root(IR.script(newFnNode));
 
-    // Function declarations must be rewritten as function expressions as
-    // they will be within a block and normalization prevents function
-    // declarations within block as browser implementations vary.
-    rewriteFunctionDeclarations(newFnNode.getLastChild());
+    if (renameLocals) {
+      // Now that parameter names have been replaced, make sure all the local
+      // names are unique, to allow functions to be inlined multiple times
+      // without causing conflicts.
+      makeLocalNamesUnique(newFnNode, isCallInLoop);
 
-    // TODO(johnlenz): Mark NAME nodes constant for parameters that are not
-    // modified.
+      // Function declarations must be rewritten as function expressions as
+      // they will be within a block and normalization prevents function
+      // declarations within block as browser implementations vary.
+      rewriteFunctionDeclarations(newFnNode.getLastChild());
+    }
+
+    // TODO(johnlenz): Mark NAME nodes constant for parameters that are not modified.
     Set<String> namesToAlias =
         FunctionArgumentInjector.findModifiedParameters(newFnNode);
-    LinkedHashMap<String, Node> args =
+    ImmutableMap<String, Node> args =
         FunctionArgumentInjector.getFunctionCallParameterMap(
             newFnNode, callNode, this.safeNameIdSupplier);
     boolean hasArgs = !args.isEmpty();
@@ -89,12 +152,11 @@ class FunctionToBlockMutator {
 
     Node newBlock = NodeUtil.getFunctionBody(newFnNode);
     // Make the newBlock insertable .
-    newBlock.detachFromParent();
+    newBlock.detach();
 
     if (hasArgs) {
-      Node inlineResult = aliasAndInlineArguments(newBlock,
-          args, namesToAlias);
-      Preconditions.checkState(newBlock == inlineResult);
+      Node inlineResult = aliasAndInlineArguments(newBlock, args, namesToAlias);
+      checkState(newBlock == inlineResult);
     }
 
     //
@@ -103,13 +165,13 @@ class FunctionToBlockMutator {
     // that they are properly initialized.
     //
     if (isCallInLoop) {
-      fixUnitializedVarDeclarations(newBlock);
+      fixUninitializedVarDeclarations(newBlock, newBlock);
     }
 
     String labelName = getLabelNameForFunction(fnName);
     Node injectableBlock = replaceReturns(
         newBlock, resultName, labelName, needsDefaultResult);
-    Preconditions.checkState(injectableBlock != null);
+    checkState(injectableBlock != null);
 
     return injectableBlock;
   }
@@ -118,7 +180,7 @@ class FunctionToBlockMutator {
   /**
    * @param n The node to inspect
    */
-  private static void rewriteFunctionDeclarations(Node n) {
+  private static Node rewriteFunctionDeclarations(Node n) {
     if (n.isFunction()) {
       if (NodeUtil.isFunctionDeclaration(n)) {
         // Rewrite: function f() {} ==> var f = function() {}
@@ -129,46 +191,62 @@ class FunctionToBlockMutator {
 
         fnNameNode.setString("");
         // Add the VAR, remove the FUNCTION
-        n.getParent().replaceChild(n, var);
+        n.replaceWith(var);
         // readd the function as a function expression
         name.addChildToFront(n);
+
+        return var;
       }
-      return;
+      return null;
     }
 
+    // Keep track of any rewritten functions and hoist them to the top
+    // of the block they are defined in. This isn't fully compliant hoisting
+    // but it does address a large set of use cases.
+    List<Node> functionsToHoist = new ArrayList<>();
     for (Node c = n.getFirstChild(), next; c != null; c = next) {
       next = c.getNext(); // We may rewrite "c"
-      rewriteFunctionDeclarations(c);
+      Node fnVar = rewriteFunctionDeclarations(c);
+      if (fnVar != null) {
+        functionsToHoist.add(0, fnVar);
+      }
     }
+
+    for (Node fnVar : functionsToHoist) {
+      if (n.getFirstChild() != fnVar) {
+        n.addChildToFront(fnVar.detach());
+      }
+    }
+
+    return null;
   }
 
   /**
    *  For all VAR node with uninitialized declarations, set
    *  the values to be "undefined".
    */
-  private static void fixUnitializedVarDeclarations(Node n) {
+  private static void fixUninitializedVarDeclarations(Node n, Node containingBlock) {
     // Inner loop structure must already have logic to initialize its
     // variables.  In particular FOR-IN structures must not be modified.
     if (NodeUtil.isLoopStructure(n)) {
       return;
     }
 
-    // For all VARs
-    if (n.isVar()) {
+    if ((n.isVar() || n.isLet()) && n.hasOneChild()) {
       Node name = n.getFirstChild();
       // It isn't initialized.
       if (!name.hasChildren()) {
         Node srcLocation = name;
         name.addChildToBack(NodeUtil.newUndefinedNode(srcLocation));
+        containingBlock.addChildToFront(n.detach());
       }
       return;
     }
 
     for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {
-      fixUnitializedVarDeclarations(c);
+      fixUninitializedVarDeclarations(c, containingBlock);
     }
   }
-
 
   /**
    * Fix-up all local names to be unique for this subtree.
@@ -177,17 +255,17 @@ class FunctionToBlockMutator {
   private void makeLocalNamesUnique(Node fnNode, boolean isCallInLoop) {
     Supplier<String> idSupplier = compiler.getUniqueNameIdSupplier();
     // Make variable names unique to this instance.
-    NodeTraversal.traverse(
-        compiler, fnNode, new MakeDeclaredNamesUnique(
+    NodeTraversal.traverseEs6ScopeRoots(
+        compiler,
+        null,
+        ImmutableList.of(fnNode),
+        new MakeDeclaredNamesUnique(
             new InlineRenamer(
-                compiler.getCodingConvention(),
-                idSupplier,
-                "inline_",
-                isCallInLoop,
-                true,
-                null)));
+                compiler.getCodingConvention(), idSupplier, "inline_", isCallInLoop, true, null),
+            false),
+        true);
     // Make label names unique to this instance.
-    new RenameLabels(compiler, new LabelNameSupplier(idSupplier), false)
+    new RenameLabels(compiler, new LabelNameSupplier(idSupplier), false, false)
         .process(null, fnNode);
   }
 
@@ -207,8 +285,8 @@ class FunctionToBlockMutator {
   /**
    * Create a unique label name.
    */
-  private String getLabelNameForFunction(String fnName){
-    String name = (fnName == null || fnName.isEmpty()) ? "anon" : fnName;
+  private String getLabelNameForFunction(String fnName) {
+    String name = (isNullOrEmpty(fnName)) ? "anon" : fnName;
     return "JSCompiler_inline_label_" + name + "_" + safeNameIdSupplier.get();
   }
 
@@ -230,14 +308,13 @@ class FunctionToBlockMutator {
    * @return The node or its replacement.
    */
   private Node aliasAndInlineArguments(
-      Node fnTemplateRoot, LinkedHashMap<String, Node> argMap,
-      Set<String> namesToAlias) {
+      Node fnTemplateRoot, ImmutableMap<String, Node> argMap, Set<String> namesToAlias) {
 
     if (namesToAlias == null || namesToAlias.isEmpty()) {
       // There are no names to alias, just inline the arguments directly.
       Node result = FunctionArgumentInjector.inject(
           compiler, fnTemplateRoot, null, argMap);
-      Preconditions.checkState(result == fnTemplateRoot);
+      checkState(result == fnTemplateRoot);
       return result;
     } else {
       // Create local alias of names that can not be safely
@@ -249,7 +326,7 @@ class FunctionToBlockMutator {
 
       // Declare the alias in the same order as they
       // are declared.
-      List<Node> newVars = new LinkedList<>();
+      List<Node> newVars = new ArrayList<>();
       // NOTE: argMap is a linked map so we get the parameters in the
       // order that they were declared.
       for (Entry<String, Node> entry : argMap.entrySet()) {
@@ -268,7 +345,7 @@ class FunctionToBlockMutator {
               String newName = getUniqueThisName();
               Node newValue = entry.getValue().cloneTree();
               Node newNode = NodeUtil.newVarNode(newName, newValue)
-                  .copyInformationFromForTree(newValue);
+                  .useSourceInfoIfMissingFromForTree(newValue);
               newVars.add(0, newNode);
               // Remove the parameter from the list to replace.
               newArgMap.put(THIS_MARKER,
@@ -278,7 +355,7 @@ class FunctionToBlockMutator {
           } else {
             Node newValue = entry.getValue().cloneTree();
             Node newNode = NodeUtil.newVarNode(name, newValue)
-                .copyInformationFromForTree(newValue);
+                .useSourceInfoIfMissingFromForTree(newValue);
             newVars.add(0, newNode);
             // Remove the parameter from the list to replace.
             newArgMap.remove(name);
@@ -289,7 +366,7 @@ class FunctionToBlockMutator {
       // Inline the arguments.
       Node result = FunctionArgumentInjector.inject(
           compiler, fnTemplateRoot, null, newArgMap);
-      Preconditions.checkState(result == fnTemplateRoot);
+      checkState(result == fnTemplateRoot);
 
       // Now that the names have been replaced, add the new aliases for
       // the old names.
@@ -325,8 +402,8 @@ class FunctionToBlockMutator {
   private static Node replaceReturns(
       Node block, String resultName, String labelName,
       boolean resultMustBeSet) {
-    Preconditions.checkNotNull(block);
-    Preconditions.checkNotNull(labelName);
+    checkNotNull(block);
+    checkNotNull(labelName);
 
     Node root = block;
 
@@ -353,7 +430,7 @@ class FunctionToBlockMutator {
         Node label = IR.label(name, block).srcref(block);
 
         Node newRoot = IR.block().srcref(block);
-        newRoot.addChildrenToBack(label);
+        newRoot.addChildToBack(label);
 
 
         // The label is now the root.
@@ -379,15 +456,15 @@ class FunctionToBlockMutator {
    *   a = (void) 0;
    */
   private static void addDummyAssignment(Node node, String resultName) {
-    Preconditions.checkArgument(node.isBlock());
+    checkArgument(node.isNormalBlock());
 
     // A result is needed create a dummy value.
     Node srcLocation = node;
     Node retVal = NodeUtil.newUndefinedNode(srcLocation);
     Node resultNode = createAssignStatementNode(resultName, retVal);
-    resultNode.copyInformationFromForTree(node);
+    resultNode.useSourceInfoIfMissingFromForTree(node);
 
-    node.addChildrenToBack(resultNode);
+    node.addChildToBack(resultNode);
   }
 
   /**
@@ -401,13 +478,13 @@ class FunctionToBlockMutator {
   private static void convertLastReturnToStatement(
       Node block, String resultName) {
     Node ret = block.getLastChild();
-    Preconditions.checkArgument(ret.isReturn());
+    checkArgument(ret.isReturn());
     Node resultNode = getReplacementReturnStatement(ret, resultName);
 
     if (resultNode == null) {
       block.removeChild(ret);
     } else {
-      resultNode.copyInformationFromForTree(ret);
+      resultNode.useSourceInfoIfMissingFromForTree(ret);
       block.replaceChild(ret, resultNode);
     }
   }
@@ -487,16 +564,16 @@ class FunctionToBlockMutator {
     }
 
     if (current.isReturn()) {
-      Preconditions.checkState(NodeUtil.isStatementBlock(parent));
+      checkState(NodeUtil.isStatementBlock(parent));
 
       Node resultNode = getReplacementReturnStatement(current, resultName);
       Node breakNode = IR.breakNode(IR.labelName(labelName));
 
       // Replace the node in parent, and reset current to the first new child.
-      breakNode.copyInformationFromForTree(current);
+      breakNode.useSourceInfoIfMissingFromForTree(current);
       parent.replaceChild(current, breakNode);
       if (resultNode != null) {
-        resultNode.copyInformationFromForTree(current);
+        resultNode.useSourceInfoIfMissingFromForTree(current);
         parent.addChildBefore(resultNode, breakNode);
       }
       current = breakNode;

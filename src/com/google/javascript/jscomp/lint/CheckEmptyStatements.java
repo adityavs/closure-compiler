@@ -27,9 +27,9 @@ import com.google.javascript.rhino.Node;
  * Check for empty statements (i.e. extraneous semicolons)
  */
 public final class CheckEmptyStatements extends AbstractPostOrderCallback implements CompilerPass {
-  // TODO(tbreisacher): Add a SuggestedFix for this in ErrorToFixMapper.
-  public static final DiagnosticType USELESS_EMPTY_STATEMENT = DiagnosticType.warning(
-      "JSC_USELESS_EMPTY_STATEMENT", "Useless empty statement. Remove semicolon.");
+  public static final DiagnosticType USELESS_EMPTY_STATEMENT = DiagnosticType.disabled(
+      "JSC_USELESS_EMPTY_STATEMENT",
+      "Useless empty statement. Remove semicolon.");
 
   private final AbstractCompiler compiler;
 
@@ -39,7 +39,7 @@ public final class CheckEmptyStatements extends AbstractPostOrderCallback implem
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, this);
+    NodeTraversal.traverseEs6(compiler, root, this);
   }
 
   @Override
@@ -49,4 +49,3 @@ public final class CheckEmptyStatements extends AbstractPostOrderCallback implem
     }
   }
 }
-

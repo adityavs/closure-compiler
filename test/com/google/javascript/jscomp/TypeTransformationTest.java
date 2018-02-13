@@ -23,7 +23,6 @@ import com.google.javascript.rhino.jstype.JSType;
 import com.google.javascript.rhino.jstype.ObjectType;
 import com.google.javascript.rhino.jstype.RecordTypeBuilder;
 import com.google.javascript.rhino.testing.TestErrorReporter;
-
 import java.util.Map.Entry;
 
 public final class TypeTransformationTest extends CompilerTypeTestCase {
@@ -32,14 +31,17 @@ public final class TypeTransformationTest extends CompilerTypeTestCase {
   private ImmutableMap<String, String> nameVars;
   private static JSType recordTypeTest, nestedRecordTypeTest, asynchRecord;
 
-  static final String EXTRA_TYPE_DEFS =
-      "/** @constructor */\n"
-          + "function Bar() {}"
-          + "/** @type {number} */"
-          + "var n = 10;";
+  static final String EXTRA_TYPE_DEFS = lines(
+      "/** @typedef {!Array<?>} */ var ArrayAlias;",
+      "",
+      "/** @constructor */",
+      "function Bar() {}",
+      "",
+      "/** @type {number} */",
+      "var n = 10;");
 
   @Override
-  public void setUp() {
+  public void setUp() throws Exception {
     super.setUp();
     errorReporter = new TestErrorReporter(null, null);
     initRecordTypeTests();
@@ -263,12 +265,16 @@ public final class TypeTransformationTest extends CompilerTypeTestCase {
         + "x ))))))");
   }
 
+  // none() is evaluated to bottom in TTL expressions, but if the overall expression evaluates
+  // to bottom, we return unknown to the context.
   public void testTransformatioWithNoneType() {
-    testTTL(NO_TYPE, "none()");
+    testTTL(UNKNOWN_TYPE, "none()");
   }
 
+  // The conditional is true, so we follow the THEN branch, and the bottom result is returned
+  // to the context as unknown.
   public void testTransformatioWithNoneTypeInConditional() {
-    testTTL(NO_TYPE, "cond(eq(BOT, none()), none(), N)");
+    testTTL(UNKNOWN_TYPE, "cond(eq(BOT, none()), none(), N)");
   }
 
   public void testTransformatioWithNoneTypeInMapunionFilterString() {
@@ -324,6 +330,11 @@ public final class TypeTransformationTest extends CompilerTypeTestCase {
         "The type string cannot be templatized");
   }
 
+  public void testTransformationWithTemplatizedTypeInvalidBaseType3() {
+    testTTL(UNKNOWN_TYPE, "type('ArrayAlias', number)",
+        "The type Array<?> cannot be templatized");
+  }
+
   public void testTransformationWithRawTypeOf() {
     testTTL(ARRAY_TYPE, "rawTypeOf(type('Array', 'number'))");
   }
@@ -363,7 +374,7 @@ public final class TypeTransformationTest extends CompilerTypeTestCase {
 
   public void testTransformationWithInvalidIndexTemplateTypeOf() {
     testTTL(UNKNOWN_TYPE, "templateTypeOf(ARRNUM, 2)",
-        "Index out of bounds in templateTypeOf: 2 > 1");
+        "Index out of bounds in templateTypeOf: expected a number less than 1, found 2");
   }
 
   public void testTransformationWithRecordType() {
@@ -952,7 +963,8 @@ public final class TypeTransformationTest extends CompilerTypeTestCase {
       // Evaluate the type transformation
       TypeTransformation typeTransformation =
           new TypeTransformation(compiler, scope);
-      JSType resultType = typeTransformation.eval(ast, typeVars, nameVars);
+      @SuppressWarnings({"rawtypes", "unchecked"})
+      JSType resultType = (JSType) typeTransformation.eval(ast, (ImmutableMap) typeVars, nameVars);
       checkReportedWarningsHelper(expectedWarnings);
       assertTypeEquals(expectedType, resultType);
     }

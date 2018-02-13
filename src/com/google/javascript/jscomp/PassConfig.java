@@ -16,16 +16,14 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.collect.Iterables;
 import com.google.javascript.jscomp.graph.GraphvizGraph;
 import com.google.javascript.jscomp.graph.LinkedDirectedGraph;
 import com.google.javascript.rhino.Node;
-
-import java.io.Serializable;
+import java.util.Collections;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 /**
  * Pass factories and meta-data for native Compiler passes.
@@ -34,15 +32,15 @@ import java.util.Set;
  */
 public abstract class PassConfig {
 
-  // Used by subclasses in this package.
-  final CompilerOptions options;
+  // Used by the subclasses.
+  protected final CompilerOptions options;
 
   /**
    * A memoized version of scopeCreator. It must be memoized so that
    * we can make two separate passes over the AST, one for inferring types
    * and one for checking types.
    */
-  private MemoizedScopeCreator typedScopeCreator;
+  private MemoizedTypedScopeCreator typedScopeCreator;
 
   /**
    * This is the scope creator that {@code TypedScopeCreator} delegates to.
@@ -64,7 +62,7 @@ public abstract class PassConfig {
    */
   void regenerateGlobalTypedScope(AbstractCompiler compiler, Node root) {
     internalScopeCreator = new TypedScopeCreator(compiler);
-    typedScopeCreator = new MemoizedScopeCreator(internalScopeCreator);
+    typedScopeCreator = new MemoizedTypedScopeCreator(internalScopeCreator);
     topScope = typedScopeCreator.createScope(root, null);
   }
 
@@ -82,14 +80,14 @@ public abstract class PassConfig {
    * @param scriptRoot The root of the AST used to generate global scope.
    */
   void patchGlobalTypedScope(AbstractCompiler compiler, Node scriptRoot) {
-    Preconditions.checkNotNull(internalScopeCreator);
+    checkNotNull(internalScopeCreator);
     internalScopeCreator.patchGlobalScope(topScope, scriptRoot);
   }
 
   /**
    * Gets the scope creator for typed scopes.
    */
-  MemoizedScopeCreator getTypedScopeCreator() {
+  MemoizedTypedScopeCreator getTypedScopeCreator() {
     return typedScopeCreator;
   }
 
@@ -98,6 +96,20 @@ public abstract class PassConfig {
    */
   TypedScope getTopScope() {
     return topScope;
+  }
+
+  /**
+   * Gets additional checking passes that are run always, even in "whitespace only" mode.
+   * For very specific cases where processing is required even in a mode which is intended
+   * not to have any processing - specifically introduced to support goog.module() usage.
+   */
+  protected List<PassFactory> getWhitespaceOnlyPasses() {
+    return Collections.emptyList();
+  }
+
+  /** Gets the transpilation passes */
+  protected List<PassFactory> getTranspileOnlyPasses() {
+    return Collections.emptyList();
   }
 
   /**
@@ -171,14 +183,13 @@ public abstract class PassConfig {
    */
   final TypeCheck makeTypeCheck(AbstractCompiler compiler) {
     return new TypeCheck(
-        compiler,
-        compiler.getReverseAbstractInterpreter(),
-        compiler.getTypeRegistry(),
-        topScope,
-        typedScopeCreator,
-        options.reportMissingOverride)
-        .reportMissingProperties(options.enables(
-            DiagnosticGroup.forType(TypeCheck.INEXISTENT_PROPERTY)));
+            compiler,
+            compiler.getReverseAbstractInterpreter(),
+            compiler.getTypeRegistry(),
+            topScope,
+            typedScopeCreator)
+        .reportMissingProperties(
+            !options.disables(DiagnosticGroup.forType(TypeCheck.INEXISTENT_PROPERTY)));
   }
 
   /**
@@ -226,18 +237,6 @@ public abstract class PassConfig {
   }
 
   /**
-   * Get intermediate state for a running pass config, so it can
-   * be paused and started again later.
-   */
-  protected abstract State getIntermediateState();
-
-  /**
-   * Set the intermediate state for a pass config, to restart
-   * a compilation process that had been previously paused.
-   */
-  protected abstract void setIntermediateState(State state);
-
-  /**
    * An implementation of PassConfig that just proxies all its method calls
    * into an inner class.
    */
@@ -250,6 +249,11 @@ public abstract class PassConfig {
       this.delegate = delegate;
     }
 
+    @Override
+    protected List<PassFactory> getWhitespaceOnlyPasses() {
+      return delegate.getWhitespaceOnlyPasses();
+    }
+
     @Override protected List<PassFactory> getChecks() {
       return delegate.getChecks();
     }
@@ -258,54 +262,16 @@ public abstract class PassConfig {
       return delegate.getOptimizations();
     }
 
-    @Override MemoizedScopeCreator getTypedScopeCreator() {
+    @Override protected List<PassFactory> getTranspileOnlyPasses() {
+      return delegate.getTranspileOnlyPasses();
+    }
+
+    @Override MemoizedTypedScopeCreator getTypedScopeCreator() {
       return delegate.getTypedScopeCreator();
     }
 
     @Override TypedScope getTopScope() {
       return delegate.getTopScope();
-    }
-
-    @Override protected State getIntermediateState() {
-      return delegate.getIntermediateState();
-    }
-
-    @Override protected void setIntermediateState(State state) {
-      delegate.setIntermediateState(state);
-    }
-  }
-
-  /**
-   * Intermediate state for a running pass configuration.
-   */
-  public static class State implements Serializable {
-    private static final long serialVersionUID = 1L;
-
-    final Map<String, Integer> cssNames;
-    final Set<String> exportedNames;
-    final CrossModuleMethodMotion.IdGenerator crossModuleIdGenerator;
-    final VariableMap variableMap;
-    final VariableMap propertyMap;
-    final VariableMap anonymousFunctionNameMap;
-    final VariableMap stringMap;
-    final FunctionNames functionNames;
-    final String idGeneratorMap;
-
-    public State(Map<String, Integer> cssNames, Set<String> exportedNames,
-        CrossModuleMethodMotion.IdGenerator crossModuleIdGenerator,
-        VariableMap variableMap, VariableMap propertyMap,
-        VariableMap anonymousFunctionNameMap,
-        VariableMap stringMap, FunctionNames functionNames,
-        String idGeneratorMap) {
-      this.cssNames = cssNames;
-      this.exportedNames = exportedNames;
-      this.crossModuleIdGenerator = crossModuleIdGenerator;
-      this.variableMap = variableMap;
-      this.propertyMap = propertyMap;
-      this.anonymousFunctionNameMap = anonymousFunctionNameMap;
-      this.stringMap = stringMap;
-      this.idGeneratorMap = idGeneratorMap;
-      this.functionNames = functionNames;
     }
   }
 }

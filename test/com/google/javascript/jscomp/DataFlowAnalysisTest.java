@@ -16,6 +16,11 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.truth.Truth.assertThat;
+import static java.util.Comparator.comparingInt;
+
+import com.google.javascript.jscomp.AbstractCompiler.LifeCycleStage;
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
 import com.google.javascript.jscomp.ControlFlowGraph.Branch;
 import com.google.javascript.jscomp.DataFlowAnalysis.BranchedFlowState;
 import com.google.javascript.jscomp.DataFlowAnalysis.BranchedForwardDataFlowAnalysis;
@@ -25,15 +30,17 @@ import com.google.javascript.jscomp.JoinOp.BinaryJoinOp;
 import com.google.javascript.jscomp.graph.DiGraph.DiGraphEdge;
 import com.google.javascript.jscomp.graph.GraphNode;
 import com.google.javascript.jscomp.graph.LatticeElement;
-
-import junit.framework.TestCase;
-
+import com.google.javascript.rhino.InputId;
+import com.google.javascript.rhino.Node;
+import com.google.javascript.rhino.Token;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import junit.framework.TestCase;
 
 /**
  * A test suite with a very small programming language that has two types of
@@ -67,7 +74,7 @@ public final class DataFlowAnalysisTest extends TestCase {
   abstract static class Value {
 
     boolean isNumber() {
-      return this instanceof Number;
+      return this instanceof NumberValue;
     }
 
     boolean isVariable() {
@@ -117,7 +124,7 @@ public final class DataFlowAnalysisTest extends TestCase {
   /**
    * A number constant.
    */
-  static class Number extends Value {
+  static class NumberValue extends Value {
     private final int value;
 
     /**
@@ -125,7 +132,7 @@ public final class DataFlowAnalysisTest extends TestCase {
      *
      * @param v Value
      */
-    Number(int v) {
+    NumberValue(int v) {
       value = v;
     }
 
@@ -136,6 +143,14 @@ public final class DataFlowAnalysisTest extends TestCase {
     @Override
     public String toString() {
       return "" + value;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (!(other instanceof NumberValue)) {
+        return false;
+      }
+      return ((NumberValue) other).value == value;
     }
 
     @Override
@@ -192,7 +207,7 @@ public final class DataFlowAnalysisTest extends TestCase {
      * @param op2 Second Operand.
      */
     ArithmeticInstruction(Variable res, int op1, Operation o, int op2) {
-      this(res, new Number(op1), o, new Number(op2));
+      this(res, new NumberValue(op1), o, new NumberValue(op2));
     }
 
     /**
@@ -204,7 +219,7 @@ public final class DataFlowAnalysisTest extends TestCase {
      * @param op2 Second Operand.
      */
     ArithmeticInstruction(Variable res, Value op1, Operation o, int op2) {
-      this(res, op1, o, new Number(op2));
+      this(res, op1, o, new NumberValue(op2));
     }
 
     /**
@@ -216,7 +231,7 @@ public final class DataFlowAnalysisTest extends TestCase {
      * @param op2 Second Operand.
      */
     ArithmeticInstruction(Variable res, int op1, Operation o, Value op2) {
-      this(res, new Number(op1), o, op2);
+      this(res, new NumberValue(op1), o, op2);
     }
 
     /**
@@ -278,18 +293,30 @@ public final class DataFlowAnalysisTest extends TestCase {
     }
 
     @Override
+    public boolean equals(Object other) {
+      if (!(other instanceof ArithmeticInstruction)) {
+        return false;
+      }
+      ArithmeticInstruction that = (ArithmeticInstruction) other;
+      return that.order == this.order
+          && that.operation.equals(this.operation)
+          && that.operand1.equals(this.operand1)
+          && that.operand2.equals(this.operand2)
+          && that.result.equals(this.result);
+    }
+
+    @Override
     public int hashCode() {
       return toString().hashCode();
     }
   }
 
-  public static ArithmeticInstruction
-      newAssignNumberToVariableInstruction(Variable res, int num) {
+  public static ArithmeticInstruction newAssignNumberToVariableInstruction(Variable res, int num) {
     return new ArithmeticInstruction(res, num, Operation.ADD, 0);
   }
 
-  public static ArithmeticInstruction
-      newAssignVariableToVariableInstruction(Variable lhs, Variable rhs) {
+  public static ArithmeticInstruction newAssignVariableToVariableInstruction(
+      Variable lhs, Variable rhs) {
     return new ArithmeticInstruction(lhs, rhs, Operation.ADD, 0);
   }
 
@@ -471,7 +498,7 @@ public final class DataFlowAnalysisTest extends TestCase {
     // be a constant coming in.
     Integer leftConst = null;
     if (aInst.operand1.isNumber()) {
-      leftConst = ((Number) aInst.operand1).value;
+      leftConst = ((NumberValue) aInst.operand1).value;
     } else {
       if (input.constMap.containsKey(aInst.operand1)) {
         leftConst = input.constMap.get(aInst.operand1);
@@ -481,7 +508,7 @@ public final class DataFlowAnalysisTest extends TestCase {
     // Do the same thing to the right.
     Integer rightConst = null;
     if (aInst.operand2.isNumber()) {
-      rightConst = ((Number) aInst.operand2).value;
+      rightConst = ((NumberValue) aInst.operand2).value;
     } else {
       if (input.constMap.containsKey(aInst.operand2)) {
         rightConst = input.constMap.get(aInst.operand2);
@@ -518,8 +545,7 @@ public final class DataFlowAnalysisTest extends TestCase {
     Instruction inst2 = newAssignNumberToVariableInstruction(b, 1);
     Instruction inst3 = newAssignNumberToVariableInstruction(b, 1);
     Instruction inst4 = newAssignVariableToVariableInstruction(c, b);
-    ControlFlowGraph<Instruction> cfg =
-      new ControlFlowGraph<>(inst1, true, true);
+    ControlFlowGraph<Instruction> cfg = new ControlFlowGraph<>(inst1, true, true);
     GraphNode<Instruction, Branch> n1 = cfg.createNode(inst1);
     GraphNode<Instruction, Branch> n2 = cfg.createNode(inst2);
     GraphNode<Instruction, Branch> n3 = cfg.createNode(inst3);
@@ -575,8 +601,7 @@ public final class DataFlowAnalysisTest extends TestCase {
     Instruction inst2 = new ArithmeticInstruction(a, a, Operation.ADD, 1);
     Instruction inst3 = new BranchInstruction(b);
     Instruction inst4 = newAssignVariableToVariableInstruction(c, a);
-    ControlFlowGraph<Instruction> cfg =
-      new ControlFlowGraph<>(inst1, true, true);
+    ControlFlowGraph<Instruction> cfg = new ControlFlowGraph<>(inst1, true, true);
     GraphNode<Instruction, Branch> n1 = cfg.createNode(inst1);
     GraphNode<Instruction, Branch> n2 = cfg.createNode(inst2);
     GraphNode<Instruction, Branch> n3 = cfg.createNode(inst3);
@@ -634,6 +659,98 @@ public final class DataFlowAnalysisTest extends TestCase {
     assertEquals(1, JoinOp.BinaryJoinOp.computeMidPoint(2));
   }
 
+  // tests for computeEscaped method
+
+  public void testEscaped() {
+    assertThat(
+            computeEscapedLocals(
+                "function f() {",
+                "    var x = 0; ",
+                "    setTimeout(function() { x++; }); ",
+                "    alert(x);",
+                "}"))
+        .hasSize(1);
+    assertThat(computeEscapedLocals("function f() {var _x}")).hasSize(1);
+    assertThat(computeEscapedLocals("function f() {try{} catch(e){}}")).hasSize(1);
+  }
+
+  public void testEscapedFunctionLayered() {
+    assertThat(
+            computeEscapedLocals(
+                "function f() {",
+                "    function ff() {",
+                "        var x = 0; ",
+                "        setTimeout(function() { x++; }); ",
+                "        alert(x);",
+                "    }",
+                "}"))
+        .isEmpty();
+  }
+
+  public void testEscapedLetConstSimple() {
+    assertThat(computeEscapedLocals("function f() { let x = 0; x ++; x; }")).isEmpty();
+  }
+
+  public void testEscapedFunctionAssignment() {
+    assertThat(computeEscapedLocals("function f() {var x = function () { return 1; }; }"))
+        .isEmpty();
+    assertThat(computeEscapedLocals("function f() {var x = function (y) { return y; }; }"))
+        .isEmpty();
+    assertThat(computeEscapedLocals("function f() {let x = function () { return 1; }; }"))
+        .isEmpty();
+  }
+
+  public void testEscapedArrowFunction() {
+    // When the body of the arrow fn is analyzed, x is considered an escaped var. When the outer
+    // block containing "const value ..." is analyzed, 'x' is not considered an escaped var
+    assertThat(
+            computeEscapedLocals(
+                "function f() {const value = () => {",
+                "    var x = 0; ",
+                "    setTimeout(function() { x++; }); ",
+                "    alert(x);",
+                " };}"))
+        .isEmpty();
+  }
+
+  // test computeEscaped helper method that returns the liveness analysis performed by the
+  // LiveVariablesAnalysis class
+  public Set<? extends Var> computeEscapedLocals(String... lines) {
+    // Set up compiler
+    Compiler compiler = new Compiler();
+    CompilerOptions options = new CompilerOptions();
+    options.setLanguage(LanguageMode.ECMASCRIPT_2015);
+    options.setCodingConvention(new GoogleCodingConvention());
+    compiler.initOptions(options);
+    compiler.setLifeCycleStage(LifeCycleStage.NORMALIZED);
+
+    String src = CompilerTestCase.lines(lines);
+    Node n = compiler.parseTestCode(src).removeFirstChild();
+    Node script = new Node(Token.SCRIPT, n);
+    script.setInputId(new InputId("test"));
+    assertThat(compiler.getErrors()).isEmpty();
+
+    // Create scopes
+    Es6SyntacticScopeCreator scopeCreator = new Es6SyntacticScopeCreator(compiler);
+    Scope scope = scopeCreator.createScope(n, Scope.createGlobalScope(script));
+    Scope childScope;
+    if (script.getFirstChild().isFunction()) {
+      childScope = scopeCreator.createScope(NodeUtil.getFunctionBody(n), scope);
+    } else {
+      childScope = null;
+    }
+
+    // Control flow graph
+    ControlFlowAnalysis cfa = new ControlFlowAnalysis(compiler, false, true);
+    cfa.process(null, script);
+    ControlFlowGraph<Node> cfg = cfa.getCfg();
+
+    // Compute liveness of variables
+    LiveVariablesAnalysis analysis =
+        new LiveVariablesAnalysis(cfg, scope, childScope, compiler, scopeCreator);
+    analysis.analyze();
+    return analysis.getEscapedLocals();
+  }
 
   /**
    * A simple forward constant propagation.
@@ -660,18 +777,16 @@ public final class DataFlowAnalysisTest extends TestCase {
     List<ConstPropLatticeElement> branchedFlowThrough(Instruction node,
         ConstPropLatticeElement input) {
       List<ConstPropLatticeElement> result = new ArrayList<>();
-      List<DiGraphEdge<Instruction, Branch>> outEdges =
-        getCfg().getOutEdges(node);
+      List<DiGraphEdge<Instruction, Branch>> outEdges = getCfg().getOutEdges(node);
       if (node.isArithmetic()) {
-        assertTrue(outEdges.size() < 2);
+        assertThat(outEdges.size()).isLessThan(2);
         ConstPropLatticeElement aResult = flowThroughArithmeticInstruction(
             (ArithmeticInstruction) node, input);
         result.addAll(Collections.nCopies(outEdges.size(), aResult));
       } else {
         BranchInstruction branchInst = (BranchInstruction) node;
         for (DiGraphEdge<Instruction, Branch> branch : outEdges) {
-          ConstPropLatticeElement edgeResult =
-            new ConstPropLatticeElement(input);
+          ConstPropLatticeElement edgeResult = new ConstPropLatticeElement(input);
           if (branch.getValue() == Branch.ON_FALSE &&
               branchInst.getCondition().isVariable()) {
             edgeResult.constMap.put((Variable) branchInst.getCondition(), 0);
@@ -702,8 +817,7 @@ public final class DataFlowAnalysisTest extends TestCase {
     Instruction inst2 = newAssignNumberToVariableInstruction(a, 0);
     Instruction inst3 = newAssignNumberToVariableInstruction(b, 0);
     Instruction inst4 = newAssignVariableToVariableInstruction(c, b);
-    ControlFlowGraph<Instruction> cfg =
-      new ControlFlowGraph<>(inst1, true, true);
+    ControlFlowGraph<Instruction> cfg = new ControlFlowGraph<>(inst1, true, true);
     GraphNode<Instruction, Branch> n1 = cfg.createNode(inst1);
     GraphNode<Instruction, Branch> n2 = cfg.createNode(inst2);
     GraphNode<Instruction, Branch> n3 = cfg.createNode(inst3);
@@ -742,27 +856,21 @@ public final class DataFlowAnalysisTest extends TestCase {
     Variable a = new Variable("a");
     Instruction inst1 = new ArithmeticInstruction(a, a, Operation.ADD, a);
     ControlFlowGraph<Instruction> cfg =
-      new ControlFlowGraph<Instruction>(inst1, true, true) {
-      @Override
-      public Comparator<DiGraphNode<Instruction, Branch>>
-          getOptionalNodeComparator(boolean isForward) {
-        return new Comparator<DiGraphNode<Instruction, Branch>>() {
+        new ControlFlowGraph<Instruction>(inst1, true, true) {
           @Override
-          public int compare(DiGraphNode<Instruction, Branch> o1,
-              DiGraphNode<Instruction, Branch> o2) {
-            return o1.getValue().order - o2.getValue().order;
+          public Comparator<DiGraphNode<Instruction, Branch>> getOptionalNodeComparator(
+              boolean isForward) {
+            return comparingInt(arg -> arg.getValue().order);
           }
         };
-      }
-    };
     cfg.createNode(inst1);
 
     // We have MAX_STEP + 1 nodes, it is impossible to finish the analysis with
     // MAX_STEP number of steps.
     for (int i = 0; i < MAX_STEP + 1; i++) {
       Instruction inst2 = new ArithmeticInstruction(a, a, Operation.ADD, a);
-      cfg.createNode(inst2);
       inst2.order = i + 1;
+      cfg.createNode(inst2);
       cfg.connect(inst1, ControlFlowGraph.Branch.UNCOND, inst2);
       inst1 = inst2;
     }
@@ -771,26 +879,35 @@ public final class DataFlowAnalysisTest extends TestCase {
       constProp.analyze(MAX_STEP);
       fail("Expected MaxIterationsExceededException to be thrown.");
     } catch (MaxIterationsExceededException e) {
-      assertEquals(e.getMessage(), "Analysis did not terminate after "
-          + MAX_STEP + " iterations");
+      assertThat(e)
+          .hasMessageThat()
+          .isEqualTo("Analysis did not terminate after " + MAX_STEP + " iterations");
     }
   }
 
   static void verifyInHas(GraphNode<Instruction, Branch> node, Variable var,
       Integer constant) {
     FlowState<ConstPropLatticeElement> fState = node.getAnnotation();
-    assertEquals(constant, fState.getIn().constMap.get(var));
+    veritfyLatticeElementHas(fState.getIn(), var, constant);
   }
 
   static void verifyOutHas(GraphNode<Instruction, Branch> node, Variable var,
       Integer constant) {
     FlowState<ConstPropLatticeElement> fState = node.getAnnotation();
-    assertEquals(constant, fState.getOut().constMap.get(var));
+    veritfyLatticeElementHas(fState.getOut(), var, constant);
   }
 
   static void verifyBranchedInHas(GraphNode<Instruction, Branch> node,
       Variable var, Integer constant) {
     BranchedFlowState<ConstPropLatticeElement> fState = node.getAnnotation();
-    assertEquals(constant, fState.getIn().constMap.get(var));
+    veritfyLatticeElementHas(fState.getIn(), var, constant);
+  }
+
+  static void veritfyLatticeElementHas(ConstPropLatticeElement el, Variable var, Integer constant) {
+    if (constant == null) {
+      assertThat(el.constMap).doesNotContainKey(var);
+    } else {
+      assertThat(el.constMap).containsEntry(var, constant);
+    }
   }
 }

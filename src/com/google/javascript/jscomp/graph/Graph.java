@@ -16,12 +16,12 @@
 
 package com.google.javascript.jscomp.graph;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
-import java.util.LinkedList;
 import java.util.List;
 
 /**
@@ -69,7 +69,7 @@ public abstract class Graph<N, E> implements AdjacencyGraph<N, E> {
   }
 
   /**
-   * Pseudo typedef for ArrayList<AnnotationState>. Record of a collection of
+   * Pseudo typedef for {@code ArrayList<AnnotationState>}. Record of a collection of
    * objects' annotations at some state.
    */
   private static class GraphAnnotationState extends ArrayList<AnnotationState> {
@@ -135,8 +135,20 @@ public abstract class Graph<N, E> implements AdjacencyGraph<N, E> {
   @Override
   public abstract Collection<? extends GraphNode<N, E>> getNodes();
 
+  @Override
+  public abstract int getNodeCount();
+
   /** Gets an immutable list of all edges. */
   public abstract List<? extends GraphEdge<N, E>> getEdges();
+
+  /**
+   * Retrieves an edge from the graph.
+   *
+   * @param n1 Node one.
+   * @param n2 Node two.
+   * @return The list of edges between those two values in the graph.
+   */
+  public abstract List<? extends GraphEdge<N, E>> getEdges(N n1, N n2);
 
   /**
    * Gets the degree of a node.
@@ -158,15 +170,6 @@ public abstract class Graph<N, E> implements AdjacencyGraph<N, E> {
    * @return A list of neighboring nodes.
    */
   public abstract List<GraphNode<N, E>> getNeighborNodes(N value);
-
-  /**
-   * Retrieves an edge from the graph.
-   *
-   * @param n1 Node one.
-   * @param n2 Node two.
-   * @return The list of edges between those two values in the graph.
-   */
-  public abstract List<? extends GraphEdge<N, E>> getEdges(N n1, N n2);
 
   /**
    * Retrieves any edge from the graph.
@@ -241,7 +244,7 @@ public abstract class Graph<N, E> implements AdjacencyGraph<N, E> {
    */
   public final void pushNodeAnnotations() {
     if (nodeAnnotationStack == null) {
-      nodeAnnotationStack = new LinkedList<>();
+      nodeAnnotationStack = new ArrayDeque<>();
     }
     pushAnnotations(nodeAnnotationStack, getNodes());
   }
@@ -251,8 +254,7 @@ public abstract class Graph<N, E> implements AdjacencyGraph<N, E> {
    * {@link #pushNodeAnnotations()}.
    */
   public final void popNodeAnnotations() {
-    Preconditions.checkNotNull(nodeAnnotationStack,
-        "Popping node annotations without pushing.");
+    checkNotNull(nodeAnnotationStack, "Popping node annotations without pushing.");
     popAnnotations(nodeAnnotationStack);
   }
 
@@ -262,7 +264,7 @@ public abstract class Graph<N, E> implements AdjacencyGraph<N, E> {
    */
   public final void pushEdgeAnnotations() {
     if (edgeAnnotationStack == null) {
-      edgeAnnotationStack = new LinkedList<>();
+      edgeAnnotationStack = new ArrayDeque<>();
     }
     pushAnnotations(edgeAnnotationStack, getEdges());
   }
@@ -272,8 +274,7 @@ public abstract class Graph<N, E> implements AdjacencyGraph<N, E> {
    * {@link #pushEdgeAnnotations()}.
    */
   public final void popEdgeAnnotations() {
-    Preconditions.checkNotNull(edgeAnnotationStack,
-        "Popping edge annotations without pushing.");
+    checkNotNull(edgeAnnotationStack, "Popping edge annotations without pushing.");
     popAnnotations(edgeAnnotationStack);
   }
 
@@ -300,9 +301,9 @@ public abstract class Graph<N, E> implements AdjacencyGraph<N, E> {
    * A simple implementation of SubGraph that calculates adjacency by iterating
    * over a node's neighbors.
    */
-  class SimpleSubGraph<N, E> implements SubGraph<N, E> {
-    private Graph<N, E> graph;
-    private List<GraphNode<N, E>> nodes = new ArrayList<>();
+  static class SimpleSubGraph<N, E> implements SubGraph<N, E> {
+    private final Graph<N, E> graph;
+    private final List<GraphNode<N, E>> nodes = new ArrayList<>();
 
     SimpleSubGraph(Graph<N, E> graph) {
       this.graph = graph;

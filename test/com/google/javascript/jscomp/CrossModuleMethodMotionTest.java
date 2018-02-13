@@ -37,15 +37,16 @@ public final class CrossModuleMethodMotionTest extends CompilerTestCase {
   @Override
   protected CompilerPass getProcessor(Compiler compiler) {
     return new CrossModuleMethodMotion(
-        compiler, new CrossModuleMethodMotion.IdGenerator(), canMoveExterns,
+        compiler, new IdGenerator(), canMoveExterns,
         noStubs);
   }
 
   @Override
-  public void setUp() {
-    super.enableLineNumberCheck(true);
+  protected void setUp() throws Exception {
+    super.setUp();
     canMoveExterns = false;
     noStubs = false;
+    enableNormalize();
   }
 
   public void testMovePrototypeMethod1() {
@@ -117,6 +118,62 @@ public final class CrossModuleMethodMotionTest extends CompilerTestCase {
                 "(new Foo).bar()"
         });
   }
+
+  public void testNoMovePrototypeMethodIfAliasedNoStubs() {
+    // don't move if noStubs enabled and there's a reference to the method to be moved
+    noStubs = true;
+    testSame(
+        createModuleChain(
+            "function Foo() {}"
+                + "Foo.prototype.m = function() {};"
+                + "Foo.prototype.m2 = Foo.prototype.m;",
+            // Module 2
+            "(new Foo).m()"));
+
+    testSame(
+        createModuleChain(
+            "function Foo() {}"
+                + "Foo.prototype.m = function() {};"
+                + "Foo.prototype.m2 = Foo.prototype.m;",
+            // Module 2
+            "(new Foo).m(), (new Foo).m2()"));
+
+    noStubs = false;
+
+    test(
+        createModuleChain(
+            "function Foo() {}"
+                + "Foo.prototype.m = function() {};"
+                + "Foo.prototype.m2 = Foo.prototype.m;",
+            // Module 2
+            "(new Foo).m()"),
+        new String[] {
+          STUB_DECLARATIONS
+              + "function Foo() {}"
+              + "Foo.prototype.m = JSCompiler_stubMethod(0);"
+              + "Foo.prototype.m2 = Foo.prototype.m;",
+          // Module 2
+          "Foo.prototype.m = JSCompiler_unstubMethod(0, function() {});" + "(new Foo).m()"
+        });
+
+    test(
+        createModuleChain(
+            "function Foo() {}"
+                + "Foo.prototype.m = function() {};"
+                + "Foo.prototype.m2 = Foo.prototype.m;",
+            // Module 2
+            "(new Foo).m(), (new Foo).m2()"),
+        new String[] {
+          STUB_DECLARATIONS
+              + "function Foo() {}"
+              + "Foo.prototype.m = JSCompiler_stubMethod(0);"
+              + "Foo.prototype.m2 = Foo.prototype.m;",
+          // Module 2
+          "Foo.prototype.m = JSCompiler_unstubMethod(0, function() {});"
+              + "(new Foo).m(), (new Foo).m2()",
+        });
+  }
+
   public void testNoMovePrototypeMethodRedeclaration1() {
     // don't move if it can be overwritten when a sibling module is loaded.
     testSame(createModuleStar(

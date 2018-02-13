@@ -16,9 +16,11 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.javascript.jscomp.NodeTraversal.AbstractShallowCallback;
-import com.google.javascript.jscomp.NodeTraversal.FunctionCallback;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.Node;
+import java.util.Arrays;
+import java.util.List;
 
 /**
  * A compiler pass to run various peephole optimizations (e.g. constant folding,
@@ -27,84 +29,68 @@ import com.google.javascript.rhino.Node;
  * @author dcc@google.com (Devin Coughlin)
  */
 class PeepholeOptimizationsPass implements CompilerPass {
-  private AbstractCompiler compiler;
 
-  // Use an array here for faster iteration compared to ImmutableSet
-  private final AbstractPeepholeOptimization[] peepholeOptimizations;
-
+  private final AbstractCompiler compiler;
+  private final String passName;
+  private final List<AbstractPeepholeOptimization> peepholeOptimizations;
   private boolean retraverseOnChange;
-  private RecentChange handler;
 
-  /**
-   * Creates a peephole optimization pass that runs the given
-   * optimizations.
-   */
-  PeepholeOptimizationsPass(AbstractCompiler compiler,
-      AbstractPeepholeOptimization... optimizations) {
-    this.compiler = compiler;
-    this.peepholeOptimizations = optimizations;
-    this.retraverseOnChange = true;
-    this.handler = new RecentChange();
+  /** Creates a peephole optimization pass that runs the given optimizations. */
+  PeepholeOptimizationsPass(
+      AbstractCompiler compiler, String passName, AbstractPeepholeOptimization... optimizations) {
+    this(compiler, passName, Arrays.asList(optimizations));
   }
 
+  PeepholeOptimizationsPass(
+      AbstractCompiler compiler,
+      String passName,
+      List<AbstractPeepholeOptimization> optimizations) {
+    this.compiler = compiler;
+    this.passName = passName;
+    this.peepholeOptimizations = optimizations;
+    this.retraverseOnChange = true;
+  }
+
+  @VisibleForTesting
   void setRetraverseOnChange(boolean retraverse) {
     this.retraverseOnChange = retraverse;
   }
 
   @Override
   public void process(Node externs, Node root) {
-    compiler.addChangeHandler(handler);
     beginTraversal();
-    NodeTraversal.traverseChangedFunctions(compiler, new FunctionCallback() {
-        @Override
-        public void visit(AbstractCompiler compiler, Node root) {
-          if (root.isFunction()) {
-            root = root.getLastChild();
-          }
-          do {
-            handler.reset();
-            NodeTraversal.traverse(compiler, root, new PeepCallback());
-          } while (retraverseOnChange && handler.hasCodeChanged());
-        }
-      });
-    endTraversal();
-    compiler.removeChangeHandler(handler);
-  }
 
-  private class PeepCallback extends AbstractShallowCallback {
-    @Override
-    public void visit(NodeTraversal t, Node n, Node parent) {
-      Node currentNode = n, newNode;
-      boolean codeChanged = false;
-      do {
-        codeChanged = false;
-        for (AbstractPeepholeOptimization optim : peepholeOptimizations) {
-          newNode = optim.optimizeSubtree(currentNode);
-          if (newNode != currentNode) {
-            codeChanged = true;
-            currentNode = newNode;
-          }
-          if (currentNode == null) {
-            return;
-          }
-        }
-      } while(codeChanged);
+    // Repeat to an internal fixed point.
+    for (List<Node> changedScopeNodes = compiler.getChangedScopeNodesForPass(passName);
+        changedScopeNodes == null || !changedScopeNodes.isEmpty();
+        changedScopeNodes = compiler.getChangedScopeNodesForPass(passName)) {
+      NodeTraversal.traverseEs6ScopeRoots(
+          compiler, root, changedScopeNodes, new PeepCallback(), false);
+
+      // Cancel the fixed point if requested.
+      if (!retraverseOnChange) {
+        break;
+      }
     }
   }
 
-  /**
-   * Make sure that all the optimizations have the current traversal so they
-   * can report errors.
-   */
+  private class PeepCallback extends AbstractPostOrderCallback {
+    @Override
+    public void visit(NodeTraversal t, Node n, Node parent) {
+      Node currentNode = n;
+      for (AbstractPeepholeOptimization optim : peepholeOptimizations) {
+        currentNode = optim.optimizeSubtree(currentNode);
+        if (currentNode == null) {
+          return;
+        }
+      }
+    }
+  }
+
+  /** Make sure that all the optimizations have the current compiler so they can report errors. */
   private void beginTraversal() {
     for (AbstractPeepholeOptimization optimization : peepholeOptimizations) {
       optimization.beginTraversal(compiler);
-    }
-  }
-
-  private void endTraversal() {
-    for (AbstractPeepholeOptimization optimization : peepholeOptimizations) {
-      optimization.endTraversal(compiler);
     }
   }
 }

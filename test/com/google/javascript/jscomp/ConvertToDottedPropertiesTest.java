@@ -16,18 +16,18 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
-
 /**
  * Tests for {@link ConvertToDottedProperties}.
  *
  */
 public final class ConvertToDottedPropertiesTest extends CompilerTestCase {
-  @Override public void setUp() {
-    setAcceptedLanguage(LanguageMode.ECMASCRIPT3);
+
+  @Override
+  protected void setUp() throws Exception {
+    super.setUp();
   }
 
-  @Override public CompilerPass getProcessor(Compiler compiler) {
+  @Override protected CompilerPass getProcessor(Compiler compiler) {
     return new ConvertToDottedProperties(compiler);
   }
 
@@ -64,12 +64,16 @@ public final class ConvertToDottedPropertiesTest extends CompilerTestCase {
     testSame("a['A\u0004']");
     // upper case lower half of o from phonetic extensions set.
     // valid in Safari, not in Firefox, IE.
-    test("a['\u1d17A']", "a['\u1d17A']");
+    testSame("a['\u1d17A']");
     // Latin capital N with tilde - nice if we handled it, but for now let's
     // only allow simple Latin (aka ASCII) to be converted.
-    test("a['\u00d1StuffAfter']", "a['\u00d1StuffAfter']");
+    testSame("a['\u00d1StuffAfter']");
   }
 
+  public void testAlreadyDotted() {
+    testSame("a.b");
+    testSame("var a = {b: 0};");
+  }
 
   public void testQuotedProps() {
     testSame("({'':0})");

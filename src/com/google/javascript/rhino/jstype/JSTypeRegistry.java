@@ -39,33 +39,46 @@
 
 package com.google.javascript.rhino.jstype;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.javascript.rhino.jstype.JSTypeNative.ALL_TYPE;
 import static com.google.javascript.rhino.jstype.JSTypeNative.NO_TYPE;
 import static com.google.javascript.rhino.jstype.JSTypeNative.UNKNOWN_TYPE;
 import static com.google.javascript.rhino.jstype.JSTypeNative.VOID_TYPE;
 
+import com.google.common.annotations.GwtIncompatible;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Multimap;
 import com.google.javascript.rhino.ErrorReporter;
+import com.google.javascript.rhino.FunctionTypeI;
 import com.google.javascript.rhino.JSDocInfo;
+import com.google.javascript.rhino.JSTypeExpression;
 import com.google.javascript.rhino.Node;
+import com.google.javascript.rhino.ObjectTypeI;
 import com.google.javascript.rhino.SimpleErrorReporter;
 import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.TypeI;
+import com.google.javascript.rhino.TypeIEnv;
 import com.google.javascript.rhino.TypeIRegistry;
-import com.google.javascript.rhino.jstype.RecordTypeBuilder.RecordProperty;
-
-import java.io.Serializable;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
 
 /**
@@ -74,40 +87,29 @@ import java.util.Set;
  * <p>This class is not thread-safe.
  *
  */
-public class JSTypeRegistry implements TypeIRegistry, Serializable {
+public class JSTypeRegistry implements TypeIRegistry {
   private static final long serialVersionUID = 1L;
 
   /**
-   * The name associated with the template variable corresponding to the
-   * property key type of the built-in Javascript object.
+   * The template variable corresponding to the KEY type in {@code IObject<KEY, VALUE>}
+   * (plus the builtin Javascript Object).
    */
-  private static final String OBJECT_INDEX_TEMPLATE = "Object#Key";
-
-  private TemplateType objectIndexTemplateKey;
+  private TemplateType iObjectIndexTemplateKey;
 
   /**
-   * The name associated with the template variable corresponding to the
-   * property value type for Javascript Objects and Arrays.
+   * The template variable corresponding to the VALUE type in {@code IObject<KEY, VALUE>}
+   * (plus the builtin Javascript Object).
    */
-  public static final String OBJECT_ELEMENT_TEMPLATE = "Object#Element";
-
-  private TemplateType objectElementTemplateKey;
+  private TemplateType iObjectElementTemplateKey;
+  private static final String I_OBJECT_ELEMENT_TEMPLATE = "IObject#VALUE";
 
   /**
-   * The name associated with the template variable corresponding to the
-   * property key type for IObject<KEY, VALUE>.
+   * The template variable in {@code Array<T>}
    */
-  private static final String I_OBJECT_KEY_TEMPLATE = "IObject#KEY1";
+  private TemplateType arrayElementTemplateKey;
 
-  private TemplateType iobjectKeyTemplateKey;
-
-  /**
-   * The name associated with the template variable corresponding to the
-   * property value type for IObject<KEY, VALUE>.
-   */
-  public static final String I_OBJECT_VALUE_TEMPLATE = "IObject#VALUE1";
-
-  private TemplateType iobjectValueTemplateKey;
+  @Deprecated
+  public static final String OBJECT_ELEMENT_TEMPLATE = I_OBJECT_ELEMENT_TEMPLATE;
 
   /**
    * The UnionTypeBuilder caps the maximum number of alternate types it
@@ -145,23 +147,39 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
   // undecidable territory. Instead, we "pre-declare" enum types and typedefs,
   // so that the expression resolver can decide whether a given name is
   // nullable or not.
-  private final Set<String> nonNullableTypeNames = new HashSet<>();
+  private final Set<String> nonNullableTypeNames = new LinkedHashSet<>();
 
   // Types that have been "forward-declared."
   // If these types are not declared anywhere in the binary, we shouldn't
   // try to type-check them at all.
-  private final Set<String> forwardDeclaredTypes = new HashSet<>();
+  private final transient Set<String> forwardDeclaredTypes;
 
   // A map of properties to the types on which those properties have been
   // declared.
   private final Map<String, UnionTypeBuilder> typesIndexedByProperty =
        new HashMap<>();
 
+  private JSType sentinelObjectLiteral;
+
+  // To avoid blowing up the size of typesIndexedByProperty, we use the sentinel object
+  // literal instead of registering arbitrarily many types.
+  // But because of the way unions are constructed, some properties of record types in unions
+  // are getting dropped and cause spurious "non-existent property" warnings.
+  // The next two fields avoid the warnings. The first field contains property names of records
+  // that participate in unions, and have caused properties to be dropped.
+  // The second field contains the names of the dropped properties. When checking
+  // canPropertyBeDefined, if the type has a property in propertiesOfSupertypesInUnions, we
+  // consider it to possibly have any property in droppedPropertiesOfUnions. This is a loose
+  // check, but we restrict it to records that may be present in unions, and it allows us to
+  // keep typesIndexedByProperty small.
+  private final Set<String> propertiesOfSupertypesInUnions = new HashSet<>();
+  private final Set<String> droppedPropertiesOfUnions = new HashSet<>();
+
   // A map of properties to each reference type on which those
   // properties have been declared. Each type has a unique name used
   // for de-duping.
-  private final Map<String, Map<String, ObjectType>>
-      eachRefTypeIndexedByProperty = new HashMap<>();
+  private transient Map<String, Map<String, ObjectType>> eachRefTypeIndexedByProperty =
+      new LinkedHashMap<>();
 
   // A map of properties to the greatest subtype on which those properties have
   // been declared. This is filled lazily from the types declared in
@@ -170,7 +188,7 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
        new HashMap<>();
 
   // A map from interface name to types that implement it.
-  private final Multimap<String, FunctionType> interfaceToImplementors =
+  private transient Multimap<String, FunctionTypeI> interfaceToImplementors =
       LinkedHashMultimap.create();
 
   // All the unresolved named types.
@@ -181,9 +199,6 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
   private final Multimap<StaticTypedScope<JSType>, NamedType> resolvedNamedTypes =
       ArrayListMultimap.create();
 
-  // NamedType warns about unresolved types in the last generation.
-  private boolean lastGeneration = true;
-
   // The template type name.
   private final Map<String, TemplateType> templateTypes = new HashMap<>();
 
@@ -191,17 +206,14 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
   // there are no template types.
   private final TemplateTypeMap emptyTemplateTypeMap;
 
-  // string names used in JSDoc declaration for IObject
-  private static final String I_OBJECT_INTERFACE_NAME = "IObject";
-  private static final String I_OBJECT_KEY_NAME = "KEY1";
-  private static final String I_OBJECT_VALUE_NAME = "VALUE1";
+  public JSTypeRegistry(ErrorReporter reporter) {
+    this(reporter, ImmutableSet.<String>of());
+  }
 
-  /**
-   * Constructs a new type registry populated with the built-in types.
-   */
-  public JSTypeRegistry(
-      ErrorReporter reporter) {
+  /** Constructs a new type registry populated with the built-in types. */
+  public JSTypeRegistry(ErrorReporter reporter, Set<String> forwardDeclaredTypes) {
     this.reporter = reporter;
+    this.forwardDeclaredTypes = forwardDeclaredTypes;
     this.emptyTemplateTypeMap = new TemplateTypeMap(
         this, ImmutableList.<TemplateType>of(), ImmutableList.<JSType>of());
     nativeTypes = new JSType[JSTypeNative.values().length];
@@ -209,12 +221,19 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
     resetForTypeCheck();
   }
 
+  private JSType getSentinelObjectLiteral() {
+    if (this.sentinelObjectLiteral == null) {
+      this.sentinelObjectLiteral = createAnonymousObjectType(null);
+    }
+    return this.sentinelObjectLiteral;
+  }
+
   /**
    * @return The template variable corresponding to the property value type for
    * Javascript Objects and Arrays.
    */
   public TemplateType getObjectElementKey() {
-    return this.objectElementTemplateKey;
+    return this.iObjectElementTemplateKey;
   }
 
   /**
@@ -222,99 +241,35 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
    * property key type of the built-in Javascript object.
    */
   public TemplateType getObjectIndexKey() {
-    Preconditions.checkNotNull(objectIndexTemplateKey);
-    return this.objectIndexTemplateKey;
+    checkNotNull(iObjectIndexTemplateKey);
+    return this.iObjectIndexTemplateKey;
   }
 
   /**
-   * check if FunName<TEMP1, TEMP2...> matches IObject<..., VALUE1...>
-   * @param fnName is the function's name
-   * @param templateParamName is the name of the
-   * second template parameter in JSDoc
-   * @return true if matches, otherwise return false
-   */
-  public boolean isIObjectValueKey(String fnName, String templateParamName) {
-    return I_OBJECT_INTERFACE_NAME.equals(fnName)
-        && I_OBJECT_VALUE_NAME.equals(templateParamName);
-  }
-
-  /**
-   * @return The template variable corresponding to the property value type for
-   * <VALUE> in IObject<KEY, VALUE>.
-   */
-  public TemplateType getIObjectValueKey() {
-    return iobjectValueTemplateKey;
-  }
-
-  /**
-   * check if FunName<TEMP1, ...> matches IObject<KEY1, ...>
-   * @param fnName is the function's name
-   * @param templateParamName is the name of the
-   * first template parameter in JSDoc
-   * @return true if matches, otherwise return false
-   */
-  public boolean isIObjectKeyKey(String fnName, String templateParamName) {
-    return I_OBJECT_INTERFACE_NAME.equals(fnName)
-        && I_OBJECT_KEY_NAME.equals(templateParamName);
-  }
-
-  /**
-   * @return The template variable corresponding to the
-   * property key type of the IObject<KEY, VALUE> interface.
-   */
-  public TemplateType getIObjectKeyKey() {
-    Preconditions.checkNotNull(iobjectKeyTemplateKey);
-    return iobjectKeyTemplateKey;
-  }
-
-  /**
-   * check if a function declaration is the IObject interface
+   * Check if a function declaration is one of the templated builitin contructor/interfaces,
+   *   namely one of IObject, IArrayLike, or Array
    * @param fnName the function's name
    * @param info the JSDoc from the function declaration
-   * @return true if it is, otherwise false
    */
-  public boolean isIObject(String fnName, JSDocInfo info) {
-    if (!I_OBJECT_INTERFACE_NAME.equals(fnName)) {
-      return false;
-    }
+  public boolean isTemplatedBuiltin(String fnName, JSDocInfo info) {
+    ImmutableList<TemplateType> requiredTemplateTypes = getTemplateTypesOfBuiltin(fnName);
     ImmutableList<String> infoTemplateTypeNames = info.getTemplateTypeNames();
-    if (infoTemplateTypeNames.isEmpty() || infoTemplateTypeNames.size() != 2) {
-      return false;
-    }
-    if (!isIObjectKeyKey(fnName, infoTemplateTypeNames.get(0))
-        || !isIObjectValueKey(fnName, infoTemplateTypeNames.get(1))) {
-      return false;
-    }
-
-    return true;
+    return requiredTemplateTypes != null
+        && infoTemplateTypeNames.size() == requiredTemplateTypes.size();
   }
 
   /**
-   * check if an object type is an instance of a function that
-   * implements the IObject interface
-   * @param type the object instance type
-   * @return true if it is, otherwise false
+   * @return return an immutable list of template types of the given builtin.
    */
-  public boolean isInstanceOfIObject(JSType type) {
-    Preconditions.checkNotNull(type);
-    TemplateTypeMap typeMap = type.getTemplateTypeMap();
-    if (typeMap == null) {
-      return false;
+  public ImmutableList<TemplateType> getTemplateTypesOfBuiltin(String fnName) {
+    switch (fnName) {
+      case "IObject":
+        return ImmutableList.of(iObjectIndexTemplateKey, iObjectElementTemplateKey);
+      case "Array":
+        return ImmutableList.of(arrayElementTemplateKey);
+      default:
+        return null;
     }
-    // check the template key for IObject
-    return typeMap.hasTemplateType(getIObjectKeyKey());
-  }
-
-  /**
-   * @return return an immutable list of template types of IObject,
-   * i.e., [KEY1, VALUE1]
-   */
-  public ImmutableList<TemplateType> getIObjectTemplateTypeNames() {
-    ImmutableList.Builder<TemplateType> builder = ImmutableList.builder();
-    builder.add(getIObjectKeyKey());
-    builder.add(getIObjectValueKey());
-    ImmutableList<TemplateType> templateTypeNames = builder.build();
-    return templateTypeNames;
   }
 
   public ErrorReporter getErrorReporter() {
@@ -333,11 +288,6 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
   }
 
   private void initializeBuiltInTypes() {
-    objectIndexTemplateKey = new TemplateType(this, OBJECT_INDEX_TEMPLATE);
-    objectElementTemplateKey = new TemplateType(this, OBJECT_ELEMENT_TEMPLATE);
-    iobjectKeyTemplateKey = new TemplateType(this, I_OBJECT_KEY_TEMPLATE);
-    iobjectValueTemplateKey = new TemplateType(this, I_OBJECT_VALUE_TEMPLATE);
-
     // These locals shouldn't be all caps.
     BooleanType BOOLEAN_TYPE = new BooleanType(this);
     registerNativeType(JSTypeNative.BOOLEAN_TYPE, BOOLEAN_TYPE);
@@ -363,6 +313,11 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
     AllType ALL_TYPE = new AllType(this);
     registerNativeType(JSTypeNative.ALL_TYPE, ALL_TYPE);
 
+    // Template Types
+    iObjectIndexTemplateKey = new TemplateType(this, "IObject#KEY1");
+    iObjectElementTemplateKey = new TemplateType(this, I_OBJECT_ELEMENT_TEMPLATE);
+    arrayElementTemplateKey = new TemplateType(this, "T");
+
     // Top Level Prototype (the One)
     // The initializations of TOP_LEVEL_PROTOTYPE and OBJECT_FUNCTION_TYPE
     // use each other's results, so at least one of them will get null
@@ -373,12 +328,17 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
 
     // Object
     FunctionType OBJECT_FUNCTION_TYPE =
-        new FunctionType(this, "Object", null,
+        new FunctionType(
+            this,
+            "Object",
+            null,
             createArrowType(createOptionalParameters(ALL_TYPE), null),
             null,
-            createTemplateTypeMap(ImmutableList.of(
-                objectIndexTemplateKey, objectElementTemplateKey), null),
-            true, true);
+            createTemplateTypeMap(
+                ImmutableList.of(iObjectIndexTemplateKey, iObjectElementTemplateKey), null),
+            true,
+            true,
+            false);
     OBJECT_FUNCTION_TYPE.getInternalArrowType().returnType =
         OBJECT_FUNCTION_TYPE.getInstanceType();
 
@@ -393,10 +353,16 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
 
     // Function
     FunctionType FUNCTION_FUNCTION_TYPE =
-        new FunctionType(this, "Function", null,
-            createArrowType(
-                createParametersWithVarArgs(ALL_TYPE), UNKNOWN_TYPE),
-            null, null, true, true);
+        new FunctionType(
+            this,
+            "Function",
+            null,
+            createArrowType(createParametersWithVarArgs(ALL_TYPE), UNKNOWN_TYPE),
+            null,
+            null,
+            true,
+            true,
+            false);
     FUNCTION_FUNCTION_TYPE.setPrototypeBasedOn(OBJECT_TYPE);
     registerNativeType(
         JSTypeNative.FUNCTION_FUNCTION_TYPE, FUNCTION_FUNCTION_TYPE);
@@ -415,12 +381,20 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
 
     // Array
     FunctionType ARRAY_FUNCTION_TYPE =
-      new FunctionType(this, "Array", null,
-          createArrowType(createParametersWithVarArgs(ALL_TYPE), null),
-          null,
-          createTemplateTypeMap(ImmutableList.of(
-              objectElementTemplateKey), null),
-          true, true);
+        new FunctionType(
+            this,
+            "Array",
+            null,
+            createArrowType(createParametersWithVarArgs(ALL_TYPE), null),
+            null,
+            createTemplateTypeMap(ImmutableList.of(arrayElementTemplateKey), null)
+                .extend(
+                    createTemplateTypeMap(
+                        ImmutableList.of(iObjectElementTemplateKey),
+                        ImmutableList.<JSType>of(arrayElementTemplateKey))),
+            true,
+            true,
+            false);
     ARRAY_FUNCTION_TYPE.getInternalArrowType().returnType =
         ARRAY_FUNCTION_TYPE.getInstanceType();
 
@@ -432,9 +406,16 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
 
     // Boolean
     FunctionType BOOLEAN_OBJECT_FUNCTION_TYPE =
-        new FunctionType(this, "Boolean", null,
+        new FunctionType(
+            this,
+            "Boolean",
+            null,
             createArrowType(createOptionalParameters(ALL_TYPE), BOOLEAN_TYPE),
-            null, null, true, true);
+            null,
+            null,
+            true,
+            true,
+            false);
     BOOLEAN_OBJECT_FUNCTION_TYPE.getPrototype(); // Force initialization
     registerNativeType(
         JSTypeNative.BOOLEAN_OBJECT_FUNCTION_TYPE,
@@ -446,12 +427,25 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
 
     // Date
     FunctionType DATE_FUNCTION_TYPE =
-      new FunctionType(this, "Date", null,
-          createArrowType(
-              createOptionalParameters(UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE,
-                  UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE, UNKNOWN_TYPE),
-              STRING_TYPE),
-          null, null, true, true);
+        new FunctionType(
+            this,
+            "Date",
+            null,
+            createArrowType(
+                createOptionalParameters(
+                    UNKNOWN_TYPE,
+                    UNKNOWN_TYPE,
+                    UNKNOWN_TYPE,
+                    UNKNOWN_TYPE,
+                    UNKNOWN_TYPE,
+                    UNKNOWN_TYPE,
+                    UNKNOWN_TYPE),
+                STRING_TYPE),
+            null,
+            null,
+            true,
+            true,
+            false);
     DATE_FUNCTION_TYPE.getPrototype(); // Force initialization
     registerNativeType(JSTypeNative.DATE_FUNCTION_TYPE, DATE_FUNCTION_TYPE);
 
@@ -529,9 +523,16 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
 
     // Number
     FunctionType NUMBER_OBJECT_FUNCTION_TYPE =
-        new FunctionType(this, "Number", null,
+        new FunctionType(
+            this,
+            "Number",
+            null,
             createArrowType(createOptionalParameters(ALL_TYPE), NUMBER_TYPE),
-            null, null, true, true);
+            null,
+            null,
+            true,
+            true,
+            false);
     NUMBER_OBJECT_FUNCTION_TYPE.getPrototype(); // Force initialization
     registerNativeType(
         JSTypeNative.NUMBER_OBJECT_FUNCTION_TYPE, NUMBER_OBJECT_FUNCTION_TYPE);
@@ -542,9 +543,16 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
 
     // RegExp
     FunctionType REGEXP_FUNCTION_TYPE =
-      new FunctionType(this, "RegExp", null,
-          createArrowType(createOptionalParameters(ALL_TYPE, ALL_TYPE)),
-          null, null, true, true);
+        new FunctionType(
+            this,
+            "RegExp",
+            null,
+            createArrowType(createOptionalParameters(ALL_TYPE, ALL_TYPE)),
+            null,
+            null,
+            true,
+            true,
+            false);
     REGEXP_FUNCTION_TYPE.getInternalArrowType().returnType =
         REGEXP_FUNCTION_TYPE.getInstanceType();
 
@@ -556,9 +564,16 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
 
     // String
     FunctionType STRING_OBJECT_FUNCTION_TYPE =
-        new FunctionType(this, "String", null,
+        new FunctionType(
+            this,
+            "String",
+            null,
             createArrowType(createOptionalParameters(ALL_TYPE), STRING_TYPE),
-            null, null, true, true);
+            null,
+            null,
+            true,
+            true,
+            false);
     STRING_OBJECT_FUNCTION_TYPE.getPrototype(); // Force initialization
     registerNativeType(
         JSTypeNative.STRING_OBJECT_FUNCTION_TYPE, STRING_OBJECT_FUNCTION_TYPE);
@@ -620,16 +635,21 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
         // createConstructorType(UNKNOWN_TYPE, true, UNKNOWN_TYPE), but,
         // in addition, overrides getInstanceType() to return the NoObject type
         // instead of a new anonymous object.
-        new FunctionType(this, "Function", null,
-            createArrowType(
-                createParametersWithVarArgs(UNKNOWN_TYPE),
-                UNKNOWN_TYPE),
-            UNKNOWN_TYPE, null, true, true) {
+        new FunctionType(
+            this,
+            "Function",
+            null,
+            createArrowType(createParametersWithVarArgs(UNKNOWN_TYPE), UNKNOWN_TYPE),
+            UNKNOWN_TYPE,
+            null,
+            true,
+            true,
+            false) {
           private static final long serialVersionUID = 1L;
 
-          @Override public FunctionType getConstructor() {
-            return registry.getNativeFunctionType(
-                JSTypeNative.FUNCTION_FUNCTION_TYPE);
+          @Override
+          public FunctionType getConstructor() {
+            return registry.getNativeFunctionType(JSTypeNative.FUNCTION_FUNCTION_TYPE);
           }
         };
 
@@ -649,9 +669,16 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
 
     // the 'this' object in the global scope
     FunctionType GLOBAL_THIS_CTOR =
-        new FunctionType(this, "global this", null,
+        new FunctionType(
+            this,
+            "global this",
+            null,
             createArrowType(createParameters(false, ALL_TYPE), NUMBER_TYPE),
-            null, null, true, true);
+            null,
+            null,
+            true,
+            true,
+            false);
     ObjectType GLOBAL_THIS = GLOBAL_THIS_CTOR.getInstanceType();
     registerNativeType(JSTypeNative.GLOBAL_THIS, GLOBAL_THIS);
 
@@ -697,13 +724,33 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
   }
 
   private void register(JSType type, String name) {
-    Preconditions.checkArgument(
-        !name.contains("<"), "Type names cannot contain template annotations.");
+    checkArgument(!name.contains("<"), "Type names cannot contain template annotations.");
     namesToTypes.put(name, type);
   }
 
   private void registerNativeType(JSTypeNative typeId, JSType type) {
     nativeTypes[typeId.ordinal()] = type;
+  }
+
+  // When t is an object that is not the prototype of some class,
+  // and its nominal type is Object, and it has some properties,
+  // we don't need to store these properties in the propertyIndex separately.
+  private static boolean isObjectLiteralThatCanBeSkipped(JSType t) {
+    t = t.restrictByNotNullOrUndefined();
+    return t.isRecordType() || t.isLiteralObject();
+  }
+
+  void registerDroppedPropertiesInUnion(RecordType subtype, RecordType supertype) {
+    boolean foundDroppedProperty = false;
+    for (String pname : subtype.getPropertyMap().getOwnPropertyNames()) {
+      if (!supertype.hasProperty(pname)) {
+        foundDroppedProperty = true;
+        this.droppedPropertiesOfUnions.add(pname);
+      }
+    }
+    if (foundDroppedProperty) {
+      this.propertiesOfSupertypesInUnions.addAll(supertype.getPropertyMap().getOwnPropertyNames());
+    }
   }
 
   /**
@@ -725,6 +772,10 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
       typesIndexedByProperty.put(propertyName, typeSet);
     }
 
+    if (isObjectLiteralThatCanBeSkipped(type)) {
+      type = getSentinelObjectLiteral();
+    }
+
     typeSet.addAlternate(type);
     addReferenceTypeIndexedByProperty(propertyName, type);
 
@@ -738,7 +789,7 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
       Map<String, ObjectType> typeSet =
           eachRefTypeIndexedByProperty.get(propertyName);
       if (typeSet == null) {
-        typeSet = new HashMap<>();
+        typeSet = new LinkedHashMap<>();
         eachRefTypeIndexedByProperty.put(propertyName, typeSet);
       }
       ObjectType objType = (ObjectType) type;
@@ -776,32 +827,42 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
    */
   public JSType getGreatestSubtypeWithProperty(
       JSType type, String propertyName) {
-    if (greatestSubtypeByProperty.containsKey(propertyName)) {
-      return greatestSubtypeByProperty.get(propertyName)
-          .getGreatestSubtype(type);
+    JSType withProperty = greatestSubtypeByProperty.get(propertyName);
+    if (withProperty != null) {
+      return withProperty.getGreatestSubtype(type);
     }
-    if (typesIndexedByProperty.containsKey(propertyName)) {
-      JSType built = typesIndexedByProperty.get(propertyName).build();
+    UnionTypeBuilder typesWithProp = typesIndexedByProperty.get(propertyName);
+    if (typesWithProp != null) {
+      JSType built = typesWithProp.build();
       greatestSubtypeByProperty.put(propertyName, built);
       return built.getGreatestSubtype(type);
     }
     return getNativeType(NO_TYPE);
   }
 
+  /** A tristate value returned from canPropertyBeDefined. */
+  public enum PropDefinitionKind {
+    UNKNOWN, // The property is not known to be part of this type
+    KNOWN,  // The properties is known to be defined on a type or its super types
+    LOOSE    // The property is loosely associated with a type, typically one of its subtypes
+  }
+
   /**
    * Returns whether the given property can possibly be set on the given type.
    */
-  public boolean canPropertyBeDefined(JSType type, String propertyName) {
+  public PropDefinitionKind canPropertyBeDefined(JSType type, String propertyName) {
     if (type.isStruct()) {
       // We are stricter about "struct" types and only allow access to
       // properties that to the best of our knowledge are available at creation
       // time and specifically not properties only defined on subtypes.
-      return type.hasProperty(propertyName);
+      return type.hasProperty(propertyName)
+          ? PropDefinitionKind.KNOWN : PropDefinitionKind.UNKNOWN;
     } else {
       if (!type.isEmptyType() && !type.isUnknownType()
           && type.hasProperty(propertyName)) {
-        return true;
+        return PropDefinitionKind.KNOWN;
       }
+
       if (typesIndexedByProperty.containsKey(propertyName)) {
         for (JSType alt :
                  typesIndexedByProperty.get(propertyName).getAlternates()) {
@@ -814,12 +875,27 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
               continue;
             }
 
-            return true;
+            return PropDefinitionKind.LOOSE;
           }
         }
       }
+
+      if (type.toMaybeRecordType() != null) {
+        RecordType rec = type.toMaybeRecordType();
+        boolean mayBeInUnion = false;
+        for (String pname : rec.getPropertyMap().getOwnPropertyNames()) {
+          if (this.propertiesOfSupertypesInUnions.contains(pname)) {
+            mayBeInUnion = true;
+            break;
+          }
+        }
+
+        if (mayBeInUnion && this.droppedPropertiesOfUnions.contains(propertyName)) {
+          return PropDefinitionKind.LOOSE;
+        }
+      }
     }
-    return false;
+    return PropDefinitionKind.UNKNOWN;
   }
 
   /**
@@ -871,18 +947,6 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
     return stack;
   }
 
-  boolean isLastGeneration() {
-    return lastGeneration;
-  }
-
-  /**
-   * Sets whether this is the last generation. In the last generation,
-   * {@link NamedType} warns about unresolved types.
-   */
-  public void setLastGeneration(boolean lastGeneration) {
-    this.lastGeneration = lastGeneration;
-  }
-
   /**
    * Tells the type system that {@code type} implements interface {@code
    * interfaceInstance}.
@@ -900,8 +964,7 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
    * be returned.  {@code interfaceInstance} must be an ObjectType for the
    * instance of the interface.
    */
-  public Collection<FunctionType> getDirectImplementors(
-      ObjectType interfaceInstance) {
+  public Collection<FunctionTypeI> getDirectImplementors(ObjectType interfaceInstance) {
     return interfaceToImplementors.get(interfaceInstance.getReferenceName());
   }
 
@@ -926,16 +989,8 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
    * type name hasn't been declared yet.
    */
   public void overwriteDeclaredType(String name, JSType t) {
-    Preconditions.checkState(namesToTypes.containsKey(name));
+    checkState(namesToTypes.containsKey(name));
     register(t, name);
-  }
-
-  /**
-   * Records a forward-declared type name. We will not emit errors if this
-   * type name never resolves to anything.
-   */
-  public void forwardDeclareType(String name) {
-    forwardDeclaredTypes.add(name);
   }
 
   /**
@@ -961,6 +1016,54 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
     return getReadableJSTypeName(n, false);
   }
 
+  @Override
+  public String createGetterPropName(String originalPropName) {
+    return originalPropName;
+  }
+
+  @Override
+  public String createSetterPropName(String originalPropName) {
+    return originalPropName;
+  }
+
+  private String getSimpleReadableJSTypeName(JSType type) {
+    if (type instanceof ValueType) {
+      return type.toString();
+    } else if (type.isFunctionPrototypeType()) {
+      return type.toString();
+    } else if (type instanceof ObjectType) {
+      if (type.toObjectType() != null && type.toObjectType().getConstructor() != null) {
+        Node source = type.toObjectType().getConstructor().getSource();
+        if (source != null) {
+          checkState(source.isFunction(), source);
+          String readable = source.getFirstChild().getOriginalName();
+          if (readable != null) {
+            return readable;
+          }
+        }
+        return type.toString();
+      }
+      return null;
+    } else if (type instanceof UnionType) {
+      UnionType unionType = type.toMaybeUnionType();
+      String union = null;
+      for (JSType alternate : unionType.getAlternates()) {
+        String name = getSimpleReadableJSTypeName(alternate);
+        if (name == null) {
+          return null;
+        }
+        if (union == null) {
+          union = "(" + name;
+        } else {
+          union += "|" + name;
+        }
+      }
+      union += ")";
+      return union;
+    }
+    return null;
+  }
+
   /**
    * Given a node, get a human-readable name for the type of that node so
    * that will be easy for the programmer to find the original declaration.
@@ -972,20 +1075,19 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
    * @param dereference If true, the type of the node will be dereferenced
    *     to an Object type, if possible.
    */
-  private String getReadableJSTypeName(Node n, boolean dereference) {
+  @VisibleForTesting
+  String getReadableJSTypeName(Node n, boolean dereference) {
     JSType type = getJSTypeOrUnknown(n);
     if (dereference) {
-      ObjectType dereferenced = type.dereference();
-      if (dereferenced != null) {
-        type = dereferenced;
+      JSType autoboxed = type.autobox();
+      if (autoboxed != getNativeType(JSTypeNative.NO_TYPE)) {
+        type = autoboxed;
       }
     }
 
-    // The best type name is the actual type name.
-    if (type.isFunctionPrototypeType()
-        || (type.toObjectType() != null
-            && type.toObjectType().getConstructor() != null)) {
-      return type.toString();
+    String name = getSimpleReadableJSTypeName(type);
+    if (name != null) {
+      return name;
     }
 
     // If we're analyzing a GETPROP, the property may be inherited by the
@@ -997,8 +1099,7 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
         String propName = n.getLastChild().getString();
         if (objectType.getConstructor() != null
             && objectType.getConstructor().isInterface()) {
-          objectType = FunctionType.getTopDefiningInterface(
-              objectType, propName);
+          objectType = objectType.getTopDefiningInterface(propName);
         } else {
           // classes
           while (objectType != null && !objectType.hasOwnProperty(propName)) {
@@ -1036,11 +1137,22 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
   }
 
   /**
-   * Looks up a type by name.
+   * Removes a type by name.
+   *
+   * @param jsTypeName The name string.
+   */
+  public void removeType(String jsTypeName) {
+    namesToTypes.remove(jsTypeName);
+  }
+
+  /**
+   * Looks up a native type by name.
    *
    * @param jsTypeName The name string.
    * @return the corresponding JSType object or {@code null} it cannot be found
    */
+  // Unchecked conversion of the return type, from JSType to TypeI.
+  @SuppressWarnings("unchecked")
   @Override
   public JSType getType(String jsTypeName) {
     // TODO(user): Push every local type name out of namesToTypes so that
@@ -1052,35 +1164,38 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
     return namesToTypes.get(jsTypeName);
   }
 
-  @Override
-  public JSType getNativeType(JSTypeNative typeId) {
-    return nativeTypes[typeId.ordinal()];
-  }
-
-  @Override
-  public ObjectType getNativeObjectType(JSTypeNative typeId) {
-    return (ObjectType) getNativeType(typeId);
-  }
-
-  @Override
-  public FunctionType getNativeFunctionType(JSTypeNative typeId) {
-    return (FunctionType) getNativeType(typeId);
-  }
-
   /**
-   * Looks up a type by name. To allow for forward references to types, an
-   * unrecognized string has to be bound to a NamedType object that will be
-   * resolved later.
+   * Looks up a type by name. To allow for forward references to types, an unrecognized string has
+   * to be bound to a NamedType object that will be resolved later.
    *
    * @param scope A scope for doing type name resolution.
    * @param jsTypeName The name string.
    * @param sourceName The name of the source file where this reference appears.
    * @param lineno The line number of the reference.
-   * @return a NamedType if the string argument is not one of the known types,
-   *     otherwise the corresponding JSType object.
+   * @return a NamedType if the string argument is not one of the known types, otherwise the
+   *     corresponding JSType object.
    */
-  public JSType getType(StaticTypedScope<JSType> scope, String jsTypeName,
-      String sourceName, int lineno, int charno) {
+  public JSType getType(
+      StaticTypedScope<JSType> scope,
+      String jsTypeName,
+      String sourceName,
+      int lineno,
+      int charno) {
+    return getType(scope, jsTypeName, sourceName, lineno, charno, true);
+  }
+
+  /**
+   * @param recordUnresolvedTypes record unresolved named types and resolve them later. Set to false
+   *     if types should be ignored for backwards compatibility (i.e. previously unparsed template
+   *     type args).
+   */
+  private JSType getType(
+      StaticTypedScope<JSType> scope,
+      String jsTypeName,
+      String sourceName,
+      int lineno,
+      int charno,
+      boolean recordUnresolvedTypes) {
     switch (jsTypeName) {
       case "boolean":
         return getNativeType(JSTypeNative.BOOLEAN_TYPE);
@@ -1111,10 +1226,30 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
       // TODO(user): Each instance should support named type creation using
       // interning.
       NamedType namedType = createNamedType(jsTypeName, sourceName, lineno, charno);
-      unresolvedNamedTypes.put(scope, namedType);
+      if (recordUnresolvedTypes) {
+        unresolvedNamedTypes.put(scope, namedType);
+      }
       type = namedType;
     }
     return type;
+  }
+
+  @SuppressWarnings("unchecked")
+  @Override
+  public JSType getNativeType(JSTypeNative typeId) {
+    return nativeTypes[typeId.ordinal()];
+  }
+
+  @SuppressWarnings("unchecked")
+  @Override
+  public ObjectType getNativeObjectType(JSTypeNative typeId) {
+    return (ObjectType) getNativeType(typeId);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Override
+  public FunctionType getNativeFunctionType(JSTypeNative typeId) {
+    return (FunctionType) getNativeType(typeId);
   }
 
   /**
@@ -1154,6 +1289,11 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
         }
       }
     }
+  }
+
+  @Override
+  public JSType evaluateTypeExpressionInGlobalScope(JSTypeExpression expr) {
+    return expr.evaluate(null, this);
   }
 
   /**
@@ -1210,6 +1350,11 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
     return builder.build();
   }
 
+  @Override
+  public JSType createUnionType(List<? extends TypeI> variants) {
+    return createUnionType(variants.toArray(new JSType[0]));
+  }
+
   /**
    * Creates a union type whose variants are the built-in types specified
    * by the arguments.
@@ -1264,6 +1409,16 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
   }
 
   /**
+   * @param parameters the function's parameters or {@code null} to indicate that the parameter
+   *     types are unknown.
+   * @param returnType the function's return type or {@code null} to indicate that the return type
+   *     is unknown.
+   */
+  public FunctionType createFunctionType(JSType returnType, Node parameters) {
+    return new FunctionBuilder(this).withParamsNode(parameters).withReturnType(returnType).build();
+  }
+
+  /**
    * Creates a function type. The last parameter type of the function is
    * considered a variable length argument.
    *
@@ -1290,20 +1445,6 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
   }
 
   /**
-   * Creates a function type which can act as a constructor. The last
-   * parameter type of the constructor is considered a variable length argument.
-   *
-   * @param returnType the function's return type
-   * @param parameterTypes the parameters' types
-   */
-  private FunctionType createConstructorTypeWithVarArgs(
-      JSType returnType, JSType... parameterTypes) {
-    return createConstructorType(
-        null, null, createParametersWithVarArgs(parameterTypes), returnType,
-        null);
-  }
-
-  /**
    * Creates a function type in which {@code this} refers to an object instance.
    *
    * @param instanceType the type of {@code this}
@@ -1321,19 +1462,6 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
   }
 
   /**
-   * Creates a tree hierarchy representing a typed argument list. The last
-   * parameter type is considered a variable length argument.
-   *
-   * @param parameterTypes the parameter types. The last element of this array
-   *     is considered a variable length argument.
-   * @return a tree hierarchy representing a typed argument list.
-   */
-  public Node createParametersWithVarArgs(List<JSType> parameterTypes) {
-    return createParametersWithVarArgs(
-        parameterTypes.toArray(new JSType[parameterTypes.size()]));
-  }
-
-  /**
    * Creates a tree hierarchy representing a typed argument list.
    *
    * @param parameterTypes the parameter types.
@@ -1341,6 +1469,27 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
    */
   public Node createParameters(JSType... parameterTypes) {
     return createParameters(false, parameterTypes);
+  }
+
+  /**
+   * Creates a tree hierarchy representing a typed argument list.
+   *
+   * @param lastVarArgs whether the last type should considered as a variable length argument.
+   * @param parameterTypes the parameter types. The last element of this array is considered a
+   *     variable length argument is {@code lastVarArgs} is {@code true}.
+   * @return a tree hierarchy representing a typed argument list
+   */
+  private Node createParameters(boolean lastVarArgs, JSType... parameterTypes) {
+    FunctionParamBuilder builder = new FunctionParamBuilder(this);
+    int max = parameterTypes.length - 1;
+    for (int i = 0; i <= max; i++) {
+      if (lastVarArgs && i == max) {
+        builder.addVarArgs(parameterTypes[i]);
+      } else {
+        builder.addRequiredParams(parameterTypes[i]);
+      }
+    }
+    return builder.build();
   }
 
   /**
@@ -1366,29 +1515,6 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
   }
 
   /**
-   * Creates a tree hierarchy representing a typed argument list.
-   *
-   * @param lastVarArgs whether the last type should considered as a variable
-   *     length argument.
-   * @param parameterTypes the parameter types. The last element of this array
-   *     is considered a variable length argument is {@code lastVarArgs} is
-   *     {@code true}.
-   * @return a tree hierarchy representing a typed argument list
-   */
-  private Node createParameters(boolean lastVarArgs, JSType... parameterTypes) {
-    FunctionParamBuilder builder = new FunctionParamBuilder(this);
-    int max = parameterTypes.length - 1;
-    for (int i = 0; i <= max; i++) {
-      if (lastVarArgs && i == max) {
-        builder.addVarArgs(parameterTypes[i]);
-      } else {
-        builder.addRequiredParams(parameterTypes[i]);
-      }
-    }
-    return builder.build();
-  }
-
-  /**
    * Creates a new function type based on an existing function type but
    * with a new return type.
    * @param existingFunctionType the existing function type.
@@ -1402,20 +1528,6 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
         .build();
   }
 
-  /**
-   * @param parameters the function's parameters or {@code null}
-   *        to indicate that the parameter types are unknown.
-   * @param returnType the function's return type or {@code null} to indicate
-   *        that the return type is unknown.
-   */
-  public FunctionType createFunctionType(
-      JSType returnType, Node parameters) {
-    return new FunctionBuilder(this)
-        .withParamsNode(parameters)
-        .withReturnType(returnType)
-        .build();
-  }
-
   private FunctionType createNativeFunctionType(
       JSType returnType, Node parameters) {
     return new FunctionBuilder(this)
@@ -1425,11 +1537,37 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
         .build();
   }
 
-  /**
-   * Creates a record type.
-   */
-  public RecordType createRecordType(Map<String, RecordProperty> properties) {
-    return new RecordType(this, properties);
+  @Override
+  public JSType buildRecordTypeFromObject(ObjectTypeI obj) {
+    ObjectType objType = (ObjectType) obj;
+    RecordType recType = objType.toMaybeRecordType();
+    // If it can be casted to a record type then return
+    if (recType != null) {
+      return recType;
+    }
+    // TODO(lpino): Handle inherited properties
+    Set<String> propNames = objType.getOwnPropertyNames();
+    // If the type has no properties then return Object
+    if (propNames.isEmpty()) {
+      return getNativeType(JSTypeNative.OBJECT_TYPE);
+    }
+    ImmutableMap.Builder<String, JSType> props = new ImmutableMap.Builder<>();
+    // Otherwise collect the properties and build a record type
+    for (String propName : propNames) {
+      props.put(propName, objType.getPropertyType(propName));
+    }
+    return createRecordType(props.build());
+  }
+
+  @Override
+  public JSType createRecordType(Map<String, ? extends TypeI> props) {
+    @SuppressWarnings("unchecked")
+    Map<String, JSType> propMap = (Map<String, JSType>) props;
+    RecordTypeBuilder builder = new RecordTypeBuilder(this);
+    for (Entry<String, JSType> e : propMap.entrySet()) {
+      builder.addProperty(e.getKey(), e.getValue(), null);
+    }
+    return builder.build();
   }
 
   /**
@@ -1472,35 +1610,53 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
 
   /**
    * Creates a constructor function type.
-   * @param name the function's name or {@code null} to indicate that the
-   *     function is anonymous.
-   * @param source the node defining this function. Its type
-   *     ({@link Node#getType()}) must be {@link Token#FUNCTION}.
-   * @param parameters the function's parameters or {@code null}
-   *     to indicate that the parameter types are unknown.
-   * @param returnType the function's return type or {@code null} to indicate
-   *     that the return type is unknown.
+   *
+   * @param name the function's name or {@code null} to indicate that the function is anonymous.
+   * @param source the node defining this function. Its type ({@link Node#getToken()} ()}) must be
+   *     {@link Token#FUNCTION}.
+   * @param parameters the function's parameters or {@code null} to indicate that the parameter
+   *     types are unknown.
+   * @param returnType the function's return type or {@code null} to indicate that the return type
+   *     is unknown.
    * @param templateKeys the templatized types for the class.
+   * @param isAbstract whether the function type represents an abstract class
    */
-  public FunctionType createConstructorType(String name, Node source,
-      Node parameters, JSType returnType, ImmutableList<TemplateType> templateKeys) {
-    Preconditions.checkArgument(source == null || source.isFunction());
-    return new FunctionType(this, name, source,
-        createArrowType(parameters, returnType), null,
-        createTemplateTypeMap(templateKeys, null), true, false);
+  public FunctionType createConstructorType(
+      String name,
+      Node source,
+      Node parameters,
+      JSType returnType,
+      ImmutableList<TemplateType> templateKeys,
+      boolean isAbstract) {
+    checkArgument(source == null || source.isFunction());
+    return new FunctionType(
+        this,
+        name,
+        source,
+        createArrowType(parameters, returnType),
+        null,
+        createTemplateTypeMap(templateKeys, null),
+        true,
+        false,
+        isAbstract);
   }
 
   /**
    * Creates an interface function type.
+   *
    * @param name the function's name
-   * @param source the node defining this function. Its type
-   *     ({@link Node#getType()}) must be {@link Token#FUNCTION}.
+   * @param source the node defining this function. Its type ({@link Node#getToken()}) must be
+   *     {@link Token#FUNCTION}.
    * @param templateKeys the templatized types for the interface.
    */
-  public FunctionType createInterfaceType(String name, Node source,
-      ImmutableList<TemplateType> templateKeys) {
-    return FunctionType.forInterface(this, name, source,
+  public FunctionType createInterfaceType(
+      String name, Node source, ImmutableList<TemplateType> templateKeys, boolean struct) {
+    FunctionType fn = FunctionType.forInterface(this, name, source,
         createTemplateTypeMap(templateKeys, null));
+    if (struct) {
+      fn.setStruct();
+    }
+    return fn;
   }
 
   public TemplateType createTemplateType(String name) {
@@ -1519,14 +1675,33 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
   public TemplateTypeMap createTemplateTypeMap(
       ImmutableList<TemplateType> templateKeys,
       ImmutableList<JSType> templateValues) {
-    templateKeys = templateKeys == null ?
-        ImmutableList.<TemplateType>of() : templateKeys;
-    templateValues = templateValues == null ?
-        ImmutableList.<JSType>of() : templateValues;
+    if (templateKeys == null) {
+      templateKeys = ImmutableList.of();
+    }
+    if (templateValues == null) {
+      templateValues = ImmutableList.of();
+    }
+    return (templateKeys.isEmpty() && templateValues.isEmpty())
+        ? emptyTemplateTypeMap
+            : new TemplateTypeMap(this, templateKeys, templateValues);
+  }
 
-    return (templateKeys.isEmpty() && templateValues.isEmpty()) ?
-        emptyTemplateTypeMap :
-        new TemplateTypeMap(this, templateKeys, templateValues);
+  public ObjectTypeI instantiateGenericsWithUnknown(ObjectType obj) {
+    if (obj.isTemplatizedType()) {
+      ImmutableList.Builder<JSType> unknowns = ImmutableList.builder();
+      for (TemplateType ignore : obj.getTemplateTypeMap().getTemplateKeys()) {
+        unknowns.add(getNativeType(UNKNOWN_TYPE));
+      }
+      return createTemplatizedType(obj.toMaybeTemplatizedType().getRawType(), unknowns.build());
+    }
+    return obj;
+  }
+
+  @SuppressWarnings("unchecked")
+  @Override
+  public TypeI instantiateGenericType(
+      ObjectTypeI genericType, ImmutableList<? extends TypeI> typeArgs) {
+    return createTemplatizedType((ObjectType) genericType, (ImmutableList<JSType>) typeArgs);
   }
 
   /**
@@ -1573,10 +1748,8 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
    * @param templatizedTypes a list of the template JSTypes. Will be matched by
    *     list order to the template keys on the base type.
    */
-  public TemplatizedType createTemplatizedType(
-      ObjectType baseType, JSType... templatizedTypes) {
-    return createTemplatizedType(
-        baseType, ImmutableList.copyOf(templatizedTypes));
+  public TemplatizedType createTemplatizedType(ObjectType baseType, JSType... templatizedTypes) {
+    return createTemplatizedType(baseType, ImmutableList.copyOf(templatizedTypes));
   }
 
   /**
@@ -1596,8 +1769,20 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
    * Identifies the name of a typedef or enum before we actually declare it.
    */
   public void identifyNonNullableName(String name) {
-    Preconditions.checkNotNull(name);
+    checkNotNull(name);
     nonNullableTypeNames.add(name);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Override
+  public JSType evaluateTypeExpression(JSTypeExpression expr, TypeIEnv<TypeI> scope) {
+    return createTypeFromCommentNode(
+        expr.getRoot(), expr.getSourceName(), (StaticTypedScope<JSType>) scope);
+  }
+
+  @Override
+  public JSType createTypeFromCommentNode(Node n) {
+    return createTypeFromCommentNode(n, "[internal]", null);
   }
 
   /**
@@ -1606,91 +1791,100 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
    * @param sourceName The source file name.
    * @param scope A scope for doing type name lookups.
    */
-  @Override
+  @SuppressWarnings("unchecked")
   public JSType createTypeFromCommentNode(
       Node n, String sourceName, StaticTypedScope<? extends TypeI> scope) {
-    return createFromTypeNodesInternal(n, sourceName, (StaticTypedScope<JSType>) scope);
+    return createFromTypeNodesInternal(n, sourceName, (StaticTypedScope<JSType>) scope, true);
   }
 
-  /** @see #createFromTypeNodes(Node, String, StaticTypedScope) */
   private JSType createFromTypeNodesInternal(Node n, String sourceName,
-      StaticTypedScope<JSType> scope) {
-    switch (n.getType()) {
-      case Token.LC: // Record type.
+      StaticTypedScope<JSType> scope, boolean recordUnresolvedTypes) {
+    switch (n.getToken()) {
+      case LC: // Record type.
         return createRecordTypeFromNodes(
             n.getFirstChild(), sourceName, scope);
 
-      case Token.BANG: // Not nullable
+      case BANG: // Not nullable
         return createFromTypeNodesInternal(
-            n.getFirstChild(), sourceName, scope)
+            n.getFirstChild(), sourceName, scope, recordUnresolvedTypes)
             .restrictByNotNullOrUndefined();
 
-      case Token.QMARK: // Nullable or unknown
+      case QMARK: // Nullable or unknown
         Node firstChild = n.getFirstChild();
         if (firstChild == null) {
           return getNativeType(UNKNOWN_TYPE);
         }
         return createNullableType(
             createFromTypeNodesInternal(
-                firstChild, sourceName, scope));
+                firstChild, sourceName, scope, recordUnresolvedTypes));
 
-      case Token.EQUALS: // Optional
+      case EQUALS: // Optional
         return createOptionalType(
             createFromTypeNodesInternal(
-                n.getFirstChild(), sourceName, scope));
+                n.getFirstChild(), sourceName, scope, recordUnresolvedTypes));
 
-      case Token.ELLIPSIS: // Var args
+      case ELLIPSIS: // Var args
         return createOptionalType(
             createFromTypeNodesInternal(
-                n.getFirstChild(), sourceName, scope));
+                n.getFirstChild(), sourceName, scope, recordUnresolvedTypes));
 
-      case Token.STAR: // The AllType
+      case STAR: // The AllType
         return getNativeType(ALL_TYPE);
 
-      case Token.PIPE: // Union type
+      case PIPE: // Union type
         UnionTypeBuilder builder = new UnionTypeBuilder(this);
         for (Node child = n.getFirstChild(); child != null;
              child = child.getNext()) {
           builder.addAlternate(
-              createFromTypeNodesInternal(child, sourceName, scope));
+              createFromTypeNodesInternal(child, sourceName, scope, recordUnresolvedTypes));
         }
         return builder.build();
 
-      case Token.EMPTY: // When the return value of a function is not specified
+      case EMPTY: // When the return value of a function is not specified
         return getNativeType(UNKNOWN_TYPE);
 
-      case Token.VOID: // Only allowed in the return value of a function.
+      case VOID: // Only allowed in the return value of a function.
         return getNativeType(VOID_TYPE);
 
-      case Token.STRING:
-      // TODO(martinprobst): The new type syntax resolution should be separate.
-      // Remove the NAME case then.
-      case Token.NAME:
-        JSType namedType = getType(scope, n.getString(), sourceName,
-            n.getLineno(), n.getCharno());
-        if ((namedType instanceof ObjectType) &&
-            !(namedType instanceof NamespaceType) &&
-            !(nonNullableTypeNames.contains(n.getString()))) {
+      case STRING:
+        // TODO(martinprobst): The new type syntax resolution should be separate.
+        // Remove the NAME case then.
+      case NAME:
+        JSType namedType =
+            getType(
+                scope,
+                n.getString(),
+                sourceName,
+                n.getLineno(),
+                n.getCharno(),
+                recordUnresolvedTypes);
+        if ((namedType instanceof ObjectType)
+            && !(namedType instanceof NamespaceType)
+            && !(nonNullableTypeNames.contains(n.getString()))) {
           Node typeList = n.getFirstChild();
-          int nAllowedTypes =
-              namedType.getTemplateTypeMap().numUnfilledTemplateKeys();
-          if (typeList != null && nAllowedTypes > 0) {
+          boolean isUnknownForwardDeclared =
+              namedType.isUnknownType() && isForwardDeclaredType(n.getString());
+          if ((!namedType.isUnknownType() || isUnknownForwardDeclared) && typeList != null) {
             // Templatized types.
-            ImmutableList.Builder<JSType> templateTypes =
-                ImmutableList.builder();
+            ImmutableList.Builder<JSType> templateTypes = ImmutableList.builder();
 
-            // Special case for Object, where Object.<X> implies Object.<?,X>.
-            if (n.getString().equals("Object") &&
-                typeList.getFirstChild() == typeList.getLastChild()) {
+            // Special case for Object, where Object<X> implies Object<?,X>.
+            if ((n.getString().equals("Object") || n.getString().equals("window.Object"))
+                && typeList.hasZeroOrOneChild()) {
               templateTypes.add(getNativeType(UNKNOWN_TYPE));
             }
 
+            int nAllowedTypes =
+                isUnknownForwardDeclared
+                    ? Integer.MAX_VALUE
+                    : namedType.getTemplateTypeMap().numUnfilledTemplateKeys();
+            boolean recordTemplateArgs = recordUnresolvedTypes && !isUnknownForwardDeclared;
             int templateNodeIndex = 0;
-            for (Node templateNode : typeList.getFirstChild().siblings()) {
+            for (Node templateNode : typeList.children()) {
               // Don't parse more templatized type nodes than the type can
               // accommodate. This is because some existing clients have
               // template annotations on non-templatized classes, for instance:
-              //   goog.structs.Set.<SomeType>
+              //   goog.structs.Set<SomeType>
               // The problem in these cases is that the previously-unparsed
               // SomeType is not actually a valid type. To prevent these clients
               // from seeing unknown type errors, we explicitly don't parse
@@ -1700,79 +1894,90 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
               if (++templateNodeIndex > nAllowedTypes) {
                 reporter.warning(
                     "Too many template parameters",
-                    sourceName, templateNode.getLineno(), templateNode.getCharno());
+                    sourceName,
+                    templateNode.getLineno(),
+                    templateNode.getCharno());
                 break;
               }
-              templateTypes.add(createFromTypeNodesInternal(
-                  templateNode, sourceName, scope));
+              templateTypes.add(
+                  createFromTypeNodesInternal(templateNode, sourceName, scope, recordTemplateArgs));
             }
-            namedType = createTemplatizedType(
-                (ObjectType) namedType, templateTypes.build());
-            Preconditions.checkNotNull(namedType);
+            if (isUnknownForwardDeclared) {
+              // For backwards compatibility, construct a TemplatizedType but "hide" the template
+              // arguments from further resolution.
+              namedType =
+                  new NamedType(
+                      this,
+                      n.getString(),
+                      sourceName,
+                      n.getLineno(),
+                      n.getCharno(),
+                      templateTypes.build());
+            } else {
+              namedType = createTemplatizedType((ObjectType) namedType, templateTypes.build());
+            }
+            checkNotNull(namedType);
           }
           return createDefaultObjectUnion(namedType);
         } else {
           return namedType;
         }
 
-      case Token.FUNCTION:
+      case FUNCTION:
         JSType thisType = null;
         boolean isConstructor = false;
         Node current = n.getFirstChild();
-        if (current.getType() == Token.THIS ||
-            current.getType() == Token.NEW) {
+        if (current.isThis() || current.isNew()) {
           Node contextNode = current.getFirstChild();
 
-          JSType candidateThisType = createFromTypeNodesInternal(
-              contextNode, sourceName, scope);
+          JSType candidateThisType =
+              createFromTypeNodesInternal(contextNode, sourceName, scope, recordUnresolvedTypes);
 
           // Allow null/undefined 'this' types to indicate that
           // the function is not called in a deliberate context,
           // and 'this' access should raise warnings.
-          if (candidateThisType.isNullType() ||
-              candidateThisType.isVoidType()) {
+          if (candidateThisType.isNullType() || candidateThisType.isVoidType()) {
             thisType = candidateThisType;
-          } else {
-            thisType = ObjectType.cast(
-                candidateThisType.restrictByNotNullOrUndefined());
+          } else if (current.isThis()) {
+            thisType = candidateThisType.restrictByNotNullOrUndefined();
+          } else if (current.isNew()) {
+            thisType = ObjectType.cast(candidateThisType.restrictByNotNullOrUndefined());
             if (thisType == null) {
               reporter.warning(
-                  SimpleErrorReporter.getMessage0(
-                      current.getType() == Token.THIS ?
-                      "msg.jsdoc.function.thisnotobject" :
-                      "msg.jsdoc.function.newnotobject"),
+                  SimpleErrorReporter.getMessage0("msg.jsdoc.function.newnotobject"),
                   sourceName,
-                  contextNode.getLineno(), contextNode.getCharno());
+                  contextNode.getLineno(),
+                  contextNode.getCharno());
             }
           }
 
-          isConstructor = current.getType() == Token.NEW;
+          isConstructor = current.getToken() == Token.NEW;
           current = current.getNext();
         }
 
         FunctionParamBuilder paramBuilder = new FunctionParamBuilder(this);
 
-        if (current.getType() == Token.PARAM_LIST) {
-          for (Node arg = current.getFirstChild(); arg != null;
-               arg = arg.getNext()) {
-            if (arg.getType() == Token.ELLIPSIS) {
-              if (arg.getChildCount() == 0) {
+        if (current.getToken() == Token.PARAM_LIST) {
+          for (Node arg = current.getFirstChild(); arg != null; arg = arg.getNext()) {
+            if (arg.getToken() == Token.ELLIPSIS) {
+              if (!arg.hasChildren()) {
                 paramBuilder.addVarArgs(getNativeType(UNKNOWN_TYPE));
               } else {
                 paramBuilder.addVarArgs(
                     createFromTypeNodesInternal(
-                        arg.getFirstChild(), sourceName, scope));
+                        arg.getFirstChild(), sourceName, scope, recordUnresolvedTypes));
               }
             } else {
-              JSType type = createFromTypeNodesInternal(
-                  arg, sourceName, scope);
-              if (arg.getType() == Token.EQUALS) {
+              JSType type =
+                  createFromTypeNodesInternal(arg, sourceName, scope, recordUnresolvedTypes);
+              if (arg.getToken() == Token.EQUALS) {
                 boolean addSuccess = paramBuilder.addOptionalParams(type);
                 if (!addSuccess) {
                   reporter.warning(
-                      SimpleErrorReporter.getMessage0(
-                          "msg.jsdoc.function.varargs"),
-                      sourceName, arg.getLineno(), arg.getCharno());
+                      SimpleErrorReporter.getMessage0("msg.jsdoc.function.varargs"),
+                      sourceName,
+                      arg.getLineno(),
+                      arg.getCharno());
                 }
               } else {
                 paramBuilder.addRequiredParams(type);
@@ -1783,7 +1988,7 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
         }
 
         JSType returnType =
-            createFromTypeNodesInternal(current, sourceName, scope);
+            createFromTypeNodesInternal(current, sourceName, scope, recordUnresolvedTypes);
 
         return new FunctionBuilder(this)
             .withParamsNode(paramBuilder.build())
@@ -1791,6 +1996,8 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
             .withTypeOfThis(thisType)
             .setIsConstructor(isConstructor)
             .build();
+      default:
+        break;
     }
 
     throw new IllegalStateException("Unexpected node in type expression: " + n);
@@ -1816,7 +2023,7 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
       Node fieldNameNode = fieldTypeNode;
       boolean hasType = false;
 
-      if (fieldTypeNode.getType() == Token.COLON) {
+      if (fieldTypeNode.getToken() == Token.COLON) {
         fieldNameNode = fieldTypeNode.getFirstChild();
         hasType = true;
       }
@@ -1836,7 +2043,7 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
       if (hasType) {
         // We have a declared type.
         fieldType = createFromTypeNodesInternal(
-            fieldTypeNode.getLastChild(), sourceName, scope);
+            fieldTypeNode.getLastChild(), sourceName, scope, true);
       } else {
         // Otherwise, the type is UNKNOWN.
         fieldType = getNativeType(JSTypeNative.UNKNOWN_TYPE);
@@ -1852,7 +2059,7 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
    * Sets the template type name.
    */
   public void setTemplateTypeNames(List<TemplateType> keys) {
-    Preconditions.checkNotNull(keys);
+    checkNotNull(keys);
     for (TemplateType key : keys) {
       templateTypes.put(key.getReferenceName(), key);
     }
@@ -1865,25 +2072,29 @@ public class JSTypeRegistry implements TypeIRegistry, Serializable {
     templateTypes.clear();
   }
 
-  private boolean isNonNullable(JSType type) {
-    // TODO(lpino): Verify that nonNullableTypeNames is correct
-    for (String s : nonNullableTypeNames) {
-      JSType that = getType(s);
-      if (that != null && type.isEquivalentTo(that)) {
-        return true;
-      }
-    }
-    return false;
+  /**
+   * Saves the derived state.
+   *
+   * Note: This should be only used when serializing the compiler state and needs to be done at the
+   * end, after serializing CompilerState.
+   */
+  @SuppressWarnings("unchecked")
+  @GwtIncompatible("ObjectOutputStream")
+  public void saveContents(ObjectOutputStream out) throws IOException {
+    out.writeObject(eachRefTypeIndexedByProperty);
+    out.writeObject(interfaceToImplementors);
   }
 
   /**
-   * Checks whether the input type can be templatized. It must be an
-   * {@code Object} type which is not a {@code NamespaceType} and is not a
-   * non-nullable type.
+   * Restores the derived state.
+   *
+   * Note: This should be only used when deserializing the compiler state and needs to be done at
+   * the end, after deserializing CompilerState.
    */
-  public boolean isTemplatizable(JSType type) {
-    return (type instanceof ObjectType)
-        && !(type instanceof NamespaceType)
-        && !isNonNullable(type);
+  @SuppressWarnings("unchecked")
+  @GwtIncompatible("ObjectInputStream")
+  public void restoreContents(ObjectInputStream in) throws IOException, ClassNotFoundException {
+    eachRefTypeIndexedByProperty = (Map<String, Map<String, ObjectType>>) in.readObject();
+    interfaceToImplementors = (Multimap<String, FunctionTypeI>) in.readObject();
   }
 }

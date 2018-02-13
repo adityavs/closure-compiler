@@ -16,104 +16,55 @@
 
 package com.google.javascript.jscomp.deps;
 
-import com.google.javascript.jscomp.parsing.parser.util.format.SimpleFormat;
-
+import com.google.auto.value.AutoValue;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.errorprone.annotations.Immutable;
 import java.util.Collection;
-import java.util.Collections;
-import java.util.List;
-import java.util.Objects;
+import java.util.Map;
 
 /**
  * A class to hold JS dependency information for a single .js file.
- *
- * @author agrieve@google.com (Andrew Grieve)
  */
-public final class SimpleDependencyInfo implements DependencyInfo {
+@Immutable @AutoValue @AutoValue.CopyAnnotations
+public abstract class SimpleDependencyInfo extends DependencyInfo.Base {
 
-  /** A list of provided symbols. */
-  private final List<String> provides;
-
-  /** A list of required symbols. */
-  private final List<String> requires;
-
-  private final boolean isModule;
-
-  /** The path of the file relative to closure. */
-  private final String srcPathRelativeToClosure;
-
-  /** The path to the file from which we extracted the dependency information.*/
-  private final String pathOfDefiningFile;
+  public static Builder builder(String srcPathRelativeToClosure, String pathOfDefiningFile) {
+    return new AutoValue_SimpleDependencyInfo.Builder()
+        .setName(pathOfDefiningFile)
+        .setPathRelativeToClosureBase(srcPathRelativeToClosure)
+        .setProvides(ImmutableList.of())
+        .setRequires(ImmutableList.of())
+        .setWeakRequires(ImmutableList.of())
+        .setLoadFlags(ImmutableMap.of());
+  }
 
   /**
-   * Constructs a DependencyInfo object with the given list of provides &
-   * requires. This does *not* copy the given lists, but uses them directly.
-   *
-   * @param srcPathRelativeToClosure The closure-relative path of the file
-   *     associated with this DependencyInfo.
-   * @param pathOfDefiningFile The path to the file from which this dependency
-   *     information was extracted.
-   * @param provides List of provided symbols.
-   * @param requires List of required symbols.
+   * Builder for constructing instances of SimpleDependencyInfo.
+   * Use the {@link SimpleDependencyInfo#builder(String, String)} method to create an instance.
    */
-  public SimpleDependencyInfo(
-      String srcPathRelativeToClosure, String pathOfDefiningFile,
-      List<String> provides, List<String> requires, boolean isModule) {
-    this.srcPathRelativeToClosure = srcPathRelativeToClosure;
-    this.pathOfDefiningFile = pathOfDefiningFile;
-    this.provides = provides;
-    this.requires = requires;
-    this.isModule = isModule;
-  }
+  @AutoValue.Builder
+  public abstract static class Builder {
+    abstract Builder setName(String name);
+    abstract Builder setPathRelativeToClosureBase(String srcPathRelativeToClosure);
 
-  @Override
-  public String getName() {
-    return pathOfDefiningFile;
-  }
+    public abstract Builder setProvides(Collection<String> provides);
+    public abstract Builder setProvides(String... provides);
+    public abstract Builder setRequires(Collection<String> requires);
+    public abstract Builder setRequires(String... requires);
+    public abstract Builder setWeakRequires(Collection<String> weakRequires);
+    public abstract Builder setWeakRequires(String... weakRequires);
+    public abstract Builder setLoadFlags(Map<String, String> loadFlags);
 
-  @Override
-  public String getPathRelativeToClosureBase() {
-    return srcPathRelativeToClosure;
-  }
+    private static final ImmutableMap<String, String> GOOG_MODULE_FLAGS =
+        ImmutableMap.of("module", "goog");
 
-  @Override
-  public boolean isModule() {
-    return this.isModule;
-  }
-
-  @Override
-  public Collection<String> getProvides() {
-    return Collections.unmodifiableList(provides);
-  }
-
-  @Override
-  public Collection<String> getRequires() {
-    return Collections.unmodifiableList(requires);
-  }
-
-  @Override
-  public boolean equals(Object obj) {
-    if (!(obj instanceof SimpleDependencyInfo)) {
-      return false;
+    public Builder setGoogModule(boolean isModule) {
+      return setLoadFlags(isModule ? GOOG_MODULE_FLAGS : ImmutableMap.of());
     }
-    SimpleDependencyInfo other = (SimpleDependencyInfo) obj;
-    return Objects.equals(other.srcPathRelativeToClosure,
-            srcPathRelativeToClosure) &&
-        Objects.equals(other.pathOfDefiningFile, pathOfDefiningFile) &&
-        Objects.equals(other.requires, this.requires) &&
-        Objects.equals(other.provides, this.provides) &&
-        other.isModule == this.isModule;
+
+    public abstract SimpleDependencyInfo build();
   }
 
-  @Override
-  public String toString() {
-    return SimpleFormat.format("DependencyInfo(relativePath='%1$s', path='%2$s', "
-        + "provides=%3$s, requires=%4$s, module=%5$b)", srcPathRelativeToClosure,
-        pathOfDefiningFile, provides, requires, isModule);
-  }
-
-  @Override
-  public int hashCode() {
-    return Objects.hash(provides, requires,
-        srcPathRelativeToClosure, pathOfDefiningFile, isModule);
-  }
+  public static final SimpleDependencyInfo EMPTY = builder("", "").build();
 }

@@ -16,7 +16,9 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import com.google.javascript.jscomp.parsing.parser.FeatureSet;
 import com.google.javascript.rhino.Node;
 
 /**
@@ -27,7 +29,7 @@ import com.google.javascript.rhino.Node;
  */
 abstract class AbstractPeepholeOptimization {
 
-  private AbstractCompiler compiler;
+  protected AbstractCompiler compiler;
 
   /**
    * Given a node to optimize and a traversal, optimize the node. Subclasses
@@ -53,15 +55,6 @@ abstract class AbstractPeepholeOptimization {
   }
 
   /**
-   * Helper method for telling the compiler that something has changed.
-   * Subclasses must call these if they have changed the AST.
-   */
-  protected void reportCodeChange() {
-    Preconditions.checkNotNull(compiler);
-    compiler.reportCodeChange();
-  }
-
-  /**
    * Are the nodes equal for the purpose of inlining?
    * If type aware optimizations are on, type equality is checked.
    */
@@ -69,7 +62,7 @@ abstract class AbstractPeepholeOptimization {
     /* Our implementation delegates to the compiler. We provide this
      * method because we don't want to expose Compiler to PeepholeOptimizations.
      */
-    Preconditions.checkNotNull(compiler);
+    checkNotNull(compiler);
     return compiler.areNodesEqualForInlining(n1, n2);
   }
 
@@ -78,28 +71,15 @@ abstract class AbstractPeepholeOptimization {
    *  and has the Denormalize pass not yet been run?)
    */
   protected boolean isASTNormalized() {
-    Preconditions.checkNotNull(compiler);
+    checkNotNull(compiler);
 
     return compiler.getLifeCycleStage().isNormalized();
   }
 
-  /**
-   * Informs the optimization that a traversal will begin.
-   */
+  /** Informs the optimization that a traversal will begin. */
   void beginTraversal(AbstractCompiler compiler) {
     this.compiler = compiler;
   }
-
-  /**
-   * Informs the optimization that a traversal has completed.
-   * @param compiler The current compiler.
-   */
-  void endTraversal(AbstractCompiler compiler) {
-    this.compiler = null;
-  }
-
-  // NodeUtil's mayEffectMutableState and mayHaveSideEffects need access to the
-  // compiler object, route them through here to give them access.
 
   /**
    * @return Whether the node may create new mutable state, or change existing
@@ -128,13 +108,13 @@ abstract class AbstractPeepholeOptimization {
   }
 
   /**
-   * @return Whether the source code version is ECMAScript 5 or later.
+   * @return Whether the output language is ECMAScript 5 or later.
    *     Workarounds for quirks in browsers that do not support ES5 can be
    *     ignored when this is true.
    */
   boolean isEcmaScript5OrGreater() {
     return compiler != null
-        && compiler.acceptEcmaScript5();
+        && compiler.getOptions().getLanguageOut().toFeatureSet().contains(FeatureSet.ES5);
   }
 
   /**
@@ -145,4 +125,7 @@ abstract class AbstractPeepholeOptimization {
     return compiler.getCodingConvention();
   }
 
+  final boolean areDeclaredGlobalExternsOnWindow() {
+    return compiler != null && compiler.getOptions().declaredGlobalExternsOnWindow;
+  }
 }

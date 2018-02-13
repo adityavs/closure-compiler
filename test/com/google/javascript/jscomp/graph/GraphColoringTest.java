@@ -18,19 +18,15 @@ package com.google.javascript.jscomp.graph;
 
 import static com.google.common.truth.Truth.assertThat;
 
-import com.google.javascript.jscomp.graph.Graph;
+import com.google.common.collect.Ordering;
 import com.google.javascript.jscomp.graph.Graph.GraphEdge;
-import com.google.javascript.jscomp.graph.GraphColoring;
 import com.google.javascript.jscomp.graph.GraphColoring.Color;
 import com.google.javascript.jscomp.graph.GraphColoring.GreedyGraphColoring;
-import com.google.javascript.jscomp.graph.LinkedUndirectedGraph;
-
+import java.util.Comparator;
 import junit.framework.TestCase;
 
-import java.util.Comparator;
-
 /**
- * Tests for {@link GraphColoring}.
+ * Tests for {@link com.google.javascript.jscomp.graph.GraphColoring}.
  *
  */
 public final class GraphColoringTest extends TestCase {
@@ -165,25 +161,20 @@ public final class GraphColoringTest extends TestCase {
     graph.connect("D", "-->", "E");
     graph.connect("E", "-->", "A");
 
-    Comparator<String> lexicographic = new Comparator<String>() {
-      @Override
-      public int compare(String o1, String o2) {
-        return o1.toString().compareTo(o2.toString());
-      }
-    };
     GraphColoring<String, String> coloring =
-        new GreedyGraphColoring<>(graph, lexicographic);
+        new GreedyGraphColoring<>(graph, Ordering.<String>natural());
     assertThat(coloring.color()).isEqualTo(3);
     validateColoring(graph);
     assertThat(coloring.getPartitionSuperNode("A")).isEqualTo("A");
     assertThat(coloring.getPartitionSuperNode("C")).isEqualTo("A");
 
-    Comparator<String> biasD = new Comparator<String>() {
-      @Override
-      public int compare(String o1, String o2) {
-        return o1.replaceAll("D", "@").compareTo(o2.replaceAll("D", "@"));
-      }
-    };
+    Comparator<String> biasD =
+        new Comparator<String>() {
+          @Override
+          public int compare(String o1, String o2) {
+            return o1.replace('D', '@').compareTo(o2.replace('D', '@'));
+          }
+        };
 
     coloring = new GreedyGraphColoring<>(graph, biasD);
     assertThat(coloring.color()).isEqualTo(3);

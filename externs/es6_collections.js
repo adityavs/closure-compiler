@@ -23,55 +23,57 @@
 // TODO(johnlenz): Use Tuples for the Map and Set iterators where appropriate.
 
 /**
- * @constructor
- * @param {Iterable.<!Array.<KEY|VALUE>>|!Array.<!Array.<KEY|VALUE>>=} opt_iterable
- * @implements {Iterable.<!Array.<KEY|VALUE>>}
+ * @constructor @struct
+ * @param {Iterable<!Array<KEY|VALUE>>|!Array<!Array<KEY|VALUE>>=} opt_iterable
+ * @implements {Iterable<!Array<KEY|VALUE>>}
  * @template KEY, VALUE
+ * @nosideeffects
  * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map
  */
 function Map(opt_iterable) {}
 
 /** @return {void} */
-Map.prototype.clear;
+Map.prototype.clear = function() {};
 
 /**
  * @param {KEY} key
  * @return {boolean}
  */
-Map.prototype.delete;
+Map.prototype.delete = function(key) {};
 
 /**
- * @return {!Iterator.<!Array.<KEY|VALUE>>}
+ * @return {!IteratorIterable<!Array<KEY|VALUE>>}
  * @nosideeffects
  */
-Map.prototype.entries;
+Map.prototype.entries = function() {};
 
 /**
- * @param {function(this:THIS, VALUE, KEY, MAP):void} callback
+ * @param {function(this:THIS, VALUE, KEY, MAP)} callback
  * @param {THIS=} opt_thisArg
  * @this {MAP}
  * @template MAP,THIS
  */
-Map.prototype.forEach;
+Map.prototype.forEach = function(callback, opt_thisArg) {};
 
 /**
  * @param {KEY} key
- * @return {VALUE|undefined}
+ * @return {VALUE}
  * @nosideeffects
  */
-Map.prototype.get;
+Map.prototype.get = function(key) {};
 
 /**
  * @param {KEY} key
  * @return {boolean}
  * @nosideeffects
  */
-Map.prototype.has;
+Map.prototype.has = function(key) {};
 
 /**
- * @return {!Iterator.<KEY>}
+ * @return {!IteratorIterable<KEY>}
+ * @nosideeffects
  */
-Map.prototype.keys;
+Map.prototype.keys = function() {};
 
 /**
  * @param {KEY} key
@@ -80,7 +82,7 @@ Map.prototype.keys;
  * @this {THIS}
  * @template THIS
  */
-Map.prototype.set;
+Map.prototype.set = function(key, value) {};
 
 /**
  * @type {number}
@@ -89,47 +91,48 @@ Map.prototype.set;
 Map.prototype.size;
 
 /**
- * @return {!Iterator.<VALUE>}
+ * @return {!IteratorIterable<VALUE>}
  * @nosideeffects
  */
-Map.prototype.values;
+Map.prototype.values = function() {};
 
 /**
- * @return {!Iterator.<!Array.<KEY|VALUE>>}
+ * @return {!Iterator<!Array<KEY|VALUE>>}
  */
 Map.prototype[Symbol.iterator] = function() {};
 
 
 /**
- * @constructor
- * @param {Iterable.<!Array.<KEY|VALUE>>|!Array.<!Array.<KEY|VALUE>>=} opt_iterable
+ * @constructor @struct
+ * @param {Iterable<!Array<KEY|VALUE>>|!Array<!Array<KEY|VALUE>>=} opt_iterable
  * @template KEY, VALUE
+ * @nosideeffects
  * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakMap
  */
 function WeakMap(opt_iterable) {}
 
 /** @return {void} */
-WeakMap.prototype.clear;
+WeakMap.prototype.clear = function() {};
 
 /**
  * @param {KEY} key
  * @return {boolean}
  */
-WeakMap.prototype.delete;
+WeakMap.prototype.delete = function(key) {};
 
 /**
  * @param {KEY} key
- * @return {VALUE|undefined}
+ * @return {VALUE}
  * @nosideeffects
  */
-WeakMap.prototype.get;
+WeakMap.prototype.get = function(key) {};
 
 /**
  * @param {KEY} key
  * @return {boolean}
  * @nosideeffects
  */
-WeakMap.prototype.has;
+WeakMap.prototype.has = function(key) {};
 
 /**
  * @param {KEY} key
@@ -138,15 +141,14 @@ WeakMap.prototype.has;
  * @this {THIS}
  * @template THIS
  */
-WeakMap.prototype.set;
-
-
+WeakMap.prototype.set = function(key, value) {};
 
 /**
- * @constructor
- * @param {Iterable.<VALUE>|Array.<VALUE>=} opt_iterable
- * @implements {Iterable.<VALUE>}
+ * @constructor @struct
+ * @param {Iterable<VALUE>|Array<VALUE>=} opt_iterable
+ * @implements {Iterable<VALUE>}
  * @template VALUE
+ * @nosideeffects
  * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set
  */
 function Set(opt_iterable) {}
@@ -157,40 +159,40 @@ function Set(opt_iterable) {}
  * @this {THIS}
  * @template THIS
  */
-Set.prototype.add;
+Set.prototype.add = function(value) {};
 
 /**
  * @return {void}
  */
-Set.prototype.clear;
+Set.prototype.clear = function() {};
 
 /**
  * @param {VALUE} value
  * @return {boolean}
  */
-Set.prototype.delete;
+Set.prototype.delete = function(value) {};
 
 /**
- * @return {!Iterator.<!Array.<VALUE>>} Where each array has two entries:
+ * @return {!IteratorIterable<!Array<VALUE>>} Where each array has two entries:
  *     [value, value]
  * @nosideeffects
  */
-Set.prototype.entries;
+Set.prototype.entries = function() {};
 
 /**
- * @param {function(VALUE, VALUE, SET)} callback
+ * @param {function(this: THIS, VALUE, VALUE, SET)} callback
  * @param {THIS=} opt_thisArg
  * @this {SET}
  * @template SET,THIS
  */
-Set.prototype.forEach;
+Set.prototype.forEach = function(callback, opt_thisArg) {};
 
 /**
  * @param {VALUE} value
  * @return {boolean}
  * @nosideeffects
  */
-Set.prototype.has;
+Set.prototype.has = function(value) {};
 
 /**
  * @type {number} (readonly)
@@ -198,28 +200,29 @@ Set.prototype.has;
 Set.prototype.size;
 
 /**
- * @return {!Iterator.<VALUE>}
+ * @return {!IteratorIterable<VALUE>}
  * @nosideeffects
  */
-Set.prototype.keys;
+Set.prototype.keys = function() {};
 
 /**
- * @return {!Iterator.<VALUE>}
+ * @return {!IteratorIterable<VALUE>}
  * @nosideeffects
  */
-Set.prototype.values;
+Set.prototype.values = function() {};
 
 /**
- * @return {!Iterator.<VALUE>}
+ * @return {!Iterator<VALUE>}
  */
 Set.prototype[Symbol.iterator] = function() {};
 
 
 
 /**
- * @constructor
- * @param {Iterable.<VALUE>|Array.<VALUE>=} opt_iterable
+ * @constructor @struct
+ * @param {Iterable<VALUE>|Array<VALUE>=} opt_iterable
  * @template VALUE
+ * @nosideeffects
  * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set
  */
 function WeakSet(opt_iterable) {}
@@ -230,24 +233,22 @@ function WeakSet(opt_iterable) {}
  * @this {THIS}
  * @template THIS
  */
-WeakSet.prototype.add;
+WeakSet.prototype.add = function(value) {};
 
 /**
  * @return {void}
  */
-WeakSet.prototype.clear;
+WeakSet.prototype.clear = function() {};
 
 /**
  * @param {VALUE} value
  * @return {boolean}
  */
-WeakSet.prototype.delete;
+WeakSet.prototype.delete = function(value) {};
 
 /**
  * @param {VALUE} value
  * @return {boolean}
  * @nosideeffects
  */
-WeakSet.prototype.has;
-
-
+WeakSet.prototype.has = function(value) {};

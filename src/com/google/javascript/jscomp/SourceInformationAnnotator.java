@@ -16,9 +16,9 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
 
 /**
  * Annotates nodes with information from their original input file
@@ -42,55 +42,55 @@ import com.google.javascript.rhino.Token;
 class SourceInformationAnnotator extends
   NodeTraversal.AbstractPostOrderCallback {
   private final String sourceFile;
-  private final boolean doSanityChecks;
+  private final boolean checkAnnotated;
 
   public SourceInformationAnnotator(
-      String sourceFile, boolean doSanityChecks) {
+      String sourceFile, boolean checkAnnotated) {
     this.sourceFile = sourceFile;
-    this.doSanityChecks = doSanityChecks;
+    this.checkAnnotated = checkAnnotated;
   }
 
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
     // Verify the source file is annotated.
-    if (doSanityChecks && sourceFile != null) {
-      Preconditions.checkState(sourceFile.equals(
-          n.getSourceFileName()));
+    if (checkAnnotated && sourceFile != null) {
+      checkState(sourceFile.equals(n.getSourceFileName()));
     }
 
     // Annotate the original name.
-    switch (n.getType()) {
-      case Token.GETPROP:
+    switch (n.getToken()) {
+      case GETPROP:
         Node propNode = n.getLastChild();
         setOriginalName(n, propNode.getString());
         break;
 
-      case Token.FUNCTION:
+      case FUNCTION:
         String functionName = NodeUtil.getNearestFunctionName(n);
         if (functionName != null) {
           setOriginalName(n, functionName);
         }
         break;
 
-      case Token.NAME:
+      case NAME:
         setOriginalName(n, n.getString());
         break;
 
-      case Token.OBJECTLIT:
-        for (Node key = n.getFirstChild(); key != null;
-             key = key.getNext()) {
-           // We only want keys were unquoted.
-           if (!key.isComputedProp() && !key.isQuotedString()) {
-             setOriginalName(key, key.getString());
-           }
-         }
+      case OBJECTLIT:
+        for (Node key = n.getFirstChild(); key != null; key = key.getNext()) {
+          // Set the original name for unquoted string properties.
+          if (!key.isComputedProp() && !key.isQuotedString() && !key.isSpread()) {
+            setOriginalName(key, key.getString());
+          }
+        }
+        break;
+      default:
         break;
     }
   }
 
   static void setOriginalName(Node n, String name) {
-    if (!name.isEmpty() && n.getProp(Node.ORIGINALNAME_PROP) == null) {
-      n.putProp(Node.ORIGINALNAME_PROP, name);
+    if (!name.isEmpty() && n.getOriginalName() == null) {
+      n.setOriginalName(name);
     }
   }
 }

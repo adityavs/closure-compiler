@@ -21,17 +21,20 @@ package com.google.javascript.jscomp;
  *
  */
 public final class UnreachableCodeEliminationTest extends CompilerTestCase {
-  private boolean removeNoOpStatements = true;
-
   @Override
   protected CompilerPass getProcessor(Compiler compiler) {
-    return new UnreachableCodeElimination(compiler, removeNoOpStatements);
+    return new UnreachableCodeElimination(compiler);
   }
 
-  @Override public void setUp() throws Exception {
+  @Override protected void setUp() throws Exception {
     super.setUp();
     enableComputeSideEffects();
-    removeNoOpStatements = true;
+  }
+
+  public void testDontRemoveExport() {
+    test(
+        "export function foo() { return 1; alert(2); }",
+        "export function foo() { return 1; }");
   }
 
   public void testRemoveUnreachableCode() {
@@ -108,15 +111,8 @@ public final class UnreachableCodeEliminationTest extends CompilerTestCase {
     test("'use strict';", "'use strict'");
   }
 
-  public void testNoRemoveUselessNameStatements() {
-    removeNoOpStatements = false;
-    testSame("a;");
-    testSame("a.b;");
-    testSame("a.b.MyClass.prototype.memberName;");
-  }
-
   public void testRemoveDo() {
-    test("do { print(1); break } while(1)", "do { print(1); break } while(1)");
+    testSame("do { print(1); break } while(1)");
     test("while(1) { break; do { print(1); break } while(1) }",
          "while(1) { break; do {} while(1) }");
   }
@@ -140,8 +136,7 @@ public final class UnreachableCodeEliminationTest extends CompilerTestCase {
   public void testSwitchCase() {
     test("function f() { switch(x) { default: return 5; foo()}}",
          "function f() { switch(x) { default: return 5;}}");
-    test("function f() { switch(x) { default: return; case 1: foo(); bar()}}",
-         "function f() { switch(x) { default: return; case 1: foo(); bar()}}");
+    testSame("function f() { switch(x) { default: return; case 1: foo(); bar()}}");
     test("function f() { switch(x) { default: return; case 1: return 5;bar()}}",
          "function f() { switch(x) { default: return; case 1: return 5;}}");
   }
@@ -419,8 +414,7 @@ public final class UnreachableCodeEliminationTest extends CompilerTestCase {
   }
 
   public void testDontRemoveBreakInTryFinallySwitch() throws Exception {
-    testSame("function f() {b:try{throw 9} finally {" +
-             "switch(x) {case 1: break b} } return 1;}");
+    testSame("function f() {b:try{throw 9} finally { switch(x) {case 1: break b} } return 1; }");
   }
 
   public void testIssue1001() throws Exception {
@@ -428,5 +422,113 @@ public final class UnreachableCodeEliminationTest extends CompilerTestCase {
          "function f(x) { x.property = 3; }");
     test("function f(x) { x.property = 3; } new f({})",
          "function f(x) { x.property = 3; }");
+  }
+
+  public void testLetConstBlocks() {
+    test("function f() {return 1; let a; }", "function f() {return 1;}");
+
+    test("function f() {return 1; const a = 1; }", "function f() {return 1;}");
+
+    test(
+        "function f() { x = 1; {let g; return x} let y}",
+        "function f() { x = 1; {let g; return x;}} ");
+  }
+
+  public void testArrowFunctions() {
+    test("f(x => {return x; j = 1})", "f(x => {return x;})");
+
+    testSame("f( () => {return 1;})");
+  }
+
+  public void testGenerators() {
+    test(
+        lines(
+            "function* f() {", "  while(true) {", "    yield 1;", "  }", "  x = 1;", "}"),
+        lines("function* f() {", "  while(true) {", "    yield 1;", "  }", "}"));
+
+    testSame(lines("function* f() {", "  while(true) {", "    yield 1;", "  }", "}"));
+
+    testSame(
+        lines(
+            "function* f() {",
+            "  let i = 0;",
+            "  while (true) {",
+            "    if (i < 10) {",
+            "      yield i;",
+            "    } else {",
+            "      break;",
+            "    }",
+            "  }",
+            "  let x = 1;",
+            "}"));
+  }
+
+  public void testForOf() {
+    test("for(x of i){ 1; }", "for(x of i) {}");
+
+    testSame("for(x of i){}");
+  }
+
+  public void testRemoveUselessTemplateStrings() {
+    test("`hi`", "");
+
+    testSame("`hello visitor # ${i++}`");
+  }
+
+  // TODO (simranarora) Make the pass handle ES6 Modules correctly.
+  public void disabled_testRemoveFromImportStatement_ES6Modules() {
+    // Error: Invalid attempt to remove: STRING ./foo 1 [length: 7] [source_file: testcode] from
+    // IMPORT 1 [length: 24] [source_file: testcode]
+    testSame("import foo from './foo'; foo('hello');");
+
+    // Error: Invalid attempt to remove: STRING ./foo 1 [length: 7] [source_file: testcode] from
+    // IMPORT 1 [length: 24] [source_file: testcode]
+    test(
+        "import foo from './foo';",
+        "import './foo';");
+
+    // Error: Invalid attempt to remove node: NAME x 1 [length: 1] [source_file: testcode] of
+    // IMPORT_SPEC 1 [length: 1] [source_file: testcode]
+    test(
+        "import {x, y} from './foo'; x('hi');",
+        "import {x} from './foo'; x('hi');");
+  }
+
+  public void testLetConstBlocks_withES6Modules() {
+    test(
+        "export function f() {return 1; let a; } f();",
+        "export function f() {return 1;}");
+
+    test(
+        "export function f() {return 1; const a = 1; }",
+        "export function f() {return 1;}");
+
+    test(
+        "export function f() { x = 1; {let g; return x} let y}",
+        "export function f() { x = 1; {let g; return x;}} ");
+  }
+
+  // Currently leaves an empty module.
+  // SCRIPT
+  //   MODULE_BODY
+  // TODO(tbreisacher): Fix and enable.
+  public void disabled_testLetConstBlocks_withES6Modules2() {
+    test("export let x = 2;", "");
+  }
+
+  public void testRemoveUnreachableCode_withES6Modules() {
+    // Switch statements
+    test(
+        "export function foo() { switch (foo) { case 1:x = 1; return; break;"
+            + "case 2:{ x = 2; return; break } default:}}",
+        "export function foo() { switch (foo) { case 1:x = 1; return;"
+            + "case 2:{ x = 2 } default:}}");
+
+    // if/else statements with returns
+    test(
+        "export function bar(){if(foo)x=1;else if(bar){return;x=2}"
+            + "else{x=3;return;x=4}return 5;x=5}",
+        "export function bar(){if(foo)x=1;else if(bar){return}"
+            + "else{x=3;return}return 5}");
   }
 }

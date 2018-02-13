@@ -20,6 +20,7 @@ import com.google.javascript.jscomp.DiagnosticType;
 import com.google.javascript.jscomp.HotSwapCompilerPass;
 import com.google.javascript.jscomp.NodeTraversal;
 import com.google.javascript.jscomp.NodeUtil;
+import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
 
 /**
@@ -51,12 +52,12 @@ public final class CheckPrototypeProperties implements HotSwapCompilerPass, Node
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, this);
+    NodeTraversal.traverseEs6(compiler, root, this);
   }
 
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
-    NodeTraversal.traverse(compiler, originalRoot, this);
+    NodeTraversal.traverseEs6(compiler, originalRoot, this);
   }
 
   @Override
@@ -65,6 +66,12 @@ public final class CheckPrototypeProperties implements HotSwapCompilerPass, Node
       Node assign = n.getFirstChild();
       Node rhs = assign.getLastChild();
       if (rhs.isArrayLit() || rhs.isObjectLit()) {
+        JSDocInfo jsDoc = NodeUtil.getBestJSDocInfo(rhs);
+        if (jsDoc != null && jsDoc.hasEnumParameterType()) {
+          // Don't report for @enum's on the prototype. Sometimes this is necessary, for example,
+          // to expose the enum values to an Angular template.
+          return;
+        }
         String propName = assign.getFirstChild().getLastChild().getString();
         compiler.report(t.makeError(assign, ILLEGAL_PROTOTYPE_MEMBER, propName));
       }

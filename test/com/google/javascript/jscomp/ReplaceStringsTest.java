@@ -21,9 +21,10 @@ import static com.google.common.truth.Truth.assertThat;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.javascript.jscomp.CompilerOptions.PropertyCollapseLevel;
+import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.jscomp.ReplaceStrings.Result;
 import com.google.javascript.rhino.Node;
-
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -34,11 +35,12 @@ import java.util.Set;
  * Tests for {@link ReplaceStrings}.
  *
  */
-public final class ReplaceStringsTest extends CompilerTestCase {
+public final class ReplaceStringsTest extends TypeICompilerTestCase {
   private ReplaceStrings pass;
   private Set<String> reserved;
   private VariableMap previous;
-  private boolean runDisambiguateProperties = false;
+  private boolean runDisambiguateProperties;
+  private boolean rename;
 
   private final ImmutableList<String> defaultFunctionsToInspect = ImmutableList.of(
       "Error(?)",
@@ -47,36 +49,35 @@ public final class ReplaceStringsTest extends CompilerTestCase {
       "goog.debug.Logger.prototype.info(?)",
       "goog.log.getLogger(?)",
       "goog.log.info(,?)",
-      "goog.log.multiString(,?,?,)"
+      "goog.log.multiString(,?,?,)",
+      "Excluded(?):!testcode",
+      "NotExcluded(?):!unmatchable"
       );
 
   private ImmutableList<String> functionsToInspect;
 
-  private static final String EXTERNS =
-    "var goog = {};\n" +
-    "goog.debug = {};\n" +
-    "/** @constructor */\n" +
-    "goog.debug.Trace = function() {};\n" +
-    "goog.debug.Trace.startTracer = function (var_args) {};\n" +
-    "/** @constructor */\n" +
-    "goog.debug.Logger = function() {};\n" +
-    "goog.debug.Logger.prototype.info = function(msg, opt_ex) {};\n" +
-    "/**\n" +
-    " * @param {string} name\n" +
-    " * @return {!goog.debug.Logger}\n" +
-    " */\n" +
-    "goog.debug.Logger.getLogger = function(name){};\n" +
-    "goog.log = {}\n" +
-    "goog.log.getLogger = function(name){};\n" +
-    "goog.log.info = function(logger, msg, opt_ex) {};\n" +
-    "goog.log.multiString = function(logger, replace1, replace2, keep) {};\n"
-    ;
+  private static final String EXTERNS = lines(
+      MINIMAL_EXTERNS,
+      "var goog = {};",
+      "goog.debug = {};",
+      "/** @constructor */",
+      "goog.debug.Trace = function() {};",
+      "goog.debug.Trace.startTracer = function (var_args) {};",
+      "/** @constructor */",
+      "goog.debug.Logger = function() {};",
+      "goog.debug.Logger.prototype.info = function(msg, opt_ex) {};",
+      "/**",
+      " * @param {string} name",
+      " * @return {!goog.debug.Logger}",
+      " */",
+      "goog.debug.Logger.getLogger = function(name){};",
+      "goog.log = {}",
+      "goog.log.getLogger = function(name){};",
+      "goog.log.info = function(logger, msg, opt_ex) {};",
+      "goog.log.multiString = function(logger, replace1, replace2, keep) {};");
 
   public ReplaceStringsTest() {
-    super(EXTERNS, true);
-    enableNormalize();
-    parseTypeInfo = true;
-    compareJsDoc = false;
+    super(EXTERNS);
   }
 
   @Override
@@ -90,15 +91,41 @@ public final class ReplaceStringsTest extends CompilerTestCase {
   @Override
   protected void setUp() throws Exception {
     super.setUp();
-    super.enableLineNumberCheck(false);
-    super.enableTypeCheck(CheckLevel.WARNING);
+    this.mode = TypeInferenceMode.BOTH;
+    enableNormalize();
+    enableParseTypeInfo();
     functionsToInspect = defaultFunctionsToInspect;
     reserved = Collections.emptySet();
     previous = null;
+    runDisambiguateProperties = false;
+    rename = false;
+  }
+
+  private static class Renamer extends AbstractPostOrderCallback {
+    final AbstractCompiler compiler;
+
+    Renamer(AbstractCompiler compiler) {
+      this.compiler = compiler;
+    }
+
+    @Override
+    public void visit(NodeTraversal t, Node n, Node parent) {
+      if (n.isName()) {
+        String originalName = n.getString();
+        n.setOriginalName(originalName);
+        n.setString("renamed_" + originalName);
+        t.reportCodeChange();
+      } else if (n.isGetProp()) {
+        String originalName = n.getLastChild().getString();
+        n.getLastChild().setOriginalName(originalName);
+        n.getLastChild().setString("renamed_" + originalName);
+        t.reportCodeChange();
+      }
+    }
   }
 
   @Override
-  public CompilerPass getProcessor(final Compiler compiler) {
+  protected CompilerPass getProcessor(final Compiler compiler) {
     pass = new ReplaceStrings(
         compiler, "`", functionsToInspect, reserved, previous);
 
@@ -108,14 +135,16 @@ public final class ReplaceStringsTest extends CompilerTestCase {
         Map<String, CheckLevel> propertiesToErrorFor = new HashMap<>();
         propertiesToErrorFor.put("foobar", CheckLevel.ERROR);
 
-        new CollapseProperties(compiler, true).process(externs, js);
+        if (rename) {
+          NodeTraversal.traverseEs6(compiler, js, new Renamer(compiler));
+        }
+        new CollapseProperties(compiler, PropertyCollapseLevel.ALL).process(externs, js);
         if (runDisambiguateProperties) {
           SourceInformationAnnotator sia =
-              new SourceInformationAnnotator("test", false /* doSanityChecks */);
-          NodeTraversal.traverse(compiler, js, sia);
+              new SourceInformationAnnotator("test", false /* checkAnnotated */);
+          NodeTraversal.traverseEs6(compiler, js, sia);
 
-          DisambiguateProperties.forJSTypeSystem(compiler, propertiesToErrorFor)
-              .process(externs, js);
+          new DisambiguateProperties(compiler, propertiesToErrorFor).process(externs, js);
         }
         pass.process(externs, js);
       }
@@ -123,7 +152,7 @@ public final class ReplaceStringsTest extends CompilerTestCase {
   }
 
   @Override
-  public int getNumRepetitions() {
+  protected int getNumRepetitions() {
     // This compiler pass is not idempotent and should only be run over a
     // parse tree once.
     return 1;
@@ -155,6 +184,22 @@ public final class ReplaceStringsTest extends CompilerTestCase {
         (new String[] { "b", "xyz" }));
   }
 
+  public void testRenameName() {
+    rename = true;
+    testDebugStrings(
+        "Error('xyz');",
+        "renamed_Error('a');",
+        (new String[] { "a", "xyz" }));
+  }
+
+  public void testRenameStaticProp() {
+    rename = true;
+    testDebugStrings(
+        "goog.debug.Trace.startTracer('HistoryManager.updateHistory');",
+        "renamed_goog.renamed_debug.renamed_Trace.renamed_startTracer('a');",
+        (new String[] { "a", "HistoryManager.updateHistory" }));
+  }
+
   public void testThrowError1() {
     testDebugStrings(
         "throw Error('xyz');",
@@ -183,34 +228,33 @@ public final class ReplaceStringsTest extends CompilerTestCase {
 
   public void testThrowError4() {
     testDebugStrings(
-        "/** @constructor */\n" +
-        "var A = function() {};\n" +
-        "A.prototype.m = function(child) {\n" +
-        "  if (this.haveChild(child)) {\n" +
-        "    throw Error('Node: ' + this.getDataPath() +\n" +
-        "                ' already has a child named ' + child);\n" +
-        "  } else if (child.parentNode) {\n" +
-        "    throw Error('Node: ' + child.getDataPath() +\n" +
-        "                ' already has a parent');\n" +
-        "  }\n" +
-        "  child.parentNode = this;\n" +
-        "};",
-
-        "var A = function(){};\n" +
-        "A.prototype.m = function(child) {\n" +
-        "  if (this.haveChild(child)) {\n" +
-        "    throw Error('a' + '`' + this.getDataPath() + '`' + child);\n" +
-        "  } else if (child.parentNode) {\n" +
-        "    throw Error('b' + '`' + child.getDataPath());\n" +
-        "  }\n" +
-        "  child.parentNode = this;\n" +
-        "};",
+        lines(
+            "/** @constructor */",
+            "var A = function() {};",
+            "A.prototype.m = function(child) {",
+            "  if (this.haveChild(child)) {",
+            "    throw Error('Node: ' + this.getDataPath() +",
+            "                ' already has a child named ' + child);",
+            "  } else if (child.parentNode) {",
+            "    throw Error('Node: ' + child.getDataPath() +",
+            "                ' already has a parent');",
+            "  }",
+            "  child.parentNode = this;",
+            "};"),
+        lines(
+            "/** @constructor */",
+            "var A = function(){};",
+            "A.prototype.m = function(child) {",
+            "  if (this.haveChild(child)) {",
+            "    throw Error('a' + '`' + this.getDataPath() + '`' + child);",
+            "  } else if (child.parentNode) {",
+            "    throw Error('b' + '`' + child.getDataPath());",
+            "  }",
+            "  child.parentNode = this;",
+            "};"),
         (new String[] {
-            "a",
-            "Node: ` already has a child named `",
-            "b",
-            "Node: ` already has a parent",
-            }));
+          "a", "Node: ` already has a child named `", "b", "Node: ` already has a parent",
+        }));
   }
 
   public void testThrowNonStringError() {
@@ -314,6 +358,7 @@ public final class ReplaceStringsTest extends CompilerTestCase {
 
   // Non-matching "info" prototype property.
   public void testLoggerOnObject3b() {
+    ignoreWarnings(NewTypeInference.GLOBAL_THIS);
     testSame(
       "/** @constructor */\n" +
       "var x = function() {};\n" +
@@ -343,6 +388,9 @@ public final class ReplaceStringsTest extends CompilerTestCase {
   }
 
   public void testLoggerOnThis() {
+    // This fails in NTI because NTI doesn't specialize the type of THIS after the assignment;
+    // THIS remains unknown. Working as intended.
+    this.mode = TypeInferenceMode.OTI_ONLY;
     testDebugStrings(
         "function f() {" +
         "  this.logger_ = goog.debug.Logger.getLogger('foo');" +
@@ -355,6 +403,29 @@ public final class ReplaceStringsTest extends CompilerTestCase {
         new String[] {
             "a", "foo",
             "b", "Some message"});
+  }
+
+  public void testLoggerOnThis2() {
+    testDebugStrings(
+        lines(
+            "/** @constructor */",
+            "function Foo() {",
+            "  /** @type {!goog.debug.Logger} */",
+            "  this.logger_;",
+            "}",
+            "Foo.prototype.f = function() {",
+            "  this.logger_.info('Some message');",
+            "};"),
+        lines(
+            "/** @constructor */",
+            "function Foo() {",
+            "  /** @type {!goog.debug.Logger} */",
+            "  this.logger_;",
+            "}",
+            "Foo.prototype.f = function() {",
+            "  this.logger_.info('a');",
+            "};"),
+        new String[] { "a", "Some message" });
   }
 
   public void testRepeatedErrorString1() {
@@ -466,40 +537,60 @@ public final class ReplaceStringsTest extends CompilerTestCase {
     builder.add("C.prototype.f(?)");
     functionsToInspect = builder.build();
 
-    String js =
-        "/** @constructor */function A() {}\n"
-        + "/** @param {string} p\n"
-        + "  * @return {string} */\n"
-        + "A.prototype.f = function(p) {return 'a' + p;};\n"
-        + "/** @constructor */function B() {}\n"
-        + "/** @param {string} p\n"
-        + "  * @return {string} */\n"
-        + "B.prototype.f = function(p) {return p + 'b';};\n"
-        + "/** @constructor */function C() {}\n"
-        + "/** @param {string} p\n"
-        + "  * @return {string} */\n"
-        + "C.prototype.f = function(p) {return 'c' + p + 'c';};\n"
-        + "/** @type {A|B} */var ab = 1 ? new B : new A;\n"
-        + "/** @type {string} */var n = ab.f('not replaced');\n"
-        + "(new A).f('replaced with a');"
-        + "(new C).f('replaced with b');";
-
-    String output =
-        "function A() {}\n"
-        + "A.prototype.A_prototype$f = function(p) { return'a'+p; };\n"
-        + "function B() {}\n"
-        + "B.prototype.A_prototype$f = function(p) { return p+'b'; };\n"
-        + "function C() {}\n"
-        + "C.prototype.C_prototype$f = function(p) { return'c'+p+'c'; };\n"
-        + "var ab = 1 ? new B : new A;\n"
-        + "var n = ab.A_prototype$f('not replaced');\n"
-        + "(new A).A_prototype$f('a');"
-        + "(new C).C_prototype$f('b');";
-
-    testDebugStrings(js, output,
+    testDebugStrings(
+        lines(
+            "/** @constructor */",
+            "function A() {}",
+            "/** @param {string} p",
+            "  * @return {string} */",
+            "A.prototype.f = function(p) {return 'a' + p;};",
+            "/** @constructor */",
+            "function B() {}",
+            "/** @param {string} p",
+            "  * @return {string} */",
+            "B.prototype.f = function(p) {return p + 'b';};",
+            "/** @constructor */",
+            "function C() {}",
+            "/** @param {string} p",
+            "  * @return {string} */",
+            "C.prototype.f = function(p) {return 'c' + p + 'c';};",
+            "/** @type {A|B} */",
+            "var ab = 1 ? new B : new A;",
+            "/** @type {string} */",
+            "var n = ab.f('not replaced');",
+            "(new A).f('replaced with a');",
+            "(new C).f('replaced with b');"),
+        lines(
+            "/** @constructor */",
+            "function A() {}",
+            "/** @param {string} p",
+            "  * @return {string} */",
+            "A.prototype.A_prototype$f = function(p) { return'a'+p; };",
+            "/** @constructor */",
+            "function B() {}",
+            "/** @param {string} p",
+            "  * @return {string} */",
+            "B.prototype.A_prototype$f = function(p) { return p+'b'; };",
+            "/** @constructor */",
+            "function C() {}",
+            "/** @param {string} p",
+            "  * @return {string} */",
+            "C.prototype.C_prototype$f = function(p) { return'c'+p+'c'; };",
+            "/** @type {A|B} */",
+            "var ab = 1 ? new B : new A;",
+            "/** @type {string} */",
+            "var n = ab.A_prototype$f('not replaced');",
+            "(new A).A_prototype$f('a');",
+            "(new C).C_prototype$f('b');"),
         new String[] {
-            "a", "replaced with a",
-            "b", "replaced with b"});
+          "a", "replaced with a",
+          "b", "replaced with b"
+        });
+  }
+
+  public void testExcludedFile() {
+    testDebugStrings("Excluded('xyz');", "Excluded('xyz');", new String[0]);
+    testDebugStrings("NotExcluded('xyz');", "NotExcluded('a');", (new String[] { "a", "xyz" }));
   }
 
   private void testDebugStrings(String js, String expected,

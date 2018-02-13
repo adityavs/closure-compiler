@@ -16,15 +16,23 @@
 
 package com.google.javascript.jscomp;
 
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
+
 /**
  * @author mkretzschmar@google.com (Martin Kretzschmar)
  */
-public final class CheckMissingGetCssNameTest extends Es6CompilerTestCase {
+public final class CheckMissingGetCssNameTest extends CompilerTestCase {
   @Override
   protected CompilerPass getProcessor(final Compiler compiler) {
     return new CombinedCompilerPass(
         compiler,
         new CheckMissingGetCssName(compiler, CheckLevel.ERROR, "goog-[a-z-]*"));
+  }
+
+  @Override
+  protected void setUp() throws Exception {
+    super.setUp();
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2017);
   }
 
   public void testMissingGetCssName() {
@@ -89,14 +97,14 @@ public final class CheckMissingGetCssNameTest extends Es6CompilerTestCase {
   }
 
   private void testNotMissing(String js) {
-    test(js, js);
+    testSame(js);
   }
 
   private void testMissingEs6(String js) {
-    testErrorEs6(js, CheckMissingGetCssName.MISSING_GETCSSNAME);
+    testError(js, CheckMissingGetCssName.MISSING_GETCSSNAME);
   }
 
   private void testNotMissingEs6(String js) {
-    testEs6(js, js);
+    testSame(js);
   }
 }

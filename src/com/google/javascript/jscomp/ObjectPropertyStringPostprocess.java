@@ -46,7 +46,7 @@ class ObjectPropertyStringPostprocess implements CompilerPass {
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, new Callback());
+    NodeTraversal.traverseEs6(compiler, root, new Callback());
   }
 
   private class Callback extends AbstractPostOrderCallback {
@@ -59,13 +59,13 @@ class ObjectPropertyStringPostprocess implements CompilerPass {
       Node objectName = n.getFirstChild();
 
       if (!objectName.matchesQualifiedName(
-          ObjectPropertyStringPreprocess.EXTERN_OBJECT_PROPERTY_STRING)) {
+          NodeUtil.EXTERN_OBJECT_PROPERTY_STRING)) {
         return;
       }
 
       Node firstArgument = objectName.getNext();
       Node secondArgument = firstArgument.getNext();
-      int secondArgumentType = secondArgument.getType();
+      Token secondArgumentType = secondArgument.getToken();
       if (secondArgumentType == Token.GETPROP) {
         // Rewrite "new goog.testing.ObjectPropertyString(window, foo.bar)"
         // as "new goog.testing.ObjectPropertyString(foo, 'bar')".
@@ -89,7 +89,7 @@ class ObjectPropertyStringPostprocess implements CompilerPass {
         n.replaceChild(secondArgument,
             IR.string(secondArgument.getString()));
       }
-      compiler.reportCodeChange();
+      t.reportCodeChange();
     }
   }
 }

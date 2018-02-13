@@ -13,24 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.google.javascript.jscomp;
 
 import com.google.javascript.jscomp.DefinitionsRemover.Definition;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.Node;
-
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Test for {@link DefinitionsRemover}. Basically test for the simple removal
- * cases. More complicated cases will be tested by the clients of
- * {@link DefinitionsRemover}.
+ * Test for {@link DefinitionsRemover}. Basically test for the simple removal cases. More
+ * complicated cases are tested by the clients of {@link DefinitionsRemover} such as {@link
+ * PureFunctionIdentifierTest} and {@link RemoveUnusedCodeTest}.
  *
  */
 public final class DefinitionsRemoverTest extends CompilerTestCase {
+
   public void testRemoveFunction() {
+    setAcceptedLanguage(CompilerOptions.LanguageMode.ECMASCRIPT_2015);
     testSame("{(function (){bar()})}");
     test("{function a(){bar()}}", "{}");
     test("foo(); function a(){} bar()", "foo(); bar();");
@@ -58,20 +58,35 @@ public final class DefinitionsRemoverTest extends CompilerTestCase {
 
   public void testRemoveFunctionExpressionName() {
     test("foo(function f(){})", "foo(function (){})");
+    test("var c = function() {}", "(function() {})");
+  }
+
+  public void testRemoveClass() {
+    test("class C {}", "");
+    test("f(class C {})", "f(class {})");
+    test("var c = class C {}", "(class{})");
+  }
+
+  public void testRemoveClassMemberFunctions() {
+    test("f(class {func(){}})", "f(class{})");
+    test("f(class {static func(){}})", "f(class{})");
+    testSame("f(class {[Symbol.iterator](){}})");
+  }
+
+  public void testRemoveObjectMemberFunctions() {
+    test("use({func(){}});", "use({});");
+    test("use({x: 1, func(){}});", "use({});");
+    test("use({func(){}, x: 1});", "use({});");
   }
 
   @Override
   protected CompilerPass getProcessor(final Compiler compiler) {
     // Create a pass that removes all the definitions.
-    return new CompilerPass() {
-      @Override
-      public void process(Node externs, Node root) {
-        DefinitionsGatherer g = new DefinitionsGatherer();
-        (new NodeTraversal(compiler, g)).traverse(root);
-        for (Definition def : g.definitions) {
-          def.remove();
-          compiler.reportCodeChange();
-        }
+    return (Node externs, Node root) -> {
+      DefinitionsGatherer definitionsGatherer = new DefinitionsGatherer();
+      NodeTraversal.traverseEs6(compiler, root, definitionsGatherer);
+      for (Definition def : definitionsGatherer.definitions) {
+        def.remove(compiler);
       }
     };
   }

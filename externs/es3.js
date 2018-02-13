@@ -25,10 +25,126 @@
  */
 
 
-// These built-ins are still needed for compilation.
+// START ES6 RETROFIT CODE
+// symbol, Symbol and Symbol.iterator are actually ES6 types but some
+// Some types require them to be part of their definition (such as Array).
+
+
+// TODO(johnlenz): symbol should be a primitive type.
+/** @typedef {?} */
+var symbol;
+
+/**
+ * @param {string=} opt_description
+ * @return {symbol}
+ */
+function Symbol(opt_description) {}
+
+
+/**
+ * @param {string} sym
+ * @return {symbol|undefined}
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol/for
+ */
+Symbol.for;
+
+
+/**
+ * @param {symbol} sym
+ * @return {string|undefined}
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol/keyFor
+ */
+Symbol.keyFor;
+
+
+// Well known symbols
+
+/** @const {symbol} */
+Symbol.iterator;
+
+/** @const {symbol} */
+Symbol.toStringTag;
+
+/** @const {symbol} */
+Symbol.unscopables;
+
+
+/**
+ * @record
+ * @template VALUE
+ */
+function IIterableResult() {};
+
+/** @type {boolean} */
+IIterableResult.prototype.done;
+
+/** @type {VALUE} */
+IIterableResult.prototype.value;
+
+
+
+/**
+ * @interface
+ * @template VALUE
+ */
+function Iterable() {}
+
+// TODO(johnlenz): remove the suppression when the compiler understands
+// "symbol" natively
+/**
+ * @return {!Iterator<VALUE>}
+ * @suppress {externsValidation}
+ */
+Iterable.prototype[Symbol.iterator] = function() {};
+
+
+
+/**
+ * @interface
+ * @template VALUE
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/The_Iterator_protocol
+ */
+function Iterator() {}
+
+/**
+ * @param {?=} opt_value
+ * @return {!IIterableResult<VALUE>}
+ */
+Iterator.prototype.next;
+
+
+/**
+ * Use this to indicate a type is both an Iterator and an Iterable.
+ * @interface
+ * @extends {Iterator<T>}
+ * @extends {Iterable<T>}
+ * @template T
+ */
+function IteratorIterable() {}
+
+// END ES6 RETROFIT CODE
+
+
+/**
+ * @interface
+ * @template KEY1, VALUE1
+ */
+function IObject() {}
+
+/**
+ * @record
+ * @extends {IObject<number, VALUE2>}
+ * @template VALUE2
+ */
+function IArrayLike() {}
+
+/** @type {number} */
+IArrayLike.prototype.length;
 
 /**
  * @constructor
+ * @implements {IArrayLike<T>}
+ * @template T
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions_and_function_scope/arguments
  */
 function Arguments() {}
@@ -55,6 +171,17 @@ Arguments.prototype.caller;
 Arguments.prototype.length;
 
 /**
+ * Not actually a global variable, but we need it in order for the current type
+ * checker to typecheck the "arguments" variable in a function correctly.
+ * TODO(tbreisacher): When the old type checker is gone, delete this and add
+ * an 'arguments' variable of type Array<string> in the d8 externs.
+ *
+ * @type {!Arguments}
+ * @see http://developer.mozilla.org/en/Core_JavaScript_1.5_Reference/Functions_and_function_scope/arguments
+ */
+var arguments;
+
+/**
  * @type {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Infinity
  * @const
@@ -78,7 +205,7 @@ var undefined;
 /**
  * @param {string} uri
  * @return {string}
- * @nosideeffects
+ * @throws {URIError} when used wrongly.
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/decodeURI
  */
 function decodeURI(uri) {}
@@ -86,7 +213,7 @@ function decodeURI(uri) {}
 /**
  * @param {string} uri
  * @return {string}
- * @nosideeffects
+ * @throws {URIError} when used wrongly.
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/decodeURIComponent
  */
 function decodeURIComponent(uri) {}
@@ -94,7 +221,8 @@ function decodeURIComponent(uri) {}
 /**
  * @param {string} uri
  * @return {string}
- * @nosideeffects
+ * @throws {URIError} if one attempts to encode a surrogate which is not part of
+ * a high-low pair.
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURI
  */
 function encodeURI(uri) {}
@@ -102,7 +230,8 @@ function encodeURI(uri) {}
 /**
  * @param {string} uri
  * @return {string}
- * @nosideeffects
+ * @throws {URIError} if one attempts to encode a surrogate which is not part of
+ * a high-low pair.
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURIComponent
  */
 function encodeURIComponent(uri) {}
@@ -152,9 +281,9 @@ function isNaN(num) {}
 function parseFloat(num) {}
 
 /**
- * Parse an integer. Use of {@code parseInt} without {@code base} is strictly
+ * Parse an integer. Use of `parseInt` without `base` is strictly
  * banned in Google. If you really want to parse octal or hex based on the
- * leader, then pass {@code undefined} as the base.
+ * leader, then pass `undefined` as the base.
  *
  * @param {*} num
  * @param {number|undefined} base
@@ -171,18 +300,7 @@ function parseInt(num, base) {}
  */
 function eval(code) {}
 
-/**
- * @interface
- * @template KEY1, VALUE1
- */
-function IObject() {}
 
-/**
- * @interface
- * @extends {IObject<number, VALUE2>}
- * @template VALUE2
- */
-function IArrayLike() {}
 
 /**
  * @constructor
@@ -209,6 +327,7 @@ Object.prototype.constructor = function() {};
  * @param {Function} fun
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/defineGetter
+ * @return {undefined}
  */
 Object.prototype.__defineGetter__ = function(sprop, fun) {};
 
@@ -221,6 +340,7 @@ Object.prototype.__defineGetter__ = function(sprop, fun) {};
  * @param {Function} fun
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/defineSetter
+ * @return {undefined}
  */
 Object.prototype.__defineSetter__ = function(sprop, fun) {};
 
@@ -342,11 +462,12 @@ Object.prototype.toString = function() {};
  * Mozilla-only.
  * @param {string} prop The name of a property of the object.
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/unwatch
+ * @return {undefined}
  */
 Object.prototype.unwatch = function(prop) {};
 
 /**
- * Returns the object's {@code this} value.
+ * Returns the object's `this` value.
  * @return {*}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/valueOf
@@ -359,6 +480,7 @@ Object.prototype.valueOf = function() {};
  * @param {string} prop The name of a property of the object.
  * @param {Function} handler A function to call.
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/watch
+ * @return {undefined}
  */
 Object.prototype.watch = function(prop, handler) {};
 
@@ -366,7 +488,6 @@ Object.prototype.watch = function(prop, handler) {};
 /**
  * @constructor
  * @param {...*} var_args
- * @nosideeffects
  * @throws {Error}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function
  */
@@ -433,13 +554,21 @@ Function.prototype.toString = function() {};
 
 /**
  * @constructor
+ * @implements {IArrayLike<T>}
+ * @implements {Iterable<T>}
  * @param {...*} var_args
- * @return {!Array.<?>}
+ * @return {!Array<?>}
  * @nosideeffects
  * @template T
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array
  */
 function Array(var_args) {}
+
+/**
+ * @return {Iterator<T>}
+ * @suppress {externsValidation}
+ */
+Array.prototype[Symbol.iterator] = function() {};
 
 // Functions:
 
@@ -448,7 +577,7 @@ function Array(var_args) {}
  * and/or value(s).
  *
  * @param {...*} var_args
- * @return {!Array.<?>}
+ * @return {!Array<?>}
  * @this {*}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/concat
@@ -462,7 +591,7 @@ Array.prototype.concat = function(var_args) {};
  *     array. The separator is converted to a string if necessary. If omitted,
  *     the array elements are separated with a comma.
  * @return {string}
- * @this {{length: number}|string}
+ * @this {IArrayLike<?>|string}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/join
  */
@@ -472,7 +601,7 @@ Array.prototype.join = function(opt_separator) {};
  * Removes the last element from an array and returns that element.
  *
  * @return {T}
- * @this {{length: number}|Array.<T>}
+ * @this {IArrayLike<T>}
  * @modifies {this}
  * @template T
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/pop
@@ -485,7 +614,7 @@ Array.prototype.pop = function() {};
  *
  * @param {...T} var_args
  * @return {number} The new length of the array.
- * @this {{length: number}|Array.<T>}
+ * @this {IArrayLike<T>}
  * @template T
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/push
@@ -494,9 +623,11 @@ Array.prototype.push = function(var_args) {};
 
 /**
  * Transposes the elements of an array in place: the first array element becomes the
- * last and the last becomes the first.
+ * last and the last becomes the first. The mutated array is also returned.
  *
- * @this {{length: number}}
+ * @return {THIS} A reference to the original modified array.
+ * @this {THIS}
+ * @template THIS
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/reverse
  */
@@ -506,7 +637,7 @@ Array.prototype.reverse = function() {};
  * Removes the first element from an array and returns that element. This
  * method changes the length of the array.
  *
- * @this {{length: number}|Array.<T>}
+ * @this {IArrayLike<T>}
  * @modifies {this}
  * @return {T}
  * @template T
@@ -521,8 +652,8 @@ Array.prototype.shift = function() {};
  *     non-number type will be auto-cast by the browser to a number.
  * @param {*=} opt_end Zero-based index at which to end extraction.  slice
  *     extracts up to but not including end.
- * @return {!Array.<T>}
- * @this {{length: number}|Array.<T>|string}
+ * @return {!Array<T>}
+ * @this {IArrayLike<T>|string}
  * @template T
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/slice
@@ -532,13 +663,15 @@ Array.prototype.slice = function(opt_begin, opt_end) {};
 /**
  * Sorts the elements of an array in place.
  *
- * @param {function(T,T):number=} opt_compareFunction Specifies a function that
+ * @param {function(T,T):number=} opt_compareFn Specifies a function that
  *     defines the sort order.
- * @this {{length: number}|Array.<T>}
+ * @this {IArrayLike<T>}
  * @template T
+ * @modifies {this}
+ * @return {!Array<T>}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/sort
  */
-Array.prototype.sort = function(opt_compareFunction) {};
+Array.prototype.sort = function(opt_compareFn) {};
 
 /**
  * Changes the content of an array, adding new elements while removing old
@@ -550,8 +683,8 @@ Array.prototype.sort = function(opt_compareFunction) {};
  * @param {*=} opt_howMany An integer indicating the number of old array elements
  *     to remove.
  * @param {...T} var_args
- * @return {!Array.<T>}
- * @this {{length: number}|Array.<T>}
+ * @return {!Array<T>}
+ * @this {IArrayLike<T>}
  * @modifies {this}
  * @template T
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/splice
@@ -567,7 +700,7 @@ Array.prototype.splice = function(opt_index, opt_howMany, var_args) {};
 Array.prototype.toSource;
 
 /**
- * @this {Array.<?>}
+ * @this {Array<?>}
  * @return {string}
  * @nosideeffects
  * @override
@@ -580,7 +713,7 @@ Array.prototype.toString = function() {};
  *
  * @param {...*} var_args
  * @return {number} The new length of the array
- * @this {{length: number}}
+ * @this {IArrayLike<?>}
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/unshift
  */
@@ -590,10 +723,10 @@ Array.prototype.unshift = function(var_args) {};
  * Apply a function simultaneously against two values of the array (from
  * left-to-right) as to reduce it to a single value.
  *
- * @param {?function(?, T, number, !Array.<T>) : R} callback
+ * @param {?function(?, T, number, !Array<T>) : R} callback
  * @param {*=} opt_initialValue
  * @return {R}
- * @this {{length: number}|Array.<T>|string}
+ * @this {IArrayLike<T>|string}
  * @template T,R
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/reduce
  */
@@ -603,10 +736,10 @@ Array.prototype.reduce = function(callback, opt_initialValue) {};
  * Apply a function simultaneously against two values of the array (from
  * right-to-left) as to reduce it to a single value.
  *
- * @param {?function(?, T, number, !Array.<T>) : R} callback
+ * @param {?function(?, T, number, !Array<T>) : R} callback
  * @param {*=} opt_initialValue
  * @return {R}
- * @this {{length: number}|Array.<T>|string}
+ * @this {IArrayLike<T>|string}
  * @template T,R
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/reduceRight
  */
@@ -614,10 +747,10 @@ Array.prototype.reduceRight = function(callback, opt_initialValue) {};
 
 /**
  * Available in ECMAScript 5, Mozilla 1.6+.
- * @param {?function(this:S, T, number, !Array.<T>): ?} callback
+ * @param {?function(this:S, T, number, !Array<T>): ?} callback
  * @param {S=} opt_thisobj
  * @return {boolean}
- * @this {{length: number}|Array.<T>|string}
+ * @this {IArrayLike<T>|string}
  * @template T,S
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/every
  */
@@ -625,10 +758,10 @@ Array.prototype.every = function(callback, opt_thisobj) {};
 
 /**
  * Available in ECMAScript 5, Mozilla 1.6+.
- * @param {?function(this:S, T, number, !Array.<T>): ?} callback
+ * @param {?function(this:S, T, number, !Array<T>): ?} callback
  * @param {S=} opt_thisobj
- * @return {!Array.<T>}
- * @this {{length: number}|Array.<T>|string}
+ * @return {!Array<T>}
+ * @this {IArrayLike<T>|string}
  * @template T,S
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/filter
  */
@@ -636,11 +769,12 @@ Array.prototype.filter = function(callback, opt_thisobj) {};
 
 /**
  * Available in ECMAScript 5, Mozilla 1.6+.
- * @param {?function(this:S, T, number, !Array.<T>): ?} callback
+ * @param {?function(this:S, T, number, !Array<T>): ?} callback
  * @param {S=} opt_thisobj
- * @this {{length: number}|Array.<T>|string}
+ * @this {IArrayLike<T>|string}
  * @template T,S
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/forEach
+ * @return {undefined}
  */
 Array.prototype.forEach = function(callback, opt_thisobj) {};
 
@@ -649,7 +783,7 @@ Array.prototype.forEach = function(callback, opt_thisobj) {};
  * @param {T} obj
  * @param {number=} opt_fromIndex
  * @return {number}
- * @this {{length: number}|Array.<T>|string}
+ * @this {IArrayLike<T>|string}
  * @nosideeffects
  * @template T
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/indexOf
@@ -661,7 +795,7 @@ Array.prototype.indexOf = function(obj, opt_fromIndex) {};
  * @param {T} obj
  * @param {number=} opt_fromIndex
  * @return {number}
- * @this {{length: number}|Array.<T>|string}
+ * @this {IArrayLike<T>|string}
  * @nosideeffects
  * @template T
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/lastIndexOf
@@ -670,10 +804,10 @@ Array.prototype.lastIndexOf = function(obj, opt_fromIndex) {};
 
 /**
  * Available in ECMAScript 5, Mozilla 1.6+.
- * @param {?function(this:S, T, number, !Array.<T>): R} callback
+ * @param {?function(this:S, T, number, !Array<T>): R} callback
  * @param {S=} opt_thisobj
- * @return {!Array.<R>}
- * @this {{length: number}|Array.<T>|string}
+ * @return {!Array<R>}
+ * @this {IArrayLike<T>|string}
  * @template T,S,R
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map
  */
@@ -681,10 +815,10 @@ Array.prototype.map = function(callback, opt_thisobj) {};
 
 /**
  * Available in ECMAScript 5, Mozilla 1.6+.
- * @param {?function(this:S, T, number, !Array.<T>): ?} callback
+ * @param {?function(this:S, T, number, !Array<T>): ?} callback
  * @param {S=} opt_thisobj
  * @return {boolean}
- * @this {{length: number}|Array.<T>|string}
+ * @this {IArrayLike<T>|string}
  * @template T,S
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/some
  */
@@ -709,7 +843,7 @@ Array.prototype.input;
 Array.prototype.length;
 
 /**
- * @param {{length: number}|Array.<T>} arr
+ * @param {IArrayLike<T>} arr
  * @param {?function(this:S, T, number, ?) : ?} callback
  * @param {S=} opt_context
  * @return {boolean}
@@ -718,25 +852,26 @@ Array.prototype.length;
 Array.every = function(arr, callback, opt_context) {};
 
 /**
- * @param {{length: number}|Array.<T>} arr
+ * @param {IArrayLike<T>} arr
  * @param {?function(this:S, T, number, ?) : ?} callback
  * @param {S=} opt_context
- * @return {!Array.<T>}
+ * @return {!Array<T>}
  * @template T,S
  */
 Array.filter = function(arr, callback, opt_context) {};
 
 /**
- * @param {{length: number}|Array.<T>} arr
+ * @param {IArrayLike<T>} arr
  * @param {?function(this:S, T, number, ?) : ?} callback
  * @param {S=} opt_context
  * @template T,S
+ * @return {undefined}
  */
 Array.forEach = function(arr, callback, opt_context) {};
 
 /**
  * Mozilla 1.6+ only.
- * @param {{length: number}|Array.<T>} arr
+ * @param {IArrayLike<T>} arr
  * @param {T} obj
  * @param {number=} opt_fromIndex
  * @return {number}
@@ -748,7 +883,7 @@ Array.indexOf = function(arr, obj, opt_fromIndex) {};
 
 /**
  * Mozilla 1.6+ only.
- * @param {{length: number}|Array.<T>} arr
+ * @param {IArrayLike<T>} arr
  * @param {T} obj
  * @param {number=} opt_fromIndex
  * @return {number}
@@ -759,16 +894,16 @@ Array.indexOf = function(arr, obj, opt_fromIndex) {};
 Array.lastIndexOf = function(arr, obj, opt_fromIndex) {};
 
 /**
- * @param {{length: number}|Array.<T>} arr
- * @param {?function(this:S, T, number, !Array.<T>): R} callback
+ * @param {IArrayLike<T>} arr
+ * @param {?function(this:S, T, number, !Array<T>): R} callback
  * @param {S=} opt_context
- * @return {!Array.<R>}
+ * @return {!Array<R>}
  * @template T,S,R
  */
 Array.map = function(arr, callback, opt_context) {};
 
 /**
- * @param {{length: number}|Array.<T>} arr
+ * @param {IArrayLike<T>} arr
  * @param {?function(this:S, T, number, ?) : ?} callback
  * @param {S=} opt_context
  * @return {boolean}
@@ -809,6 +944,14 @@ Boolean.prototype.toSource = function() {};
  * @override
  */
 Boolean.prototype.toString = function() {};
+
+/**
+ * @return {boolean}
+ * @nosideeffects
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Boolean/valueOf
+ * @override
+ */
+Boolean.prototype.valueOf = function() {};
 
 /**
  * @constructor
@@ -859,31 +1002,31 @@ Number.prototype.toString = function(opt_radix) {};
 
 // Properties.
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MAX_VALUE
  */
 Number.MAX_VALUE;
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MIN_VALUE
  */
 Number.MIN_VALUE;
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/NaN
  */
 Number.NaN;
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/NEGATIVE_INFINITY
  */
 Number.NEGATIVE_INFINITY;
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/POSITIVE_INFINITY
  */
 Number.POSITIVE_INFINITY;
@@ -896,7 +1039,7 @@ Number.POSITIVE_INFINITY;
 var Math = {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/abs
@@ -904,7 +1047,7 @@ var Math = {};
 Math.abs = function(x) {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/acos
@@ -912,7 +1055,7 @@ Math.abs = function(x) {};
 Math.acos = function(x) {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/asin
@@ -920,7 +1063,7 @@ Math.acos = function(x) {};
 Math.asin = function(x) {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/atan
@@ -928,8 +1071,8 @@ Math.asin = function(x) {};
 Math.atan = function(x) {};
 
 /**
- * @param {*} y
- * @param {*} x
+ * @param {?} y
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/atan2
@@ -937,7 +1080,7 @@ Math.atan = function(x) {};
 Math.atan2 = function(y, x) {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/ceil
@@ -945,7 +1088,7 @@ Math.atan2 = function(y, x) {};
 Math.ceil = function(x) {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/cos
@@ -953,7 +1096,7 @@ Math.ceil = function(x) {};
 Math.cos = function(x) {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/exp
@@ -961,7 +1104,7 @@ Math.cos = function(x) {};
 Math.exp = function(x) {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/floor
@@ -969,7 +1112,7 @@ Math.exp = function(x) {};
 Math.floor = function(x) {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/log
@@ -977,7 +1120,7 @@ Math.floor = function(x) {};
 Math.log = function(x) {};
 
 /**
- * @param {...*} var_args
+ * @param {...?} var_args
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/max
@@ -985,7 +1128,7 @@ Math.log = function(x) {};
 Math.max = function(var_args) {};
 
 /**
- * @param {...*} var_args
+ * @param {...?} var_args
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/min
@@ -993,8 +1136,8 @@ Math.max = function(var_args) {};
 Math.min = function(var_args) {};
 
 /**
- * @param {*} x
- * @param {*} y
+ * @param {?} x
+ * @param {?} y
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/pow
@@ -1009,7 +1152,7 @@ Math.pow = function(x, y) {};
 Math.random = function() {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/round
@@ -1017,7 +1160,7 @@ Math.random = function() {};
 Math.round = function(x) {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sin
@@ -1025,7 +1168,7 @@ Math.round = function(x) {};
 Math.sin = function(x) {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sqrt
@@ -1033,7 +1176,7 @@ Math.sin = function(x) {};
 Math.sqrt = function(x) {};
 
 /**
- * @param {*} x
+ * @param {?} x
  * @return {number}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/tan
@@ -1050,49 +1193,49 @@ Math.toSource = function() {};
 // Properties:
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/E
  */
 Math.E;
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/LN2
  */
 Math.LN2;
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/LN10
  */
 Math.LN10;
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/LOG2E
  */
 Math.LOG2E;
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/LOG10E
  */
 Math.LOG10E;
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/PI
  */
 Math.PI;
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/SQRT1_2
  */
 Math.SQRT1_2;
 
 /**
- * @type {number}
+ * @const {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/SQRT2
  */
 Math.SQRT2;
@@ -1285,6 +1428,7 @@ Date.prototype.getUTCMilliseconds = function() {};
  * @param {number} dayValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setDate
+ * @return {number}
  */
 Date.prototype.setDate = function(dayValue) {};
 
@@ -1295,6 +1439,7 @@ Date.prototype.setDate = function(dayValue) {};
  * @param {number=} opt_dayValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setMonth
+ * @return {number}
  */
 Date.prototype.setMonth = function(monthValue, opt_dayValue) {};
 
@@ -1306,6 +1451,7 @@ Date.prototype.setMonth = function(monthValue, opt_dayValue) {};
  * @param {number=} opt_dayValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setFullYear
+ * @return {number}
  */
 Date.prototype.setFullYear =
     function(yearValue, opt_monthValue, opt_dayValue) {};
@@ -1317,6 +1463,7 @@ Date.prototype.setFullYear =
  * @deprecated
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setYear
+ * @return {number}
  */
 Date.prototype.setYear = function(yearValue) {};
 
@@ -1329,6 +1476,7 @@ Date.prototype.setYear = function(yearValue) {};
  * @param {number=} opt_msValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setHours
+ * @return {number}
  */
 Date.prototype.setHours = function(hoursValue, opt_minutesValue,
                                    opt_secondsValue, opt_msValue) {};
@@ -1341,6 +1489,7 @@ Date.prototype.setHours = function(hoursValue, opt_minutesValue,
  * @param {number=} opt_msValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setMinutes
+ * @return {number}
  */
 Date.prototype.setMinutes =
     function(minutesValue, opt_secondsValue, opt_msValue) {};
@@ -1352,6 +1501,7 @@ Date.prototype.setMinutes =
  * @param {number=} opt_msValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setSeconds
+ * @return {number}
  */
 Date.prototype.setSeconds = function(secondsValue, opt_msValue) {};
 
@@ -1361,6 +1511,7 @@ Date.prototype.setSeconds = function(secondsValue, opt_msValue) {};
  * @param {number} millisecondsValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setMilliseconds
+ * @return {number}
  */
 Date.prototype.setMilliseconds = function(millisecondsValue) {};
 
@@ -1371,6 +1522,7 @@ Date.prototype.setMilliseconds = function(millisecondsValue) {};
  * @param {number} timeValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setTime
+ * @return {number}
  */
 Date.prototype.setTime = function(timeValue) {};
 
@@ -1380,6 +1532,7 @@ Date.prototype.setTime = function(timeValue) {};
  * @param {number} dayValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setUTCDate
+ * @return {number}
  */
 Date.prototype.setUTCDate = function(dayValue) {};
 
@@ -1390,6 +1543,7 @@ Date.prototype.setUTCDate = function(dayValue) {};
  * @param {number=} opt_dayValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setUTCMonth
+ * @return {number}
  */
 Date.prototype.setUTCMonth = function(monthValue, opt_dayValue) {};
 
@@ -1401,6 +1555,7 @@ Date.prototype.setUTCMonth = function(monthValue, opt_dayValue) {};
  * @param {number=} opt_dayValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setUTCFullYear
+ * @return {number}
  */
 Date.prototype.setUTCFullYear = function(yearValue, opt_monthValue,
                                          opt_dayValue) {};
@@ -1414,6 +1569,7 @@ Date.prototype.setUTCFullYear = function(yearValue, opt_monthValue,
  * @param {number=} opt_msValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setUTCHours
+ * @return {number}
  */
 Date.prototype.setUTCHours = function(hoursValue, opt_minutesValue,
                                       opt_secondsValue, opt_msValue) {};
@@ -1426,6 +1582,7 @@ Date.prototype.setUTCHours = function(hoursValue, opt_minutesValue,
  * @param {number=} opt_msValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setUTCMinutes
+ * @return {number}
  */
 Date.prototype.setUTCMinutes = function(minutesValue, opt_secondsValue,
                                         opt_msValue) {};
@@ -1438,6 +1595,7 @@ Date.prototype.setUTCMinutes = function(minutesValue, opt_secondsValue,
  * @param {number=} opt_msValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setUTCSeconds
+ * @return {number}
  */
 Date.prototype.setUTCSeconds = function(secondsValue, opt_msValue) {};
 
@@ -1447,6 +1605,7 @@ Date.prototype.setUTCSeconds = function(secondsValue, opt_msValue) {};
  * @param {number} millisecondsValue
  * @modifies {this}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setUTCMilliseconds
+ * @return {number}
  */
 Date.prototype.setUTCMilliseconds = function(millisecondsValue) {};
 
@@ -1487,7 +1646,7 @@ Date.prototype.toTimeString = function() {};
 Date.prototype.toUTCString = function() {};
 
 /**
- * @param {(string|Array.<string>)=} opt_locales
+ * @param {(string|Array<string>)=} opt_locales
  * @param {Object=} opt_options
  * @return {string}
  * @nosideeffects
@@ -1504,7 +1663,7 @@ Date.prototype.toLocaleDateString = function(opt_locales, opt_options) {};
 Date.prototype.toLocaleFormat = function(formatString) {};
 
 /**
- * @param {string|Array.<string>=} opt_locales
+ * @param {string|Array<string>=} opt_locales
  * @param {Object=} opt_options
  * @return {string}
  * @nosideeffects
@@ -1515,7 +1674,7 @@ Date.prototype.toLocaleFormat = function(formatString) {};
 Date.prototype.toLocaleString = function(opt_locales, opt_options) {};
 
 /**
- * @param {(string|Array.<string>)=} opt_locales
+ * @param {(string|Array<string>)=} opt_locales
  * @param {Object=} opt_options
  * @return {string}
  * @nosideeffects
@@ -1540,13 +1699,13 @@ Date.prototype.valueOf;
 
 /**
  * @constructor
+ * @implements {Iterable<string>}
  * @param {*=} opt_str
  * @return {string}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String
  */
 function String(opt_str) {}
-// Functions:
 
 /**
  * @param {...number} var_args
@@ -1699,7 +1858,7 @@ String.prototype.link = function(hrefAttribute) {};
  *
  * @this {*}
  * @param {?string} compareString
- * @param {string|Array.<string>=} locales
+ * @param {string|Array<string>=} locales
  * @param {Object=} options
  * @return {number}
  * @nosideeffects
@@ -1714,7 +1873,7 @@ String.prototype.localeCompare = function(compareString, locales, options) {};
  *
  * @this {String|string}
  * @param {*} regexp
- * @return {Array.<string>} This should really return an Array with a few
+ * @return {Array<string>} This should really return an Array with a few
  *     special properties, but we do not have a good way to model this in
  *     our type system. Also see Regexp.prototype.exec.
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/match
@@ -1736,24 +1895,23 @@ String.prototype.quote = function() {};
  * This may have side-effects if the replacement function has side-effects.
  *
  * @this {String|string}
- * @param {RegExp|string} regex
- * @param {string|Function} str
- * @param {string=} opt_flags
+ * @param {RegExp|string} pattern
+ * @param {string|Function} replacement
  * @return {string}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/replace
  */
-String.prototype.replace = function(regex, str, opt_flags) {};
+String.prototype.replace = function(pattern, replacement) {};
 
 /**
  * Executes the search for a match between a regular expression and this String
  * object.
  *
  * @this {String|string}
- * @param {RegExp|string} regexp
+ * @param {RegExp|string} pattern
  * @return {number}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/search
  */
-String.prototype.search = function(regexp) {};
+String.prototype.search = function(pattern) {};
 
 /**
  * @this {String|string}
@@ -1777,7 +1935,7 @@ String.prototype.small = function() {};
  * @this {String|string}
  * @param {*=} opt_separator
  * @param {number=} opt_limit
- * @return {!Array.<string>}
+ * @return {!Array<string>}
  * @nosideeffects
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/split
  */
@@ -1892,7 +2050,7 @@ String.prototype.length;
  * @param {*=} opt_pattern
  * @param {*=} opt_flags
  * @return {!RegExp}
- * @nosideeffects
+ * @throws {SyntaxError} if opt_pattern is an invalid pattern.
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp
  */
 function RegExp(opt_pattern, opt_flags) {}
@@ -1910,7 +2068,7 @@ RegExp.prototype.compile = function(pattern, opt_flags) {};
 
 /**
  * @param {*} str The string to search.
- * @return {Array.<string>} This should really return an Array with a few
+ * @return {Array<string>} This should really return an Array with a few
  *     special properties, but we do not have a good way to model this in
  *     our type system. Also see String.prototype.match.
  * @see http://msdn.microsoft.com/en-us/library/z908hy33(VS.85).aspx
@@ -2041,6 +2199,13 @@ RegExp.prototype.ignoreCase;
 RegExp.prototype.lastIndex;
 
 /**
+ * Whether or not the regular expression uses lastIndex.
+ * @type {boolean}
+ * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/sticky
+ */
+RegExp.prototype.sticky;
+
+/**
  * Whether or not to search in strings across multiple lines.
  * @type {boolean}
  * @see http://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/multiline
@@ -2054,6 +2219,12 @@ RegExp.prototype.multiline;
  */
 RegExp.prototype.source;
 
+/**
+ * The flags the regex was created with.
+ * @type {string}
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/flags
+ */
+RegExp.prototype.flags;
 
 /**
  * @constructor
@@ -2084,6 +2255,7 @@ Error.stackTraceLimit;
  * @param {Object} error The object to add the stack trace to.
  * @param {Function=} opt_constructor A function in the stack trace
  * @see http://code.google.com/p/v8/wiki/JavaScriptStackTraceApi
+ * @return {undefined}
  */
 Error.captureStackTrace = function(error, opt_constructor){};
 

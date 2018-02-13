@@ -21,7 +21,30 @@ public final class PeepholeCollectPropertyAssignmentsTest extends CompilerTestCa
   @Override
   protected CompilerPass getProcessor(final Compiler compiler) {
     return new PeepholeOptimizationsPass(
-        compiler, new PeepholeCollectPropertyAssignments());
+        compiler, getName(), new PeepholeCollectPropertyAssignments());
+  }
+
+  public void test36122565a() {
+    testSame(
+        lines(
+            "var foo = { bar: g(), baz: 4 };",
+            "foo.bar = 3;",
+            "foo.baz = 3;",
+            "console.log(foo.bar);",
+            "console.log(foo.baz);"));
+
+    test(
+        lines(
+            "var foo = { bar: g(), baz: 4 };",
+            "foo.baz = 3;",
+            "foo.bar = 3;",
+            "console.log(foo.bar);",
+            "console.log(foo.baz);"),
+        lines(
+            "var foo = { bar: g(), baz: 3 };",
+            "foo.bar = 3;",
+            "console.log(foo.bar);",
+            "console.log(foo.baz);"));
   }
 
   public final void testArrayOptimization1() {

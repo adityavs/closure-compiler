@@ -16,7 +16,7 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkArgument;
 
 import java.util.List;
 
@@ -28,7 +28,7 @@ import java.util.List;
  *
  * <p>For example:
  * <pre>
- * List<String> paths = new ArrayList<String>();
+ * List&lt;String&gt; paths = new ArrayList&lt;String&gt;();
  * paths.add("foo");
  * WarningsGuard guard =
  *     ByPathWarningsGuard.forPath(paths, CheckLevel.ERROR, 1);
@@ -44,7 +44,7 @@ public final class ByPathWarningsGuard extends WarningsGuard {
   private final List<String> paths;
   private final boolean include;
   private final int priority;
-  private CheckLevel level;
+  private final CheckLevel level;
 
   /**
    * Constructs a new instance. The priority is determined by the
@@ -56,9 +56,8 @@ public final class ByPathWarningsGuard extends WarningsGuard {
    */
   private ByPathWarningsGuard(
       List<String> paths, boolean include, CheckLevel level) {
-    Preconditions.checkArgument(paths != null);
-    Preconditions.checkArgument(
-        level == CheckLevel.OFF || level == CheckLevel.ERROR);
+    checkArgument(paths != null);
+    checkArgument(level == CheckLevel.OFF || level == CheckLevel.ERROR);
     this.paths = paths;
     this.include = include;
     this.level = level;

@@ -39,13 +39,15 @@
 
 package com.google.javascript.rhino.jstype;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.base.Predicate;
+import com.google.common.collect.ImmutableList;
 import com.google.javascript.rhino.ErrorReporter;
 import com.google.javascript.rhino.Node;
-
 import java.util.ArrayList;
 import java.util.List;
+import javax.annotation.Nullable;
 
 /**
  * A {@code NamedType} is a named reference to some other type.  This provides
@@ -90,12 +92,19 @@ public class NamedType extends ProxyObjectType {
   /**
    * Validates the type resolution.
    */
-  private Predicate<JSType> validator;
+  private transient Predicate<JSType> validator;
 
   /**
    * Property-defining continuations.
    */
   private List<PropertyContinuation> propertyContinuations = null;
+
+  /**
+   * Template types defined on a named, not yet resolved type, or {@code null} if none. These are
+   * ignored during resolution, for backwards compatibility with existing usage.
+   * This field is not used for JSCompiler's type checking; it is only needed by Clutz.
+   */
+  @Nullable private ImmutableList<JSType> templateTypes;
 
   /**
    * Create a named type based on the reference.
@@ -104,11 +113,27 @@ public class NamedType extends ProxyObjectType {
       String sourceName, int lineno, int charno) {
     super(registry, registry.getNativeObjectType(JSTypeNative.UNKNOWN_TYPE));
 
-    Preconditions.checkNotNull(reference);
+    checkNotNull(reference);
     this.reference = reference;
     this.sourceName = sourceName;
     this.lineno = lineno;
     this.charno = charno;
+  }
+
+  NamedType(
+      JSTypeRegistry registry,
+      String reference,
+      String sourceName,
+      int lineno,
+      int charno,
+      ImmutableList<JSType> templateTypes) {
+    this(registry, reference, sourceName, lineno, charno);
+    this.templateTypes = templateTypes;
+  }
+
+  @Override
+  public ImmutableList<JSType> getTemplateTypes() {
+    return templateTypes;
   }
 
   @Override
@@ -132,11 +157,11 @@ public class NamedType extends ProxyObjectType {
 
   private void finishPropertyContinuations() {
     ObjectType referencedObjType = getReferencedObjTypeInternal();
-    if (referencedObjType != null && !referencedObjType.isUnknownType()) {
-      if (propertyContinuations != null) {
-        for (PropertyContinuation c : propertyContinuations) {
-          c.commit(this);
-        }
+    if (referencedObjType != null
+        && !referencedObjType.isUnknownType()
+        && propertyContinuations != null) {
+      for (PropertyContinuation c : propertyContinuations) {
+        c.commit(this);
       }
     }
     propertyContinuations = null;
@@ -153,8 +178,8 @@ public class NamedType extends ProxyObjectType {
   }
 
   @Override
-  String toStringHelper(boolean forAnnotations) {
-    return reference;
+  StringBuilder appendTo(StringBuilder sb, boolean forAnnotations) {
+    return sb.append(this.reference);
   }
 
   @Override
@@ -163,8 +188,8 @@ public class NamedType extends ProxyObjectType {
   }
 
   @Override
-  boolean isNamedType() {
-    return true;
+  public NamedType toMaybeNamedType() {
+    return this;
   }
 
   @Override
@@ -194,8 +219,7 @@ public class NamedType extends ProxyObjectType {
     if (resolved) {
       super.resolveInternal(t, enclosing);
       finishPropertyContinuations();
-      return registry.isLastGeneration() ?
-          getReferencedType() : this;
+      return getReferencedType();
     }
 
     resolveViaProperties(t, enclosing);
@@ -207,8 +231,7 @@ public class NamedType extends ProxyObjectType {
     if (isResolved()) {
       finishPropertyContinuations();
     }
-    return registry.isLastGeneration() ?
-        getReferencedType() : this;
+    return getReferencedType();
   }
 
   /**
@@ -239,8 +262,8 @@ public class NamedType extends ProxyObjectType {
       setReferencedAndResolvedType(functionType.getInstanceType(), reporter);
     } else if (value != null && value.isNoObjectType()) {
       setReferencedAndResolvedType(
-          registry.getNativeFunctionType(
-              JSTypeNative.NO_OBJECT_TYPE).getInstanceType(), reporter);
+          registry.getNativeObjectType(
+              JSTypeNative.NO_OBJECT_TYPE), reporter);
     } else if (value instanceof EnumType) {
       setReferencedAndResolvedType(
           ((EnumType) value).getElementsType(), reporter);
@@ -334,26 +357,19 @@ public class NamedType extends ProxyObjectType {
   // type name.
   private void handleUnresolvedType(
       ErrorReporter t, boolean ignoreForwardReferencedTypes) {
-    if (registry.isLastGeneration()) {
-      boolean isForwardDeclared =
-          ignoreForwardReferencedTypes &&
-          registry.isForwardDeclaredType(reference);
-      if (!isForwardDeclared && registry.isLastGeneration()) {
-        warning(t, "Bad type annotation. Unknown type " + reference);
-      } else {
-        setReferencedType(
-            registry.getNativeObjectType(
-                JSTypeNative.NO_RESOLVED_TYPE));
-
-        if (registry.isLastGeneration() && validator != null) {
-          validator.apply(getReferencedType());
-        }
-      }
-
-      setResolvedTypeInternal(getReferencedType());
+    boolean isForwardDeclared =
+        ignoreForwardReferencedTypes && registry.isForwardDeclaredType(reference);
+    if (!isForwardDeclared) {
+      String msg = "Bad type annotation. Unknown type " + reference;
+      warning(t, msg);
     } else {
-      setResolvedTypeInternal(this);
+      setReferencedType(new NoResolvedType(registry, getReferenceName(), getTemplateTypes()));
+      if (validator != null) {
+        validator.apply(getReferencedType());
+      }
     }
+
+    setResolvedTypeInternal(getReferencedType());
   }
 
   private JSType getTypedefType(ErrorReporter t, StaticTypedSlot<JSType> slot) {
@@ -404,6 +420,14 @@ public class NamedType extends ProxyObjectType {
       target.defineProperty(
           propertyName, type, inferred, propertyNode);
     }
+  }
+
+  @Override
+  public boolean isObject() {
+    if (isEnumElementType()) {
+      return toMaybeEnumElementType().isObject();
+    }
+    return super.isObject();
   }
 
   @Override

@@ -16,29 +16,27 @@
 
 package com.google.javascript.jscomp.parsing;
 
+import com.google.common.base.Ascii;
 import com.google.common.base.Preconditions;
-import com.google.common.math.DoubleMath;
-import com.google.javascript.jscomp.parsing.Config.LanguageMode;
 import com.google.javascript.jscomp.parsing.ParserRunner.ParseResult;
 import com.google.javascript.rhino.ErrorReporter;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.SimpleErrorReporter;
 import com.google.javascript.rhino.StaticSourceFile;
 
-import java.util.HashSet;
-
 /**
  * A parser for the type transformation expressions (TTL-Exp) as in
- * @template T := TTL-Exp =:
+ * {@code @template T := TTL-Exp =:}
  *
  */
 public final class TypeTransformationParser {
 
-  private String typeTransformationString;
+  private final String typeTransformationString;
   private Node typeTransformationAst;
-  private StaticSourceFile sourceFile;
-  private ErrorReporter errorReporter;
-  private int templateLineno, templateCharno;
+  private final StaticSourceFile sourceFile;
+  private final ErrorReporter errorReporter;
+  private final int templateLineno;
+  private final int templateCharno;
 
   private static final int VAR_ARGS = Integer.MAX_VALUE;
 
@@ -79,7 +77,8 @@ public final class TypeTransformationParser {
     UNKNOWN("unknown", 0, 0, OperationKind.TYPE_CONSTRUCTOR);
 
     public final String name;
-    public final int minParamCount, maxParamCount;
+    public final int minParamCount;
+    public final int maxParamCount;
     public final OperationKind kind;
 
     Keywords(String name, int minParamCount, int maxParamCount,
@@ -118,7 +117,7 @@ public final class TypeTransformationParser {
   }
 
   private Keywords nameToKeyword(String s) {
-    return Keywords.valueOf(s.toUpperCase());
+    return Keywords.valueOf(Ascii.toUpperCase(s));
   }
 
   private boolean isValidKeyword(String name) {
@@ -159,7 +158,7 @@ public final class TypeTransformationParser {
   private int getFunctionParamCount(Node n) {
     Preconditions.checkArgument(n.isFunction(),
         "Expected a function node, found %s", n);
-    return n.getChildAtIndex(1).getChildCount();
+    return n.getSecondChild().getChildCount();
   }
 
   private Node getFunctionBody(Node n) {
@@ -249,8 +248,11 @@ public final class TypeTransformationParser {
    * at least one warning is reported
    */
   public boolean parseTypeTransformation() {
-    Config config = new Config(new HashSet<String>(),
-        new HashSet<String>(), true, LanguageMode.ECMASCRIPT6);
+    Config config =
+        Config.builder()
+            .setLanguageMode(Config.LanguageMode.ECMASCRIPT6)
+            .setStrictMode(Config.StrictMode.SLOPPY)
+            .build();
     // TODO(lpino): ParserRunner reports errors if the expression is not
     // ES6 valid. We need to abort the validation of the type transformation
     // whenever an error is reported.
@@ -263,15 +265,24 @@ public final class TypeTransformationParser {
       return false;
     }
 
-    Node expr = ast.getFirstChild().getFirstChild();
+    Node expr = ast.getFirstFirstChild();
     // The AST of the type transformation must correspond to a valid expression
     if (!validTypeTransformationExpression(expr)) {
       // No need to add a new warning because the validation does it
       return false;
     }
+    fixLineNumbers(expr);
     // Store the result if the AST is valid
     typeTransformationAst = expr;
     return true;
+  }
+
+  private void fixLineNumbers(Node expr) {
+    // TODO(tbreisacher): Also fix column numbers.
+    expr.setLineno(expr.getLineno() + templateLineno);
+    for (Node child : expr.children()) {
+      fixLineNumbers(child);
+    }
   }
 
   /**
@@ -385,7 +396,7 @@ public final class TypeTransformationParser {
       return false;
     }
     double index = getCallArgument(expr, 1).getDouble();
-    if (!DoubleMath.isMathematicalInteger(index) || index < 0) {
+    if (index < 0 || index % 1 != 0) {
       warnInvalid("index", expr);
       warnInvalidInside(Keywords.TEMPLATETYPEOF.name, expr);
       return false;
@@ -403,7 +414,7 @@ public final class TypeTransformationParser {
     if (expr.isObjectLit()) {
       // Each value of a property must be a valid expression
       for (Node prop : expr.children()) {
-        if (!prop.hasChildren()) {
+        if (prop.isShorthandProperty()) {
           warnInvalid("property, missing type", prop);
           return false;
         } else if (!validTypeTransformationExpression(prop.getFirstChild())) {
@@ -450,7 +461,7 @@ public final class TypeTransformationParser {
       return false;
     }
     Node typeExpr = JsDocInfoParser.parseTypeString(typeString.getString());
-    typeString.detachFromParent();
+    typeString.detach();
     expr.addChildToBack(typeExpr);
     return true;
   }
@@ -545,7 +556,7 @@ public final class TypeTransformationParser {
       valid = validBooleanExpression(expr.getFirstChild());
     } else {
       valid = validBooleanExpression(expr.getFirstChild())
-          && validBooleanExpression(expr.getChildAtIndex(1));
+          && validBooleanExpression(expr.getSecondChild());
     }
     if (!valid) {
       warnInvalidInside("boolean", expr);

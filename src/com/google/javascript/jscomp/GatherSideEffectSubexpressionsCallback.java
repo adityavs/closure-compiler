@@ -23,10 +23,8 @@ import com.google.javascript.jscomp.NodeTraversal.Callback;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Callback that gathers subexpressions that may have side effects
@@ -111,7 +109,7 @@ class GatherSideEffectSubexpressionsCallback implements Callback {
     @Override
     public void keepSubTree(Node original) {
       if (original.getParent() != null) {
-        original.detachFromParent();
+        original.detach();
       }
       replacements.add(original);
     }
@@ -120,7 +118,8 @@ class GatherSideEffectSubexpressionsCallback implements Callback {
     public void keepSimplifiedShortCircuitExpression(Node original) {
       Preconditions.checkArgument(
           (original.isAnd()) || (original.isOr()),
-          "Expected: AND or OR, Got: %s", Token.name(original.getType()));
+          "Expected: AND or OR, Got: %s",
+          original.getToken());
       Node left = original.getFirstChild();
       Node right = left.getNext();
       Node simplifiedRight = simplifyShortCircuitBranch(right);
@@ -134,8 +133,7 @@ class GatherSideEffectSubexpressionsCallback implements Callback {
     public void keepSimplifiedHookExpression(Node hook,
                                              boolean thenHasSideEffects,
                                              boolean elseHasSideEffects) {
-      Preconditions.checkArgument(hook.isHook(),
-          "Expected: HOOK, Got: %s", Token.name(hook.getType()));
+      Preconditions.checkArgument(hook.isHook(), "Expected: HOOK, Got: %s", hook.getToken());
       Node condition = hook.getFirstChild();
       Node thenBranch = condition.getNext();
       Node elseBranch = thenBranch.getNext();
@@ -146,12 +144,12 @@ class GatherSideEffectSubexpressionsCallback implements Callback {
         hook.addChildToBack(simplifyShortCircuitBranch(elseBranch));
         keepSubTree(hook);
       } else if (thenHasSideEffects || elseHasSideEffects) {
-        int type = thenHasSideEffects ? Token.AND : Token.OR;
+        Token type = thenHasSideEffects ? Token.AND : Token.OR;
         Node body = thenHasSideEffects ? thenBranch : elseBranch;
         Node simplified = new Node(
-            type, condition.detachFromParent(),
+            type, condition.detach(),
             simplifyShortCircuitBranch(body))
-            .copyInformationFrom(hook);
+            .useSourceInfoIfMissingFrom(hook);
         keepSubTree(simplified);
       } else {
         throw new IllegalArgumentException(
@@ -161,7 +159,7 @@ class GatherSideEffectSubexpressionsCallback implements Callback {
 
     private Node simplifyShortCircuitBranch(Node node) {
       List<Node> parts = new ArrayList<>();
-      NodeTraversal.traverse(
+      NodeTraversal.traverseEs6(
           compiler, node,
           new GatherSideEffectSubexpressionsCallback(
               compiler,
@@ -186,8 +184,8 @@ class GatherSideEffectSubexpressionsCallback implements Callback {
     }
   }
 
-  private static final Set<Integer> FORBIDDEN_TYPES = ImmutableSet.of(
-      Token.BLOCK, Token.SCRIPT, Token.VAR, Token.EXPR_RESULT, Token.RETURN);
+  private static final ImmutableSet<Token> FORBIDDEN_TYPES =
+      ImmutableSet.of(Token.BLOCK, Token.SCRIPT, Token.VAR, Token.EXPR_RESULT, Token.RETURN);
   private final AbstractCompiler compiler;
   private final SideEffectAccumulator accumulator;
 
@@ -227,10 +225,8 @@ class GatherSideEffectSubexpressionsCallback implements Callback {
   @Override
   public boolean shouldTraverse(
       NodeTraversal traversal, Node node, Node parent) {
-    if (FORBIDDEN_TYPES.contains(node.getType()) ||
-        NodeUtil.isControlStructure(node)) {
-      throw new IllegalArgumentException(
-          Token.name(node.getType()) + " nodes are not supported.");
+    if (FORBIDDEN_TYPES.contains(node.getToken()) || NodeUtil.isControlStructure(node)) {
+      throw new IllegalArgumentException(node.getToken() + " nodes are not supported.");
     }
 
     // Do not recurse into nested functions.
@@ -272,8 +268,7 @@ class GatherSideEffectSubexpressionsCallback implements Callback {
    */
   boolean processShortCircuitExpression(Node node) {
     Preconditions.checkArgument(
-        (node.isAnd()) || (node.isOr()),
-        "Expected: AND or OR, Got: %s", Token.name(node.getType()));
+        (node.isAnd()) || (node.isOr()), "Expected: AND or OR, Got: %s", node.getToken());
 
     // keep whole expression if RHS of the branching expression
     // contains a call.
@@ -293,8 +288,7 @@ class GatherSideEffectSubexpressionsCallback implements Callback {
    * @return true to continue traversal, false otherwise
    */
   boolean processHook(Node node) {
-    Preconditions.checkArgument(node.isHook(),
-        "Expected: HOOK, Got: %s", Token.name(node.getType()));
+    Preconditions.checkArgument(node.isHook(), "Expected: HOOK, Got: %s", node.getToken());
 
     Node condition = node.getFirstChild();
     Node ifBranch = condition.getNext();
@@ -318,8 +312,7 @@ class GatherSideEffectSubexpressionsCallback implements Callback {
    * @return true to continue traversal, false otherwise
    */
   boolean processFunctionCall(Node node) {
-    Preconditions.checkArgument(node.isCall(),
-        "Expected: CALL, Got: %s", Token.name(node.getType()));
+    Preconditions.checkArgument(node.isCall(), "Expected: CALL, Got: %s", node.getToken());
 
     // Calls to functions that are known to be "pure" have no side
     // effects.
@@ -345,8 +338,7 @@ class GatherSideEffectSubexpressionsCallback implements Callback {
    * @return true to continue traversal, false otherwise
    */
   boolean processConstructorCall(Node node) {
-    Preconditions.checkArgument(node.isNew(),
-        "Expected: NEW, Got: %s", Token.name(node.getType()));
+    Preconditions.checkArgument(node.isNew(), "Expected: NEW, Got: %s", node.getToken());
 
     // Calls to constructors that are known to be "pure" have no
     // side effects.

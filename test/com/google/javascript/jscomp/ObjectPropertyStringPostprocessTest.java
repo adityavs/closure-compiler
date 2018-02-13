@@ -22,6 +22,7 @@ package com.google.javascript.jscomp;
  *
  */
 public final class ObjectPropertyStringPostprocessTest extends CompilerTestCase {
+
   @Override
   protected CompilerPass getProcessor(final Compiler compiler) {
     return new ObjectPropertyStringPostprocess(compiler);

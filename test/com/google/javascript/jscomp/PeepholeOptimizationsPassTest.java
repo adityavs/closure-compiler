@@ -21,7 +21,6 @@ import static com.google.common.truth.Truth.assertThat;
 import com.google.common.collect.ImmutableList;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -36,16 +35,9 @@ public final class PeepholeOptimizationsPassTest extends CompilerTestCase {
   private ImmutableList<AbstractPeepholeOptimization> currentPeepholePasses;
 
   @Override
-  public void setUp() throws Exception {
-    super.setUp();
-    super.enableLineNumberCheck(true);
-  }
-
-  @Override
-  public CompilerPass getProcessor(final Compiler compiler) {
-    return new PeepholeOptimizationsPass(compiler,
-        currentPeepholePasses.toArray(
-            new AbstractPeepholeOptimization[currentPeepholePasses.size()]));
+  protected CompilerPass getProcessor(final Compiler compiler) {
+    return new PeepholeOptimizationsPass(
+        compiler, getName(), currentPeepholePasses.toArray(new AbstractPeepholeOptimization[0]));
   }
 
   @Override
@@ -112,7 +104,7 @@ public final class PeepholeOptimizationsPassTest extends CompilerTestCase {
     currentPeepholePasses =
       ImmutableList.of(note1Applied, note2Applied);
 
-    test("var x; var y", "var x; var y");
+    testSame("var x; var y");
 
     /*
      * We expect the optimization order to be: "x" visited by optimization1 "x"
@@ -141,8 +133,8 @@ public final class PeepholeOptimizationsPassTest extends CompilerTestCase {
         }
 
         for (Node childToRemove : nodesToRemove) {
+          compiler.reportChangeToEnclosingScope(node);
           node.removeChild(childToRemove);
-          reportCodeChange();
         }
       }
 
@@ -159,8 +151,8 @@ public final class PeepholeOptimizationsPassTest extends CompilerTestCase {
     @Override
     public Node optimizeSubtree(Node node) {
       if (node.isName() && "x".equals(node.getString())) {
-        node.getParent().removeChild(node);
-        reportCodeChange();
+        compiler.reportChangeToEnclosingScope(node);
+        node.detach();
 
         return null;
       }
@@ -180,8 +172,8 @@ public final class PeepholeOptimizationsPassTest extends CompilerTestCase {
       if (node.isName() && "x".equals(node.getString())) {
         Node parent = node.getParent();
         if (parent.isVar()) {
-          parent.getParent().removeChild(parent);
-          reportCodeChange();
+          compiler.reportChangeToEnclosingScope(parent);
+          parent.detach();
           return null;
         }
       }
@@ -199,8 +191,8 @@ public final class PeepholeOptimizationsPassTest extends CompilerTestCase {
       if (node.isName() && "y".equals(node.getString())) {
         Node replacement = Node.newString(Token.NAME, "x");
 
-        node.getParent().replaceChild(node, replacement);
-        reportCodeChange();
+        node.replaceWith(replacement);
+        compiler.reportChangeToEnclosingScope(replacement);
 
         return replacement;
       }

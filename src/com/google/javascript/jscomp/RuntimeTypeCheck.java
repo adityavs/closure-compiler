@@ -16,6 +16,9 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkState;
+
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.javascript.rhino.IR;
@@ -24,11 +27,9 @@ import com.google.javascript.rhino.StaticSourceFile;
 import com.google.javascript.rhino.jstype.FunctionType;
 import com.google.javascript.rhino.jstype.JSType;
 import com.google.javascript.rhino.jstype.ObjectType;
-
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.TreeSet;
-
 import javax.annotation.Nullable;
 
 /**
@@ -78,8 +79,8 @@ class RuntimeTypeCheck implements CompilerPass {
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, new AddMarkers(compiler));
-    NodeTraversal.traverse(compiler, root, new AddChecks());
+    NodeTraversal.traverseEs6(compiler, root, new AddMarkers(compiler));
+    NodeTraversal.traverseEs6(compiler, root, new AddChecks());
     addBoilerplateCode();
     new Normalize(compiler, false).process(externs, root);
   }
@@ -139,7 +140,7 @@ class RuntimeTypeCheck implements CompilerPass {
         return nodeToInsertAfter;
       }
 
-      String className = NodeUtil.getFunctionName(funType.getSource());
+      String className = NodeUtil.getName(funType.getSource());
 
       // This can happen with anonymous classes declared with the type
       // {@code Function}.
@@ -163,7 +164,7 @@ class RuntimeTypeCheck implements CompilerPass {
           IR.trueNode()));
 
       nodeToInsertAfter.getParent().addChildAfter(assign, nodeToInsertAfter);
-      compiler.reportCodeChange();
+      compiler.reportChangeToEnclosingScope(assign);
       nodeToInsertAfter = assign;
       return nodeToInsertAfter;
     }
@@ -189,7 +190,7 @@ class RuntimeTypeCheck implements CompilerPass {
     }
 
     private static Node findEnclosingConstructorDeclaration(Node n) {
-      while (!n.getParent().isScript() && !n.getParent().isBlock()) {
+      while (!n.getParent().isScript() && !n.getParent().isNormalBlock()) {
         n = n.getParent();
       }
       return n;
@@ -217,6 +218,10 @@ class RuntimeTypeCheck implements CompilerPass {
 
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
+      if (NodeUtil.isInSyntheticScript(n)) {
+        return;
+      }
+
       if (n.isFunction()) {
         visitFunction(n);
       } else if (n.isReturn()) {
@@ -263,7 +268,7 @@ class RuntimeTypeCheck implements CompilerPass {
           block.addChildAfter(checkNode, insertionPoint);
         }
 
-        compiler.reportCodeChange();
+        compiler.reportChangeToEnclosingScope(block);
         paramName = paramName.getNext();
         insertionPoint = checkNode;
       }
@@ -286,7 +291,7 @@ class RuntimeTypeCheck implements CompilerPass {
       }
 
       n.replaceChild(retValue, checkNode);
-      compiler.reportCodeChange();
+      t.reportCodeChange();
     }
 
     /**
@@ -358,6 +363,8 @@ class RuntimeTypeCheck implements CompilerPass {
                         "interfaceChecker" : "classChecker"),
                 IR.string(refName));
 
+      } else if (type.isFunctionType()) {
+        return IR.call(jsCode("valueChecker"), IR.string("function"));
       } else {
         // We don't check this type (e.g. unknown & all types).
         return null;
@@ -366,20 +373,28 @@ class RuntimeTypeCheck implements CompilerPass {
   }
 
   private void addBoilerplateCode() {
-    Node newNode = compiler.ensureLibraryInjected("runtime_type_check", true);
-    if (newNode != null && logFunction != null) {
-      // Inject the custom log function.
-      Node logOverride = IR.exprResult(
-          IR.assign(
-              NodeUtil.newQName(
-                  compiler,
-                  "$jscomp.typecheck.log"),
-              NodeUtil.newQName(
-                  compiler,
-                  logFunction)));
-      newNode.getParent().addChildAfter(logOverride, newNode);
-      compiler.reportCodeChange();
+    Node newNode = compiler.ensureLibraryInjected("runtime_type_check", false);
+    if (newNode != null) {
+      injectCustomLogFunction(newNode);
     }
+  }
+
+  @VisibleForTesting
+  void injectCustomLogFunction(Node node) {
+    if (logFunction == null) {
+      return;
+    }
+    checkState(
+        NodeUtil.isValidQualifiedName(compiler.getFeatureSet(), logFunction),
+        "%s is not a valid qualified name", logFunction);
+    Node logOverride =
+        IR.exprResult(
+            IR.assign(
+                NodeUtil.newQName(compiler, "$jscomp.typecheck.log"),
+                NodeUtil.newQName(compiler, logFunction)));
+    checkState(node.getParent().isScript(), node.getParent());
+    node.getParent().addChildAfter(logOverride, node);
+    compiler.reportChangeToEnclosingScope(node);
   }
 
   private Node jsCode(String prop) {

@@ -44,14 +44,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.ResourceBundle;
+import javax.annotation.Nullable;
 
 /**
  * A simple {@link ErrorReporter} that collects warnings and errors and makes
- * them accessible via {@link #errors()} and {@link #warnings()}.
+ * them accessible via {@link #errors} and {@link #warnings}.
  *
  */
 public class SimpleErrorReporter implements ErrorReporter {
+    @Nullable
     private List<String> warnings = null;
+    @Nullable
     private List<String> errors = null;
 
     @Override
@@ -72,21 +75,7 @@ public class SimpleErrorReporter implements ErrorReporter {
         errors.add(formatDetailedMessage(message, sourceName, line));
     }
 
-    /**
-     * Returns the list of errors, or {@code null} if there were none.
-     */
-    public List<String> errors() {
-        return errors;
-    }
-
-    /**
-     * Returns the list of warnings, or {@code null} if there were none.
-     */
-    public List<String> warnings() {
-        return warnings;
-    }
-
-    private String formatDetailedMessage(
+    private static String formatDetailedMessage(
         String message, String sourceName, int lineNumber) {
       String details = message;
       if (sourceName == null || lineNumber <= 0) {
@@ -106,17 +95,15 @@ public class SimpleErrorReporter implements ErrorReporter {
     }
 
     public static String getMessage0(String messageId) {
-      return getMessage(messageId, null);
+      return getMessage(messageId);
     }
 
     public static String getMessage1(String messageId, Object arg1) {
-      Object[] arguments = {arg1};
-      return getMessage(messageId, arguments);
+      return getMessage(messageId, arg1);
     }
 
-    static String getMessage(String messageId, Object[] arguments) {
-      final String defaultResource
-          = "rhino_ast.java.com.google.javascript.rhino.Messages";
+    private static String getMessage(String messageId, Object... arguments) {
+      final String defaultResource = "com.google.javascript.rhino.Messages";
 
       Locale locale = Locale.getDefault();
 
@@ -125,14 +112,14 @@ public class SimpleErrorReporter implements ErrorReporter {
 
       String formatString;
       try {
-          formatString = rb.getString(messageId);
+        formatString = rb.getString(messageId);
       } catch (java.util.MissingResourceException mre) {
           throw new RuntimeException
               ("no message resource found for message property " + messageId);
       }
 
       /*
-       * It's OK to format the string, even if 'arguments' is null;
+       * It's OK to format the string, even if 'arguments' is empty;
        * we need to format it anyway, to make double ''s collapse to
        * single 's.
        */

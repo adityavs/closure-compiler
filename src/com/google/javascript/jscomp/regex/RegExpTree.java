@@ -16,10 +16,12 @@
 
 package com.google.javascript.jscomp.regex;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-
+import com.google.common.collect.Iterables;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
@@ -30,7 +32,7 @@ import java.util.Set;
 /**
  * An AST for JavaScript regular expressions.
  *
- * @author Mike Samuel <mikesamuel@gmail.com>
+ * @author mikesamuel@gmail.com (Mike Samuel)
  */
 public abstract class RegExpTree {
 
@@ -247,7 +249,7 @@ public abstract class RegExpTree {
        * {@code (?=...)}.
        */
       private RegExpTree parseParenthetical() {
-        Preconditions.checkState(pattern.charAt(pos) == '(');
+        checkState(pattern.charAt(pos) == '(');
         int start = pos;
         ++pos;
         boolean capturing = true;
@@ -294,7 +296,7 @@ public abstract class RegExpTree {
        * {@link #parseEscape}.
        */
       private RegExpTree parseCharset() {
-        Preconditions.checkState(pattern.charAt(pos) == '[');
+        checkState(pattern.charAt(pos) == '[');
         ++pos;
 
         boolean isCaseInsensitive = flags.indexOf('i') >= 0;
@@ -408,7 +410,7 @@ public abstract class RegExpTree {
        * Parses an escape that appears outside a charset.
        */
       private RegExpTree parseEscape() {
-        Preconditions.checkState(pattern.charAt(pos) == '\\');
+        checkState(pattern.charAt(pos) == '\\');
         ++pos;
         char ch = pattern.charAt(pos);
         if (ch == 'b' || ch == 'B') {
@@ -565,8 +567,7 @@ public abstract class RegExpTree {
 
     Concatenation c = (Concatenation) t;
     if (c.elements.isEmpty()) { return false; }
-    RegExpTree first = c.elements.get(0),
-        last = c.elements.get(c.elements.size() - 1);
+    RegExpTree first = c.elements.get(0), last = Iterables.getLast(c.elements);
     if (!(first instanceof Anchor && last instanceof Anchor)) { return false; }
     return ((Anchor) first).type == '^' && ((Anchor) last).type == '$';
   }
@@ -589,7 +590,7 @@ public abstract class RegExpTree {
     }
 
     @Override
-    public final List<? extends RegExpTree> children() {
+    public final ImmutableList<? extends RegExpTree> children() {
       return ImmutableList.of();
     }
   }
@@ -695,7 +696,7 @@ public abstract class RegExpTree {
     final int groupIndex;
 
     BackReference(int groupIndex) {
-      Preconditions.checkArgument(groupIndex >= 0 && groupIndex <= 99);
+      checkArgument(groupIndex >= 0 && groupIndex <= 99);
       this.groupIndex = groupIndex;
     }
 
@@ -869,7 +870,7 @@ public abstract class RegExpTree {
     }
 
     @Override
-    public List<? extends RegExpTree> children() {
+    public ImmutableList<? extends RegExpTree> children() {
       return ImmutableList.of(body);
     }
 
@@ -1117,7 +1118,7 @@ public abstract class RegExpTree {
     }
 
     @Override
-    public List<? extends RegExpTree> children() {
+    public ImmutableList<? extends RegExpTree> children() {
       return alternatives;
     }
 
@@ -1188,7 +1189,7 @@ public abstract class RegExpTree {
     }
 
     @Override
-    public List<? extends RegExpTree> children() {
+    public ImmutableList<? extends RegExpTree> children() {
       return ImmutableList.of(body);
     }
 
@@ -1245,7 +1246,7 @@ public abstract class RegExpTree {
     }
 
     @Override
-    public List<? extends RegExpTree> children() {
+    public ImmutableList<? extends RegExpTree> children() {
       return ImmutableList.of(body);
     }
 
@@ -1459,15 +1460,6 @@ public abstract class RegExpTree {
       return new DecomposedCharset(inverted, ranges, namedGroups.toString());
     }
 
-    @Override
-    protected void appendSourceCode(StringBuilder sb) {
-      if (DOT_CHARSET.ranges.equals(ranges)) {
-        sb.append('.');
-        return;
-      }
-      decompose().appendSourceCode(sb);
-    }
-
     DecomposedCharset decompose() {
       CharRanges negRanges = CharRanges.ALL_CODE_UNITS.difference(ranges);
       if (!ieExplicits.isEmpty()) {
@@ -1479,8 +1471,16 @@ public abstract class RegExpTree {
       }
       DecomposedCharset positive = decompose(ranges, false);
       DecomposedCharset negative = decompose(negRanges, true);
-      return positive.complexity() <= negative.complexity()
-          ? positive : negative;
+      return positive.complexity() <= negative.complexity() ? positive : negative;
+    }
+
+    @Override
+    protected void appendSourceCode(StringBuilder sb) {
+      if (DOT_CHARSET.ranges.equals(ranges)) {
+        sb.append('.');
+        return;
+      }
+      decompose().appendSourceCode(sb);
     }
 
     @Override
@@ -1745,7 +1745,7 @@ public abstract class RegExpTree {
     }
 
     @Override
-    public List<? extends RegExpTree> children() {
+    public ImmutableList<? extends RegExpTree> children() {
       return elements;
     }
 

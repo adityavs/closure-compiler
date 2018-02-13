@@ -45,6 +45,7 @@ public class Protocol {
   public static enum RequestKey implements ProtocolEnum {
     CODE_URL("code_url"),
     JS_CODE("js_code"),
+    NAMED_JS_PREFIX("js_code:"), // Special-case for named source files.
     EXCLUDE_DEFAULT_EXTERNS("exclude_default_externs"),
     EXTERNS_URL("externs_url"),
     EXTERNS_CODE("js_externs"),
@@ -61,10 +62,12 @@ public class Protocol {
     BUILD_DEBUG("debug"),
     CHARSET("charset"),
     LANGUAGE("language"),
+    LANGUAGE_OUT("language_out"),
     USE_TYPES_FOR_OPTIMIZATIONS("use_types_for_optimization"),
     ANGULAR_PASS("angular_pass"),
     GENERATE_EXPORTS("generate_exports"),
     DISABLE_PROPERTY_RENAMING("disable_property_renaming"),
+    REWRITE_POLYFILLS("rewrite_polyfills"),
 
     // Old ROBOCOMP urls.
     RAWJS("rawjs"),
@@ -101,7 +104,10 @@ public class Protocol {
     }
 
     public static boolean isKeyValid(String key) {
-      return permittedKeys.contains(key.toLowerCase());
+      // Supports above keys plus NAMED_JS_PREFIX as a prefix (for named JS source files).
+      String lowerKey = key.toLowerCase();
+      return permittedKeys.contains(lowerKey)
+          || lowerKey.startsWith(NAMED_JS_PREFIX.asGetParameter);
     }
 
     @Override

@@ -16,16 +16,15 @@
 
 package com.google.javascript.jscomp;
 
+import com.google.common.annotations.GwtIncompatible;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
+import com.google.javascript.jscomp.NodeTraversal.Callback;
 import com.google.javascript.rhino.Node;
 import com.google.protobuf.Descriptors;
 import com.google.protobuf.TextFormat;
-
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -38,18 +37,20 @@ import java.util.Set;
  * custom rules than specify
  *
  */
-public final class CheckConformance extends AbstractPostOrderCallback
-    implements CompilerPass {
+@GwtIncompatible("com.google.protobuf")
+public final class CheckConformance implements Callback, CompilerPass {
+  static final DiagnosticType CONFORMANCE_ERROR =
+      DiagnosticType.error("JSC_CONFORMANCE_ERROR", "Violation: {0}{1}{2}");
 
   static final DiagnosticType CONFORMANCE_VIOLATION =
       DiagnosticType.warning(
           "JSC_CONFORMANCE_VIOLATION",
-          "Violation: {0}");
+          "Violation: {0}{1}{2}");
 
   static final DiagnosticType CONFORMANCE_POSSIBLE_VIOLATION =
       DiagnosticType.warning(
           "JSC_CONFORMANCE_POSSIBLE_VIOLATION",
-          "Possible violation: {0}");
+          "Possible violation: {0}{1}{2}");
 
   static final DiagnosticType INVALID_REQUIREMENT_SPEC =
       DiagnosticType.error(
@@ -78,13 +79,20 @@ public final class CheckConformance extends AbstractPostOrderCallback
   @Override
   public void process(Node externs, Node root) {
     if (!rules.isEmpty()) {
-      NodeTraversal.traverse(compiler, root, this);
+      NodeTraversal.traverseRootsEs6(compiler, this, externs, root);
     }
   }
 
   @Override
+  public final boolean shouldTraverse(NodeTraversal t, Node n, Node parent) {
+    // Don't inspect extern files
+    return !n.isScript() || !t.getInput().getSourceFile().isExtern();
+  }
+
+  @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
-    for (Rule rule : rules) {
+    for (int i = 0, len = rules.size(); i < len; i++) {
+      Rule rule = rules.get(i);
       rule.check(t, n);
     }
   }
@@ -106,8 +114,9 @@ public final class CheckConformance extends AbstractPostOrderCallback
     return builder.build();
   }
 
-  private static final Set<String> EXTENDABLE_FIELDS = ImmutableSet.of(
-      "extends", "whitelist", "whitelist_regexp", "only_apply_to", "only_apply_to_regexp");
+  private static final ImmutableSet<String> EXTENDABLE_FIELDS =
+      ImmutableSet.of(
+          "extends", "whitelist", "whitelist_regexp", "only_apply_to", "only_apply_to_regexp");
 
   /**
    * Gets requirements from all configs. Merges whitelists of requirements with 'extends' equal to
@@ -163,39 +172,28 @@ public final class CheckConformance extends AbstractPostOrderCallback
 
     List<Requirement> requirements = new ArrayList<>(builders.size());
     for (Requirement.Builder builder : builders) {
-      Requirement requirement = builder.build();
-      checkRequirementList(compiler, requirement, "whitelist");
-      checkRequirementList(compiler, requirement, "whitelist_regexp");
-      checkRequirementList(compiler, requirement, "only_apply_to");
-      checkRequirementList(compiler, requirement, "only_apply_to_regexp");
-      requirements.add(requirement);
+      removeDuplicates(builder);
+      requirements.add(builder.build());
     }
     return requirements;
   }
 
-  private static void checkRequirementList(AbstractCompiler compiler, Requirement requirement,
-      String field) {
-    Set<String> existing = new HashSet<>();
-    for (String value : getRequirementList(requirement, field)) {
-      if (!existing.add(value)) {
-        reportInvalidRequirement(compiler, requirement, "duplicate " + field + " value: " + value);
-      }
-    }
-  }
+  private static void removeDuplicates(Requirement.Builder requirement) {
+    final Set<String> list1 = ImmutableSet.copyOf(requirement.getWhitelistList());
+    requirement.clearWhitelist();
+    requirement.addAllWhitelist(list1);
 
-  private static List<String> getRequirementList(Requirement requirement, String field) {
-    switch (field) {
-      case "whitelist":
-        return requirement.getWhitelistList();
-      case "whitelist_regexp":
-        return requirement.getWhitelistRegexpList();
-      case "only_apply_to":
-        return requirement.getOnlyApplyToList();
-      case "only_apply_to_regexp":
-        return requirement.getOnlyApplyToRegexpList();
-      default:
-        throw new AssertionError("Unrecognized field: " + field);
-    }
+    final Set<String> list2 = ImmutableSet.copyOf(requirement.getWhitelistRegexpList());
+    requirement.clearWhitelistRegexp();
+    requirement.addAllWhitelistRegexp(list2);
+
+    final Set<String> list3 = ImmutableSet.copyOf(requirement.getOnlyApplyToList());
+    requirement.clearOnlyApplyTo();
+    requirement.addAllOnlyApplyTo(list3);
+
+    final Set<String> list4 = ImmutableSet.copyOf(requirement.getOnlyApplyToRegexpList());
+    requirement.clearOnlyApplyToRegexp();
+    requirement.addAllOnlyApplyToRegexp(list4);
   }
 
   private static Rule initRule(
@@ -209,10 +207,12 @@ public final class CheckConformance extends AbstractPostOrderCallback
         case BANNED_DEPENDENCY:
           return new ConformanceRules.BannedDependency(compiler, requirement);
         case BANNED_NAME:
+        case BANNED_NAME_CALL:
           return new ConformanceRules.BannedName(compiler, requirement);
         case BANNED_PROPERTY:
         case BANNED_PROPERTY_READ:
         case BANNED_PROPERTY_WRITE:
+        case BANNED_PROPERTY_NON_CONSTANT_WRITE:
         case BANNED_PROPERTY_CALL:
           return new ConformanceRules.BannedProperty(compiler, requirement);
         case RESTRICTED_NAME_CALL:

@@ -73,7 +73,7 @@ final class CombinedCompilerPass implements HotSwapCompilerPass,
   static void traverse(AbstractCompiler compiler, Node root,
       List<Callback> callbacks) {
     if (callbacks.size() == 1) {
-      NodeTraversal.traverse(compiler, root, callbacks.get(0));
+      NodeTraversal.traverseEs6(compiler, root, callbacks.get(0));
     } else {
       (new CombinedCompilerPass(compiler, callbacks)).process(null, root);
     }
@@ -151,16 +151,20 @@ final class CombinedCompilerPass implements HotSwapCompilerPass,
 
   @Override
   public final void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, this);
+    NodeTraversal.traverseEs6(compiler, root, this);
   }
 
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
-    NodeTraversal.traverse(compiler, scriptRoot, this);
+    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
   }
 
   @Override
   public boolean shouldTraverse(NodeTraversal t, Node n, Node parent) {
+    if (compiler.hasHaltingErrors()) {
+      return false;
+    }
+
     for (CallbackWrapper callback : callbacks) {
       callback.shouldTraverseIfActive(t, n, parent);
     }
@@ -174,6 +178,10 @@ final class CombinedCompilerPass implements HotSwapCompilerPass,
 
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
+    if (compiler.hasHaltingErrors()) {
+      return;
+    }
+
     for (CallbackWrapper callback : callbacks) {
       callback.visitOrMaybeActivate(t, n, parent);
     }

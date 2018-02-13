@@ -20,10 +20,10 @@ import com.google.common.base.Strings;
 import com.google.javascript.jscomp.NodeTraversal;
 import com.google.javascript.jscomp.NodeTraversal.Callback;
 import com.google.javascript.rhino.Node;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
+import javax.annotation.Nullable;
 
 /**
  * A compiler node traversal callback that invokes matchers against every node and
@@ -34,11 +34,12 @@ import java.util.regex.Pattern;
 final class JsFlumeCallback implements Callback {
 
   private final Scanner scanner;
+  @Nullable
   private final Pattern includeFilePattern;
   private final List<Match> matches = new ArrayList<>();
   private final List<SuggestedFix> fixes = new ArrayList<>();
 
-  JsFlumeCallback(Scanner scanner, Pattern includeFilePattern) {
+  JsFlumeCallback(Scanner scanner, @Nullable Pattern includeFilePattern) {
     this.scanner = scanner;
     this.includeFilePattern = includeFilePattern;
   }
@@ -56,11 +57,13 @@ final class JsFlumeCallback implements Callback {
     if (n.isFromExterns()) {
       return false;
     }
-    String filename = n.getSourceFileName();
-    if (includeFilePattern != null
-        && !Strings.isNullOrEmpty(includeFilePattern.pattern())
-        && !Strings.isNullOrEmpty(filename)) {
-      return includeFilePattern.matcher(filename).find();
+    if (n.isScript()) {
+      String filename = n.getSourceFileName();
+      if (includeFilePattern != null
+          && !Strings.isNullOrEmpty(includeFilePattern.pattern())
+          && !Strings.isNullOrEmpty(filename)) {
+        return includeFilePattern.matcher(filename).find();
+      }
     }
     return true;
   }

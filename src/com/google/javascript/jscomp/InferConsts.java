@@ -16,7 +16,6 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.javascript.jscomp.ReferenceCollectingCallback.ReferenceCollection;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
 
@@ -43,16 +42,19 @@ class InferConsts implements CompilerPass {
 
   @Override
   public void process(Node externs, Node js) {
-    ReferenceCollectingCallback collector = new ReferenceCollectingCallback(
-        compiler, ReferenceCollectingCallback.DO_NOTHING_BEHAVIOR);
-    NodeTraversal.traverse(compiler, js, collector);
+    ReferenceCollectingCallback collector =
+        new ReferenceCollectingCallback(
+            compiler,
+            ReferenceCollectingCallback.DO_NOTHING_BEHAVIOR,
+            new Es6SyntacticScopeCreator(compiler));
+    collector.process(js);
 
     for (Var v : collector.getAllSymbols()) {
       considerVar(v, collector.getReferences(v));
     }
 
     Scope globalExternsScope =
-        SyntacticScopeCreator.makeUntyped(compiler).createScope(externs, null);
+        new Es6SyntacticScopeCreator(compiler).createScope(externs, null);
     for (Var v : globalExternsScope.getAllSymbols()) {
       considerVar(v, null);
     }
@@ -65,14 +67,14 @@ class InferConsts implements CompilerPass {
       nameNode.putBooleanProp(Node.IS_CONSTANT_VAR, true);
     } else if (nameNode != null && nameNode.getParent().isConst()) {
       nameNode.putBooleanProp(Node.IS_CONSTANT_VAR, true);
-    } else if (nameNode != null &&
-        compiler.getCodingConvention().isConstant(nameNode.getString())) {
+    } else if (nameNode != null
+        && compiler.getCodingConvention().isConstant(nameNode.getString())) {
       nameNode.putBooleanProp(Node.IS_CONSTANT_VAR, true);
-    } else if (nameNode != null &&
-               refCollection != null &&
-               refCollection.isWellDefined() &&
-               refCollection.isAssignedOnceInLifetime() &&
-               refCollection.firstReferenceIsAssigningDeclaration()) {
+    } else if (nameNode != null
+        && refCollection != null
+        && refCollection.isWellDefined()
+        && refCollection.isAssignedOnceInLifetime()
+        && refCollection.firstReferenceIsAssigningDeclaration()) {
       nameNode.putBooleanProp(Node.IS_CONSTANT_VAR, true);
     }
   }

@@ -16,33 +16,30 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 
-import javax.annotation.Nullable;
-
 /**
- * Creates synthetic blocks to optimizations from moving code
- * past markers in the source.
+ * Creates synthetic blocks to optimizations from moving code past markers in the source.
  *
  * @author johnlenz@google.com (John Lenz)
  */
-class CreateSyntheticBlocks implements CompilerPass {
-  static final DiagnosticType UNMATCHED_START_MARKER = DiagnosticType.warning(
+class CreateSyntheticBlocks extends AbstractPostOrderCallback implements CompilerPass {
+  static final DiagnosticType UNMATCHED_START_MARKER = DiagnosticType.error(
       "JSC_UNMATCHED_START_MARKER", "Unmatched {0}");
 
-  static final DiagnosticType UNMATCHED_END_MARKER = DiagnosticType.warning(
+  static final DiagnosticType UNMATCHED_END_MARKER = DiagnosticType.error(
       "JSC_UNMATCHED_END_MARKER", "Unmatched {1} - {0} not in the same block");
 
-  static final DiagnosticType INVALID_MARKER_USAGE = DiagnosticType.warning(
-      "JSC_INVALID_MARKER_USAGE", "Marker {0} can only be used in a simple "
-           + "call expression");
+  static final DiagnosticType INVALID_MARKER_USAGE = DiagnosticType.error(
+      "JSC_INVALID_MARKER_USAGE", "Marker {0} can only be used in a simple call expression");
 
   private final AbstractCompiler compiler;
 
@@ -78,12 +75,11 @@ class CreateSyntheticBlocks implements CompilerPass {
   @Override
   public void process(Node externs, Node root) {
     // Find and validate the markers.
-    NodeTraversal.traverse(compiler, root, new Callback());
+    NodeTraversal.traverseEs6(compiler, root, this);
 
     // Complain about any unmatched markers.
     for (Node node : markerStack) {
-      compiler.report(
-          JSError.make(node, UNMATCHED_START_MARKER, startMarkerName));
+      compiler.report(JSError.make(node, UNMATCHED_START_MARKER, startMarkerName));
     }
 
     // Add the block for the valid marker sets.
@@ -96,14 +92,17 @@ class CreateSyntheticBlocks implements CompilerPass {
    * @param marker The marker to add synthetic blocks for.
    */
   private void addBlocks(Marker marker) {
-    // Add block around the template section so that it looks like this:
-    //  BLOCK (synthetic)
-    //    START
-    //      BLOCK (synthetic)
-    //        BODY
-    //    END
-    // This prevents the start or end markers from mingling with the code
-    // in the block body.
+    // Add block around the template section so that
+    //   START
+    //   BODY
+    //   END
+    // is transformed to:
+    //   BLOCK (synthetic)
+    //     START
+    //       BLOCK (synthetic)
+    //         BODY
+    //     END
+    // This prevents the start or end markers from mingling with the code in the block body.
 
 
     Node originalParent = marker.endMarker.getParent();
@@ -113,20 +112,17 @@ class CreateSyntheticBlocks implements CompilerPass {
 
     Node innerBlock = IR.block();
     innerBlock.setIsSyntheticBlock(true);
-    // Move everything after the start Node up to the end Node into the inner
-    // block.
-    moveSiblingExclusive(originalParent, innerBlock,
-        marker.startMarker,
-        marker.endMarker);
+    // Move everything after the start Node up to the end Node into the inner block.
+    moveSiblingExclusive(innerBlock, marker.startMarker, marker.endMarker);
 
     // Add the start node.
-    outerBlock.addChildToBack(originalParent.removeChildAfter(outerBlock));
+    outerBlock.addChildToBack(outerBlock.getNext().detach());
     // Add the inner block
     outerBlock.addChildToBack(innerBlock);
     // and finally the end node.
-    outerBlock.addChildToBack(originalParent.removeChildAfter(outerBlock));
+    outerBlock.addChildToBack(outerBlock.getNext().detach());
 
-    compiler.reportCodeChange();
+    compiler.reportChangeToEnclosingScope(outerBlock);
   }
 
   /**
@@ -134,84 +130,56 @@ class CreateSyntheticBlocks implements CompilerPass {
    * destination block. If start is null, move the first child of the block.
    * If end is null, move the last child of the block.
    */
-  private void moveSiblingExclusive(
-      Node src, Node dest, @Nullable Node start, @Nullable Node end) {
-    while (childAfter(src, start) != end) {
-      Node child = removeChildAfter(src, start);
+  private void moveSiblingExclusive(Node dest, Node start, Node end) {
+    checkNotNull(start);
+    checkNotNull(end);
+    while (start.getNext() != end) {
+      Node child = start.getNext().detach();
       dest.addChildToBack(child);
     }
   }
 
-  /**
-   * Like Node.getNext, that null is used to signal the child before the
-   * block.
-   */
-  private static Node childAfter(Node parent, @Nullable Node siblingBefore) {
-    if (siblingBefore == null) {
-      return parent.getFirstChild();
-    } else {
-      return siblingBefore.getNext();
+  @Override
+  public void visit(NodeTraversal t, Node n, Node parent) {
+    if (!n.isCall() || !n.getFirstChild().isName()) {
+      return;
     }
-  }
 
-  /**
-   * Like removeChildAfter, the firstChild is removed
-   */
-  private static Node removeChildAfter(Node parent, @Nullable Node siblingBefore) {
-    if (siblingBefore == null) {
-      return parent.removeFirstChild();
-    } else {
-      return parent.removeChildAfter(siblingBefore);
+    Node callTarget = n.getFirstChild();
+    String callName = callTarget.getString();
+
+    if (startMarkerName.equals(callName)) {
+      if (!parent.isExprResult()) {
+        compiler.report(t.makeError(n, INVALID_MARKER_USAGE, startMarkerName));
+        return;
+      }
+      markerStack.push(parent);
+      return;
     }
-  }
 
-  private class Callback extends AbstractPostOrderCallback {
-    @Override
-    public void visit(NodeTraversal t, Node n, Node parent) {
-      if (!n.isCall() || !n.getFirstChild().isName()) {
-        return;
-      }
-
-      Node callTarget = n.getFirstChild();
-      String callName = callTarget.getString();
-
-      if (startMarkerName.equals(callName)) {
-        if (!parent.isExprResult()) {
-          compiler.report(
-              t.makeError(n, INVALID_MARKER_USAGE, startMarkerName));
-          return;
-        }
-        markerStack.push(parent);
-        return;
-      }
-
-      if (!endMarkerName.equals(callName)) {
-        return;
-      }
-
-      Node endMarkerNode = parent;
-      if (!endMarkerNode.isExprResult()) {
-        compiler.report(
-            t.makeError(n, INVALID_MARKER_USAGE, endMarkerName));
-        return;
-      }
-
-      if (markerStack.isEmpty()) {
-        compiler.report(t.makeError(n, UNMATCHED_END_MARKER,
-            startMarkerName, endMarkerName));
-        return;
-      }
-
-      Node startMarkerNode = markerStack.pop();
-      if (endMarkerNode.getParent() != startMarkerNode.getParent()) {
-        // The end marker isn't in the same block as the start marker.
-        compiler.report(t.makeError(n, UNMATCHED_END_MARKER,
-            startMarkerName, endMarkerName));
-        return;
-      }
-
-      // This is a valid marker set add it to the list of markers to process.
-      validMarkers.add(new Marker(startMarkerNode, endMarkerNode));
+    if (!endMarkerName.equals(callName)) {
+      return;
     }
+
+    Node endMarkerNode = parent;
+    if (!endMarkerNode.isExprResult()) {
+      compiler.report(t.makeError(n, INVALID_MARKER_USAGE, endMarkerName));
+      return;
+    }
+
+    if (markerStack.isEmpty()) {
+      compiler.report(t.makeError(n, UNMATCHED_END_MARKER, startMarkerName, endMarkerName));
+      return;
+    }
+
+    Node startMarkerNode = markerStack.pop();
+    if (endMarkerNode.getParent() != startMarkerNode.getParent()) {
+      // The end marker isn't in the same block as the start marker.
+      compiler.report(t.makeError(n, UNMATCHED_END_MARKER, startMarkerName, endMarkerName));
+      return;
+    }
+
+    // This is a valid marker set add it to the list of markers to process.
+    validMarkers.add(new Marker(startMarkerNode, endMarkerNode));
   }
 }

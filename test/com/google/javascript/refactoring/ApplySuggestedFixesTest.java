@@ -27,13 +27,11 @@ import com.google.javascript.jscomp.Compiler;
 import com.google.javascript.jscomp.CompilerOptions;
 import com.google.javascript.jscomp.SourceFile;
 import com.google.javascript.rhino.Node;
-
+import java.util.List;
+import java.util.Map;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.util.List;
-import java.util.Map;
 
 /**
  * Test case for {@link ApplySuggestedFixes}.
@@ -43,9 +41,8 @@ public class ApplySuggestedFixesTest {
 
   @Test
   public void testApplyCodeReplacements_overlapsAreErrors() throws Exception {
-    List<CodeReplacement> replacements = ImmutableList.of(
-        new CodeReplacement(0, 10, ""),
-        new CodeReplacement(5, 3, ""));
+    List<CodeReplacement> replacements =
+        ImmutableList.of(CodeReplacement.create(0, 10, ""), CodeReplacement.create(5, 3, ""));
     try {
       ApplySuggestedFixes.applyCodeReplacements(replacements, "");
       fail("Overlaps in Code replacements should be an error.");
@@ -54,48 +51,47 @@ public class ApplySuggestedFixesTest {
 
   @Test
   public void testApplyCodeReplacements_noOverlapsSucceed() throws Exception {
-    List<CodeReplacement> replacements = ImmutableList.of(
-        new CodeReplacement(0, 3, ""),
-        new CodeReplacement(5, 3, ""));
+    List<CodeReplacement> replacements =
+        ImmutableList.of(CodeReplacement.create(0, 3, ""), CodeReplacement.create(5, 3, ""));
     ApplySuggestedFixes.applyCodeReplacements(replacements, "abcdef");
   }
 
   @Test
   public void testApplyCodeReplacements() throws Exception {
-    List<CodeReplacement> replacements = ImmutableList.of(
-        new CodeReplacement(0, 1, "z"),
-        new CodeReplacement(3, 2, "qq"));
+    List<CodeReplacement> replacements =
+        ImmutableList.of(CodeReplacement.create(0, 1, "z"), CodeReplacement.create(3, 2, "qq"));
     String newCode = ApplySuggestedFixes.applyCodeReplacements(replacements, "abcdef");
     assertEquals("zbcqqf", newCode);
   }
 
   @Test
   public void testApplyCodeReplacements_insertion() throws Exception {
-    List<CodeReplacement> replacements = ImmutableList.of(new CodeReplacement(0, 0, "z"));
+    List<CodeReplacement> replacements = ImmutableList.of(CodeReplacement.create(0, 0, "z"));
     String newCode = ApplySuggestedFixes.applyCodeReplacements(replacements, "abcdef");
     assertEquals("zabcdef", newCode);
   }
 
   @Test
   public void testApplyCodeReplacements_deletion() throws Exception {
-    List<CodeReplacement> replacements = ImmutableList.of(new CodeReplacement(0, 6, ""));
+    List<CodeReplacement> replacements = ImmutableList.of(CodeReplacement.create(0, 6, ""));
     String newCode = ApplySuggestedFixes.applyCodeReplacements(replacements, "abcdef");
     assertThat(newCode).isEmpty();
   }
 
   @Test
   public void testApplyCodeReplacements_boundaryCases() throws Exception {
-    List<CodeReplacement> replacements = ImmutableList.of(new CodeReplacement(5, 1, "z"));
+    List<CodeReplacement> replacements = ImmutableList.of(CodeReplacement.create(5, 1, "z"));
     String newCode = ApplySuggestedFixes.applyCodeReplacements(replacements, "abcdef");
     assertEquals("abcdez", newCode);
   }
 
   @Test
   public void testApplyCodeReplacements_multipleReplacements() throws Exception {
-    List<CodeReplacement> replacements = ImmutableList.of(
-        new CodeReplacement(0, 2, "z"),
-        new CodeReplacement(2, 1, "y"),
-        new CodeReplacement(3, 3, "xwvu"));
+    List<CodeReplacement> replacements =
+        ImmutableList.of(
+            CodeReplacement.create(0, 2, "z"),
+            CodeReplacement.create(2, 1, "y"),
+            CodeReplacement.create(3, 3, "xwvu"));
     String newCode = ApplySuggestedFixes.applyCodeReplacements(replacements, "abcdef");
     assertEquals("zyxwvu", newCode);
   }
@@ -143,7 +139,7 @@ public class ApplySuggestedFixesTest {
     SuggestedFix fix1 = new SuggestedFix.Builder()
         .insertBefore(jsdocRoot, "!")
         .build();
-    Node foo = jsdocRoot.getFirstChild().getFirstChild();
+    Node foo = jsdocRoot.getFirstFirstChild();
     SuggestedFix fix2 = new SuggestedFix.Builder()
         .insertBefore(foo, "!")
         .build();
@@ -181,17 +177,15 @@ public class ApplySuggestedFixesTest {
     } catch (IllegalArgumentException expected) {}
   }
 
-  /**
-   * Returns the root script node produced from the compiled JS input.
-   */
-  private Node compileToScriptRoot(Compiler compiler) {
+  /** Returns the root script node produced from the compiled JS input. */
+  private static Node compileToScriptRoot(Compiler compiler) {
     Node root = compiler.getRoot();
     // The last child of the compiler root is a Block node, and the first child
     // of that is the Script node.
     return root.getLastChild().getFirstChild();
   }
 
-  private Compiler getCompiler(String jsInput) {
+  private static Compiler getCompiler(String jsInput) {
     Compiler compiler = new Compiler();
     CompilerOptions options = RefactoringDriver.getCompilerOptions();
     compiler.init(

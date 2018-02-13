@@ -16,19 +16,23 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Multimap;
+import com.google.common.collect.MultimapBuilder;
 import com.google.javascript.jscomp.ControlFlowGraph.Branch;
 import com.google.javascript.jscomp.graph.DiGraph.DiGraphEdge;
 import com.google.javascript.jscomp.graph.GraphNode;
 import com.google.javascript.jscomp.graph.LatticeElement;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
-
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -44,18 +48,25 @@ class MaybeReachingVariableUse extends
     DataFlowAnalysis<Node, MaybeReachingVariableUse.ReachingUses> {
 
   // The scope of the function that we are analyzing.
-  private final Scope jsScope;
   private final Set<Var> escaped;
+  private final Map<String, Var> allVarsInFn;
+  private final List<Var> orderedVars;
 
   MaybeReachingVariableUse(
-      ControlFlowGraph<Node> cfg, Scope jsScope, AbstractCompiler compiler) {
+      ControlFlowGraph<Node> cfg,
+      Scope jsScope,
+      AbstractCompiler compiler,
+      Es6SyntacticScopeCreator scopeCreator) {
     super(cfg, new ReachingUsesJoinOp());
-    this.jsScope = jsScope;
     this.escaped = new HashSet<>();
+    this.allVarsInFn = new HashMap<>();
+    this.orderedVars = new ArrayList<>();
 
     // TODO(user): Maybe compute it somewhere else and re-use the escape
     // local set here.
-    computeEscaped(jsScope, escaped, compiler);
+    computeEscaped(jsScope.getParent(), escaped, compiler, scopeCreator);
+    NodeUtil.getAllVarsDeclaredInFunction(
+        allVarsInFn, orderedVars, compiler, scopeCreator, jsScope.getParent());
   }
 
   /**
@@ -94,13 +105,13 @@ class MaybeReachingVariableUse extends
      * @param other The constructed object is a replicated copy of this element.
      */
     public ReachingUses(ReachingUses other) {
-      mayUseMap = HashMultimap.create(other.mayUseMap);
+      mayUseMap = MultimapBuilder.hashKeys().hashSetValues().build(other.mayUseMap);
     }
 
     @Override
     public boolean equals(Object other) {
-      return (other instanceof ReachingUses) &&
-          ((ReachingUses) other).mayUseMap.equals(this.mayUseMap);
+      return (other instanceof ReachingUses)
+          && ((ReachingUses) other).mayUseMap.equals(this.mayUseMap);
     }
 
     @Override
@@ -167,63 +178,77 @@ class MaybeReachingVariableUse extends
 
   private void computeMayUse(
       Node n, Node cfgNode, ReachingUses output, boolean conditional) {
-    switch (n.getType()) {
+    switch (n.getToken()) {
 
-      case Token.BLOCK:
-      case Token.FUNCTION:
+      case BLOCK:
+      case ROOT:
+      case FUNCTION:
         return;
 
-      case Token.NAME:
-        addToUseIfLocal(n.getString(), cfgNode, output);
+      case NAME:
+        if (NodeUtil.isLhsByDestructuring(n)) {
+          if (!conditional) {
+            removeFromUseIfLocal(n.getString(), output);
+          }
+        } else {
+          addToUseIfLocal(n.getString(), cfgNode, output);
+        }
         return;
 
-      case Token.WHILE:
-      case Token.DO:
-      case Token.IF:
+      case WHILE:
+      case DO:
+      case IF:
         computeMayUse(
             NodeUtil.getConditionExpression(n), cfgNode, output, conditional);
         return;
 
-      case Token.FOR:
-        if (!NodeUtil.isForIn(n)) {
-          computeMayUse(
-              NodeUtil.getConditionExpression(n), cfgNode, output, conditional);
-        } else {
-          // for(x in y) {...}
-          Node lhs = n.getFirstChild();
-          Node rhs = lhs.getNext();
-          if (lhs.isVar()) {
-            lhs = lhs.getLastChild(); // for(var x in y) {...}
-          }
-          if (lhs.isName() && !conditional) {
-            removeFromUseIfLocal(lhs.getString(), output);
-          }
-          computeMayUse(rhs, cfgNode, output, conditional);
+      case FOR:
+        computeMayUse(NodeUtil.getConditionExpression(n), cfgNode, output, conditional);
+        return;
+
+      case FOR_IN:
+        // for(x in y) {...}
+        Node lhs = n.getFirstChild();
+        Node rhs = lhs.getNext();
+        if (lhs.isVar()) {
+          lhs = lhs.getLastChild(); // for(var x in y) {...}
         }
+        if (lhs.isName() && !conditional) {
+          removeFromUseIfLocal(lhs.getString(), output);
+        }
+        computeMayUse(rhs, cfgNode, output, conditional);
         return;
 
-      case Token.AND:
-      case Token.OR:
+      case AND:
+      case OR:
         computeMayUse(n.getLastChild(), cfgNode, output, true);
         computeMayUse(n.getFirstChild(), cfgNode, output, conditional);
         return;
 
-      case Token.HOOK:
+      case HOOK:
         computeMayUse(n.getLastChild(), cfgNode, output, true);
-        computeMayUse(n.getFirstChild().getNext(), cfgNode, output, true);
+        computeMayUse(n.getSecondChild(), cfgNode, output, true);
         computeMayUse(n.getFirstChild(), cfgNode, output, conditional);
         return;
 
-      case Token.VAR:
+      case VAR:
+        // TODO(b/73123594): this should also handle LET/CONST
         Node varName = n.getFirstChild();
-        Preconditions.checkState(n.hasChildren(), "AST should be normalized");
+        checkState(n.hasChildren(), "AST should be normalized", n);
 
-        if (varName.hasChildren()) {
+        if (varName.isDestructuringLhs()) {
+          // Note: we never inline variables used twice in the same CFG node, so the order of
+          // traversal here isn't important. If that changes, though, MaybeReachingVariableUse
+          // must be updated to correctly handle destructuring assignment evaluation order.
+          computeMayUse(varName.getFirstChild(), cfgNode, output, conditional);
+          computeMayUse(varName.getSecondChild(), cfgNode, output, conditional);
+
+        } else if (varName.hasChildren()) {
           computeMayUse(varName.getFirstChild(), cfgNode, output, conditional);
           if (!conditional) {
             removeFromUseIfLocal(varName.getString(), output);
           }
-        }
+        } // else var name declaration with no initial value
         return;
 
       default:
@@ -242,10 +267,9 @@ class MaybeReachingVariableUse extends
         } else {
           /*
            * We want to traverse in reverse order because we want the LAST
-           * definition in the sub-tree....
-           * But we have no better way to traverse in reverse other :'(
+           * definition in the sub-tree.
            */
-          for (Node c = n.getLastChild(); c != null; c = n.getChildBefore(c)) {
+          for (Node c = n.getLastChild(); c != null; c = c.getPrevious()) {
             computeMayUse(c, cfgNode, output, conditional);
           }
         }
@@ -258,8 +282,8 @@ class MaybeReachingVariableUse extends
    * variable.
    */
   private void addToUseIfLocal(String name, Node node, ReachingUses use) {
-    Var var = jsScope.getVar(name);
-    if (var == null || var.scope != jsScope) {
+    Var var = allVarsInFn.get(name);
+    if (var == null) {
       return;
     }
     if (!escaped.contains(var)) {
@@ -273,8 +297,8 @@ class MaybeReachingVariableUse extends
    * variable.
    */
   private void removeFromUseIfLocal(String name, ReachingUses use) {
-    Var var = jsScope.getVar(name);
-    if (var == null || var.scope != jsScope) {
+    Var var = allVarsInFn.get(name);
+    if (var == null) {
       return;
     }
     if (!escaped.contains(var)) {
@@ -294,8 +318,8 @@ class MaybeReachingVariableUse extends
    */
   Collection<Node> getUses(String name, Node defNode) {
     GraphNode<Node, Branch> n = getCfg().getNode(defNode);
-    Preconditions.checkNotNull(n);
+    checkNotNull(n);
     FlowState<ReachingUses> state = n.getAnnotation();
-    return state.getOut().mayUseMap.get(jsScope.getVar(name));
+    return state.getOut().mayUseMap.get(allVarsInFn.get(name));
   }
 }

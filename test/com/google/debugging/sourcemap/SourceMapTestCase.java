@@ -22,18 +22,17 @@ import com.google.common.collect.ImmutableList;
 import com.google.debugging.sourcemap.proto.Mapping.OriginalMapping;
 import com.google.javascript.jscomp.Compiler;
 import com.google.javascript.jscomp.CompilerOptions;
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
 import com.google.javascript.jscomp.Result;
 import com.google.javascript.jscomp.SourceFile;
 import com.google.javascript.jscomp.SourceMap;
 import com.google.javascript.jscomp.SourceMap.DetailLevel;
-
-import junit.framework.TestCase;
-
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import junit.framework.TestCase;
 
 /**
  * @author johnlenz@google.com (John Lenz)
@@ -50,10 +49,11 @@ public abstract class SourceMapTestCase extends TestCase {
   }
 
 
-  static final List<SourceFile> EXTERNS = ImmutableList.of(
-      SourceFile.fromCode("externs", ""));
+  static final ImmutableList<SourceFile> EXTERNS =
+      ImmutableList.of(SourceFile.fromCode("externs", ""));
 
   protected DetailLevel detailLevel = SourceMap.DetailLevel.ALL;
+  protected boolean sourceMapIncludeSourcesContent = false;
 
   protected static class RunResult {
       String generatedSource;
@@ -86,24 +86,20 @@ public abstract class SourceMapTestCase extends TestCase {
     checkSourceMap("testcode", js, expectedMap);
   }
 
+  protected void checkSourceMap(String fileName, String js, String expectedMap) throws IOException {
+    RunResult result = compile(js, fileName);
+    assertThat(result.sourceMapFileContent).isEqualTo(expectedMap);
+    assertThat(getSourceMap(result)).isEqualTo(result.sourceMapFileContent);
+  }
+
   protected String getSourceMap(RunResult result) throws IOException {
     StringBuilder sb = new StringBuilder();
     result.sourceMap.appendTo(sb, "testcode");
     return sb.toString();
   }
 
-  protected void checkSourceMap(String fileName, String js, String expectedMap)
-      throws IOException {
-    RunResult result = compile(js, fileName);
-    assertThat(result.sourceMapFileContent).isEqualTo(expectedMap);
-    assertThat(getSourceMap(result)).isEqualTo(result.sourceMapFileContent);
-  }
-
-  /**
-   * Finds the all the __XX__ tokens in the given JavaScript
-   * string.
-   */
-  private Map<String, Token> findTokens(Map<String, String> inputs) {
+  /** Finds the all the __XX__ tokens in the given JavaScript string. */
+  private static Map<String, Token> findTokens(Map<String, String> inputs) {
     Map<String, Token> tokens = new LinkedHashMap<>();
 
     for (Entry<String, String> entry : inputs.entrySet()) {
@@ -113,11 +109,8 @@ public abstract class SourceMapTestCase extends TestCase {
     return tokens;
   }
 
-  /**
-   * Finds the all the __XX__ tokens in the given JavaScript
-   * string.
-   */
-  private Map<String, Token> findTokens(String src) {
+  /** Finds the all the __XX__ tokens in the given JavaScript string. */
+  private static Map<String, Token> findTokens(String src) {
     Map<String, Token> tokens = new LinkedHashMap<>();
 
     findTokens(tokens, "", src);
@@ -125,12 +118,9 @@ public abstract class SourceMapTestCase extends TestCase {
     return tokens;
   }
 
-  /**
-   * Finds the all the __XX__ tokens in the given JavaScript
-   * string.
-   */
-  private Map<String, Token> findTokens(
-    Map<String, Token> tokens, String inputName, String js) {
+  /** Finds the all the __XX__ tokens in the given JavaScript string. */
+  private static Map<String, Token> findTokens(
+      Map<String, Token> tokens, String inputName, String js) {
 
     int currentLine = 0;
     int positionOffset = 0;
@@ -270,29 +260,18 @@ public abstract class SourceMapTestCase extends TestCase {
     return compile(js, fileName, null, null);
   }
 
-  protected CompilerOptions getCompilerOptions() {
-    CompilerOptions options = new CompilerOptions();
-    options.setSourceMapOutputPath("testcode_source_map.out");
-    options.setSourceMapFormat(getSourceMapFormat());
-    options.setSourceMapDetailLevel(detailLevel);
-    return options;
-  }
-
-  protected RunResult compile(
-      String js1, String fileName1, String js2, String fileName2) {
+  protected RunResult compile(String js1, String fileName1, String js2, String fileName2) {
     Compiler compiler = new Compiler();
     CompilerOptions options = getCompilerOptions();
 
-    // Turn on IDE mode to get rid of optimizations.
-    options.ideMode = true;
+    options.setChecksOnly(true);
 
-    List<SourceFile> inputs =
-        ImmutableList.of(SourceFile.fromCode(fileName1, js1));
+    List<SourceFile> inputs = ImmutableList.of(SourceFile.fromCode(fileName1, js1));
 
     if (js2 != null && fileName2 != null) {
-      inputs = ImmutableList.of(
-          SourceFile.fromCode(fileName1, js1),
-          SourceFile.fromCode(fileName2, js2));
+      inputs =
+          ImmutableList.of(
+              SourceFile.fromCode(fileName1, js1), SourceFile.fromCode(fileName2, js2));
     }
 
     Result result = compiler.compile(EXTERNS, inputs, options);
@@ -315,4 +294,13 @@ public abstract class SourceMapTestCase extends TestCase {
     return rr;
   }
 
+  protected CompilerOptions getCompilerOptions() {
+    CompilerOptions options = new CompilerOptions();
+    options.setLanguageIn(LanguageMode.ECMASCRIPT3);
+    options.setSourceMapOutputPath("testcode_source_map.out");
+    options.setSourceMapFormat(getSourceMapFormat());
+    options.setSourceMapDetailLevel(detailLevel);
+    options.setSourceMapIncludeSourcesContent(sourceMapIncludeSourcesContent);
+    return options;
+  }
 }

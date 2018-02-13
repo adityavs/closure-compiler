@@ -18,9 +18,7 @@ package com.google.javascript.jscomp;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.TypeI;
-
 import java.util.HashSet;
 import java.util.Set;
 
@@ -42,89 +40,70 @@ class StrictModeCheck extends AbstractPostOrderCallback
 
   static final DiagnosticType USE_OF_WITH = DiagnosticType.warning(
       "JSC_USE_OF_WITH",
-      "The 'with' statement cannot be used in ES5 strict mode.");
-
-  static final DiagnosticType UNKNOWN_VARIABLE = DiagnosticType.warning(
-      "JSC_UNKNOWN_VARIABLE", "unknown variable {0}");
+      "The 'with' statement cannot be used in strict mode.");
 
   static final DiagnosticType EVAL_DECLARATION = DiagnosticType.warning(
       "JSC_EVAL_DECLARATION",
-      "\"eval\" cannot be redeclared in ES5 strict mode");
+      "\"eval\" cannot be redeclared in strict mode");
 
   static final DiagnosticType EVAL_ASSIGNMENT = DiagnosticType.warning(
       "JSC_EVAL_ASSIGNMENT",
-      "the \"eval\" object cannot be reassigned in ES5 strict mode");
+      "the \"eval\" object cannot be reassigned in strict mode");
 
   static final DiagnosticType ARGUMENTS_DECLARATION = DiagnosticType.warning(
       "JSC_ARGUMENTS_DECLARATION",
-      "\"arguments\" cannot be redeclared in ES5 strict mode");
+      "\"arguments\" cannot be redeclared in strict mode");
 
   static final DiagnosticType ARGUMENTS_ASSIGNMENT = DiagnosticType.warning(
       "JSC_ARGUMENTS_ASSIGNMENT",
-      "the \"arguments\" object cannot be reassigned in ES5 strict mode");
+      "the \"arguments\" object cannot be reassigned in strict mode");
 
   static final DiagnosticType ARGUMENTS_CALLEE_FORBIDDEN = DiagnosticType.warning(
       "JSC_ARGUMENTS_CALLEE_FORBIDDEN",
-      "\"arguments.callee\" cannot be used in ES5 strict mode");
+      "\"arguments.callee\" cannot be used in strict mode");
 
   static final DiagnosticType ARGUMENTS_CALLER_FORBIDDEN = DiagnosticType.warning(
       "JSC_ARGUMENTS_CALLER_FORBIDDEN",
-      "\"arguments.caller\" cannot be used in ES5 strict mode");
+      "\"arguments.caller\" cannot be used in strict mode");
 
   static final DiagnosticType FUNCTION_CALLER_FORBIDDEN = DiagnosticType.warning(
       "JSC_FUNCTION_CALLER_FORBIDDEN",
-      "A function''s \"caller\" property cannot be used in ES5 strict mode");
+      "A function''s \"caller\" property cannot be used in strict mode");
 
   static final DiagnosticType FUNCTION_ARGUMENTS_PROP_FORBIDDEN = DiagnosticType.warning(
       "JSC_FUNCTION_ARGUMENTS_PROP_FORBIDDEN",
-      "A function''s \"arguments\" property cannot be used in ES5 strict mode");
+      "A function''s \"arguments\" property cannot be used in strict mode");
 
-
+  static final DiagnosticType BAD_FUNCTION_DECLARATION = DiagnosticType.warning(
+      "JSC_BAD_FUNCTION_DECLARATION",
+      "functions can only be declared at top level or immediately within"
+          + " another function in ES5 strict mode");
 
   static final DiagnosticType DELETE_VARIABLE = DiagnosticType.warning(
       "JSC_DELETE_VARIABLE",
-      "variables, functions, and arguments cannot be deleted in "
-      + "ES5 strict mode");
+      "variables, functions, and arguments cannot be deleted in strict mode");
 
-  static final DiagnosticType DUPLICATE_OBJECT_KEY = DiagnosticType.warning(
+  static final DiagnosticType DUPLICATE_OBJECT_KEY = DiagnosticType.error(
       "JSC_DUPLICATE_OBJECT_KEY",
-      "object literals cannot contain duplicate keys in ES5 strict mode");
+      "Object literal contains illegal duplicate key \"{0}\", disallowed in strict mode");
 
   static final DiagnosticType DUPLICATE_CLASS_METHODS = DiagnosticType.error(
       "JSC_DUPLICATE_CLASS_METHODS",
-      "Classes cannot contain duplicate method names");
-
-  static final DiagnosticType BAD_FUNCTION_DECLARATION = DiagnosticType.error(
-      "JSC_BAD_FUNCTION_DECLARATION",
-      "functions can only be declared at top level or immediately within " +
-      "another function in ES5 strict mode");
+      "Class contains duplicate method name \"{0}\"");
 
   private final AbstractCompiler compiler;
-  private final boolean noVarCheck;
 
   StrictModeCheck(AbstractCompiler compiler) {
-    this(compiler, false);
-  }
-
-  StrictModeCheck(
-      AbstractCompiler compiler, boolean noVarCheck) {
     this.compiler = compiler;
-    this.noVarCheck = noVarCheck;
   }
 
   @Override public void process(Node externs, Node root) {
-    NodeTraversal.traverseRoots(compiler, this, externs, root);
-    NodeTraversal.traverse(compiler, root, new NonExternChecks());
+    NodeTraversal.traverseRootsEs6(compiler, this, externs, root);
+    NodeTraversal.traverseEs6(compiler, root, new NonExternChecks());
   }
 
   @Override public void visit(NodeTraversal t, Node n, Node parent) {
-    if (n.isFunction()) {
-      checkFunctionUse(t, n);
-    } else if (n.isName()) {
-      if (!isDeclaration(n)) {
-        checkNameUse(t, n);
-      }
-    } else if (n.isAssign()) {
+    if (n.isAssign()) {
       checkAssignment(t, n);
     } else if (n.isDelProp()) {
       checkDelete(t, n);
@@ -147,43 +126,25 @@ class StrictModeCheck extends AbstractPostOrderCallback
     }
   }
 
-  /** Checks that the function is used legally. */
-  private static void checkFunctionUse(NodeTraversal t, Node n) {
-    if (NodeUtil.isFunctionDeclaration(n) && !NodeUtil.isHoistedFunctionDeclaration(n)) {
-      t.report(n, BAD_FUNCTION_DECLARATION);
-    }
-  }
-
   /**
    * Determines if the given name is a declaration, which can be a declaration
    * of a variable, function, or argument.
    */
   private static boolean isDeclaration(Node n) {
-    switch (n.getParent().getType()) {
-      case Token.LET:
-      case Token.CONST:
-      case Token.VAR:
-      case Token.FUNCTION:
-      case Token.CATCH:
+    switch (n.getParent().getToken()) {
+      case LET:
+      case CONST:
+      case VAR:
+      case CATCH:
         return true;
+      case FUNCTION:
+        return n == n.getParent().getFirstChild();
 
-      case Token.PARAM_LIST:
-        return n.getParent().getParent().isFunction();
+      case PARAM_LIST:
+        return n.getGrandparent().isFunction();
 
       default:
         return false;
-    }
-  }
-
-  /** Checks that the given name is used legally. */
-  private void checkNameUse(NodeTraversal t, Node n) {
-    Var v = t.getScope().getVar(n.getString());
-    if (v == null) {
-      // In particular, this prevents creating a global variable by assigning
-      // to it without a declaration.
-      if (!noVarCheck) {
-        t.report(n, UNKNOWN_VARIABLE, n.getString());
-      }
     }
   }
 
@@ -214,26 +175,37 @@ class StrictModeCheck extends AbstractPostOrderCallback
   private static void checkObjectLiteralOrClass(NodeTraversal t, Node n) {
     Set<String> getters = new HashSet<>();
     Set<String> setters = new HashSet<>();
+    Set<String> staticGetters = new HashSet<>();
+    Set<String> staticSetters = new HashSet<>();
     for (Node key = n.getFirstChild();
          key != null;
          key = key.getNext()) {
+      if (key.isEmpty() || key.isComputedProp()) {
+        continue;
+      }
+      if (key.isSpread()) {
+        continue;
+      }
+      String keyName = key.getString();
       if (!key.isSetterDef()) {
         // normal property and getter cases
-        if (!getters.add(key.getString())) {
+        Set<String> set = key.isStaticMember() ? staticGetters : getters;
+        if (!set.add(keyName)) {
           if (n.isClassMembers()) {
-            t.report(key, DUPLICATE_CLASS_METHODS);
+            t.report(key, DUPLICATE_CLASS_METHODS, keyName);
           } else {
-            t.report(key, DUPLICATE_OBJECT_KEY);
+            t.report(key, DUPLICATE_OBJECT_KEY, keyName);
           }
         }
       }
       if (!key.isGetterDef()) {
         // normal property and setter cases
-        if (!setters.add(key.getString())) {
+        Set<String> set = key.isStaticMember() ? staticSetters : setters;
+        if (!set.add(keyName)) {
           if (n.isClassMembers()) {
-            t.report(key, DUPLICATE_CLASS_METHODS);
+            t.report(key, DUPLICATE_CLASS_METHODS, keyName);
           } else {
-            t.report(key, DUPLICATE_OBJECT_KEY);
+            t.report(key, DUPLICATE_OBJECT_KEY, keyName);
           }
         }
       }
@@ -243,7 +215,7 @@ class StrictModeCheck extends AbstractPostOrderCallback
   /** Checks that are performed on non-extern code only. */
   private static class NonExternChecks extends AbstractPostOrderCallback {
     @Override public void visit(NodeTraversal t, Node n, Node parent) {
-      if ((n.isName()) && isDeclaration(n)) {
+      if (n.isName() && isDeclaration(n)) {
         checkDeclaration(t, n);
       } else if (n.isGetProp()) {
         checkGetProp(t, n);

@@ -16,14 +16,14 @@
 
 package com.google.javascript.jscomp.graph;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
-
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -40,7 +40,7 @@ import java.util.Map;
  */
 public class LinkedDirectedGraph<N, E>
     extends DiGraph<N, E> implements GraphvizGraph {
-  protected final Map<N, LinkedDirectedGraphNode<N, E>> nodes = new HashMap<>();
+  protected final Map<N, LinkedDirectedGraphNode<N, E>> nodes = new LinkedHashMap<>();
 
   @Override
   public SubGraph<N, E> newSubGraph() {
@@ -176,6 +176,15 @@ public class LinkedDirectedGraph<N, E>
   }
 
   @Override
+  public List<DiGraphEdge<N, E>> getEdges() {
+    List<DiGraphEdge<N, E>> result = new ArrayList<>();
+    for (DiGraphNode<N, E> node : nodes.values()) {
+      result.addAll(node.getOutEdges());
+    }
+    return Collections.unmodifiableList(result);
+  }
+
+  @Override
   public GraphEdge<N, E> getFirstEdge(N n1, N n2) {
     DiGraphNode<N, E> dNode1 = getNodeOrFail(n1);
     DiGraphNode<N, E> dNode2 = getNodeOrFail(n2);
@@ -193,7 +202,7 @@ public class LinkedDirectedGraph<N, E>
   }
 
   @Override
-  public GraphNode<N, E> createNode(N value) {
+  public DiGraphNode<N, E> createNode(N value) {
     return createDirectedGraphNode(value);
   }
 
@@ -238,12 +247,26 @@ public class LinkedDirectedGraph<N, E>
       DiGraphNode<N, E>  dNode2) {
     // Verify the nodes.
     List<DiGraphEdge<N, E>> outEdges = dNode1.getOutEdges();
-    int len = outEdges.size();
-    for (int i = 0; i < len; i++) {
-      DiGraphEdge<N, E> outEdge = outEdges.get(i);
-      if (outEdge.getDestination() == dNode2
-          && edgeMatcher.apply(outEdge.getValue())) {
-        return true;
+    int outEdgesLen = outEdges.size();
+    List<DiGraphEdge<N, E>> inEdges = dNode2.getInEdges();
+    int inEdgesLen = inEdges.size();
+    // It is possible that there is a large assymmetry between the nodes, so pick the direction
+    // to search based on the shorter list since the edge lists should be symmetric.
+    if (outEdgesLen < inEdgesLen) {
+      for (int i = 0; i < outEdgesLen; i++) {
+        DiGraphEdge<N, E> outEdge = outEdges.get(i);
+        if (outEdge.getDestination() == dNode2
+            && edgeMatcher.apply(outEdge.getValue())) {
+          return true;
+        }
+      }
+    } else {
+      for (int i = 0; i < inEdgesLen; i++) {
+        DiGraphEdge<N, E> inEdge = inEdges.get(i);
+        if (inEdge.getSource() == dNode1
+            && edgeMatcher.apply(inEdge.getValue())) {
+          return true;
+        }
       }
     }
 
@@ -254,14 +277,7 @@ public class LinkedDirectedGraph<N, E>
     // Verify the nodes.
     DiGraphNode<N, E> dNode1 = getNodeOrFail(n1);
     DiGraphNode<N, E> dNode2 = getNodeOrFail(n2);
-    for (DiGraphEdge<N, E> outEdge : dNode1.getOutEdges()) {
-      if (outEdge.getDestination() == dNode2
-          && edgeMatcher.apply(outEdge.getValue())) {
-        return true;
-      }
-    }
-
-    return false;
+    return isConnectedInDirection(dNode1, edgeMatcher, dNode2);
   }
 
   @Override
@@ -270,16 +286,9 @@ public class LinkedDirectedGraph<N, E>
   }
 
   @Override
-  public List<DiGraphNode<N, E>> getDirectedSuccNodes(N nodeValue) {
-    return getDirectedSuccNodes(nodes.get(nodeValue));
-  }
-
-  @Override
-  public List<DiGraphNode<N, E>> getDirectedPredNodes(
-      DiGraphNode<N, E> dNode) {
-    Preconditions.checkNotNull(dNode);
-    List<DiGraphNode<N, E>> nodeList =
-        new ArrayList<>(dNode.getInEdges().size());
+  public List<DiGraphNode<N, E>> getDirectedPredNodes(DiGraphNode<N, E> dNode) {
+    checkNotNull(dNode);
+    List<DiGraphNode<N, E>> nodeList = new ArrayList<>(dNode.getInEdges().size());
     for (DiGraphEdge<N, E> edge : dNode.getInEdges()) {
       nodeList.add(edge.getSource());
     }
@@ -287,9 +296,14 @@ public class LinkedDirectedGraph<N, E>
   }
 
   @Override
+  public List<DiGraphNode<N, E>> getDirectedSuccNodes(N nodeValue) {
+    return getDirectedSuccNodes(nodes.get(nodeValue));
+  }
+
+  @Override
   public List<DiGraphNode<N, E>> getDirectedSuccNodes(
       DiGraphNode<N, E> dNode) {
-    Preconditions.checkNotNull(dNode);
+    checkNotNull(dNode);
     List<DiGraphNode<N, E>> nodeList =
         new ArrayList<>(dNode.getOutEdges().size());
     for (DiGraphEdge<N, E> edge : dNode.getOutEdges()) {
@@ -334,6 +348,11 @@ public class LinkedDirectedGraph<N, E>
   }
 
   @Override
+  public int getNodeCount() {
+    return nodes.size();
+  }
+
+  @Override
   public List<GraphNode<N, E>> getNeighborNodes(N value) {
     DiGraphNode<N, E> node = getDirectedGraphNode(value);
     List<GraphNode<N, E>> result = new ArrayList<>(
@@ -345,15 +364,6 @@ public class LinkedDirectedGraph<N, E>
       result.add(outEdge.getDestination());
     }
     return result;
-  }
-
-  @Override
-  public List<DiGraphEdge<N, E>> getEdges() {
-    List<DiGraphEdge<N, E>> result = new ArrayList<>();
-    for (DiGraphNode<N, E> node : nodes.values()) {
-      result.addAll(node.getOutEdges());
-    }
-    return Collections.unmodifiableList(result);
   }
 
   @Override

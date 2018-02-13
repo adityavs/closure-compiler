@@ -16,7 +16,9 @@
 
 package com.google.javascript.jscomp;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Compilation results
@@ -25,7 +27,7 @@ public class Result {
   public final boolean success;
   public final JSError[] errors;
   public final JSError[] warnings;
-  public final String debugLog;
+
   public final VariableMap variableMap;
   public final VariableMap propertyMap;
   public final VariableMap namedAnonFunctionMap;
@@ -35,18 +37,19 @@ public class Result {
   public final Map<String, Integer> cssNames;
   public final String externExport;
   public final String idGeneratorMap;
+  public final Set<SourceFile> transpiledFiles;
 
-  Result(JSError[] errors, JSError[] warnings, String debugLog,
+  Result(JSError[] errors, JSError[] warnings,
          VariableMap variableMap, VariableMap propertyMap,
          VariableMap namedAnonFunctionMap,
          VariableMap stringMap,
          FunctionInformationMap functionInformationMap,
          SourceMap sourceMap, String externExport,
-         Map<String, Integer> cssNames, String idGeneratorMap) {
+         Map<String, Integer> cssNames, String idGeneratorMap,
+         Set<SourceFile> transpiledFiles) {
     this.success = errors.length == 0;
-    this.errors = errors;
+    this.errors  = errors;
     this.warnings = warnings;
-    this.debugLog = debugLog;
     this.variableMap = variableMap;
     this.propertyMap = propertyMap;
     this.namedAnonFunctionMap = namedAnonFunctionMap;
@@ -56,16 +59,17 @@ public class Result {
     this.externExport = externExport;
     this.cssNames = cssNames;
     this.idGeneratorMap = idGeneratorMap;
+    this.transpiledFiles = transpiledFiles;
   }
 
-  // Visible for testing only.
-  public Result(JSError[] errors, JSError[] warnings, String debugLog,
+  @VisibleForTesting
+  public Result(JSError[] errors, JSError[] warnings,
                 VariableMap variableMap, VariableMap propertyMap,
                 VariableMap namedAnonFunctionMap,
                 FunctionInformationMap functionInformationMap,
                 SourceMap sourceMap, String externExport) {
-    this(errors, warnings, debugLog, variableMap, propertyMap,
+    this(errors, warnings, variableMap, propertyMap,
          namedAnonFunctionMap, null, functionInformationMap, sourceMap,
-         externExport, null, null);
+         externExport, null, null, null);
   }
 }

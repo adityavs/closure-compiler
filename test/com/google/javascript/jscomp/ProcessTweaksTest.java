@@ -18,7 +18,6 @@ package com.google.javascript.jscomp;
 
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -37,7 +36,7 @@ public final class ProcessTweaksTest extends CompilerTestCase {
   }
 
   @Override
-  public void setUp() throws Exception {
+  protected void setUp() throws Exception {
     super.setUp();
     defaultValueOverrides = new HashMap<>();
     stripTweaks = false;
@@ -165,6 +164,10 @@ public final class ProcessTweaksTest extends CompilerTestCase {
         ProcessTweaks.NON_GLOBAL_TWEAK_INIT_ERROR);
   }
 
+  public void testRegisterInIf() {
+    testSame("if (true) {goog.tweak.registerBoolean('TweakA', 'desc');};");
+  }
+
   public void testWrongGetter1() {
     testSame("goog.tweak.registerBoolean('TweakA', 'desc');" +
         "goog.tweak.getString('TweakA')",
@@ -211,45 +214,52 @@ public final class ProcessTweaksTest extends CompilerTestCase {
 
   public void testStrippingWithInCodeOverrides() {
     stripTweaks = true;
-    test("goog.tweak.overrideDefaultValue('TweakA', 5);" +
-        "goog.tweak.overrideDefaultValue('TweakB', true);" +
-        "goog.tweak.overrideDefaultValue('TweakC', 'bar');" +
-        "goog.tweak.registerNumber('TweakA', 'desc');" +
-        "goog.tweak.registerBoolean('TweakB', 'desc');" +
-        "goog.tweak.registerString('TweakC', 'desc', 'foo');" +
-        "alert(goog.tweak.getNumber('TweakA'));" +
-        "alert(goog.tweak.getBoolean('TweakB'));" +
-        "alert(goog.tweak.getString('TweakC'));",
-        "void 0; void 0; void 0; void 0; void 0; void 0;" +
-        "alert(5); alert(true); alert('bar');");
+    test(
+        "goog.tweak.overrideDefaultValue('TweakA', 5);"
+            + "goog.tweak.overrideDefaultValue('TweakB', true);"
+            + "goog.tweak.overrideDefaultValue('TweakC', 'bar');"
+            + "goog.tweak.registerNumber('TweakA', 'desc');"
+            + "goog.tweak.registerBoolean('TweakB', 'desc');"
+            + "goog.tweak.registerString('TweakC', 'desc', 'foo');"
+            + "alert(goog.tweak.getNumber('TweakA'));"
+            + "alert(goog.tweak.getBoolean('TweakB'));"
+            + "alert(goog.tweak.getString('TweakC'));",
+        "void 0; void 0; void 0; void 0; void 0; void 0;" + "alert(5); alert(true); alert('bar');");
   }
 
   public void testStrippingWithUnregisteredTweak1() {
     stripTweaks = true;
-    test("alert(goog.tweak.getNumber('TweakA'));",
-        "alert(0)", null, ProcessTweaks.UNKNOWN_TWEAK_WARNING);
+    test(
+        "alert(goog.tweak.getNumber('TweakA'));",
+        "alert(0)",
+        warning(ProcessTweaks.UNKNOWN_TWEAK_WARNING));
   }
 
   public void testStrippingWithUnregisteredTweak2() {
     stripTweaks = true;
-    test("alert(goog.tweak.getBoolean('TweakB'))",
-        "alert(false)", null, ProcessTweaks.UNKNOWN_TWEAK_WARNING);
+    test(
+        "alert(goog.tweak.getBoolean('TweakB'))",
+        "alert(false)",
+        warning(ProcessTweaks.UNKNOWN_TWEAK_WARNING));
   }
 
   public void testStrippingWithUnregisteredTweak3() {
     stripTweaks = true;
-    test("alert(goog.tweak.getString('TweakC'))",
-        "alert('')", null, ProcessTweaks.UNKNOWN_TWEAK_WARNING);
+    test(
+        "alert(goog.tweak.getString('TweakC'))",
+        "alert('')",
+        warning(ProcessTweaks.UNKNOWN_TWEAK_WARNING));
   }
 
   public void testStrippingOfManuallyRegistered1() {
     stripTweaks = true;
-    test("var reg = goog.tweak.getRegistry();" +
-         "if (reg) {" +
-         "  reg.register(new goog.tweak.BooleanSetting('foo', 'desc'));" +
-         "  reg.getEntry('foo').setDefaultValue(1);" +
-         "}",
-         "if (null);");
+    test(
+        "var reg = goog.tweak.getRegistry();"
+            + "if (reg) {"
+            + "  reg.register(new goog.tweak.BooleanSetting('foo', 'desc'));"
+            + "  reg.getEntry('foo').setDefaultValue(1);"
+            + "}",
+        "if (null);");
   }
 
   public void testOverridesWithStripping() {
@@ -257,46 +267,48 @@ public final class ProcessTweaksTest extends CompilerTestCase {
     defaultValueOverrides.put("TweakA", Node.newNumber(1));
     defaultValueOverrides.put("TweakB", new Node(Token.FALSE));
     defaultValueOverrides.put("TweakC", Node.newString("!"));
-    test("goog.tweak.overrideDefaultValue('TweakA', 5);" +
-        "goog.tweak.overrideDefaultValue('TweakC', 'bar');" +
-        "goog.tweak.registerNumber('TweakA', 'desc');" +
-        "goog.tweak.registerBoolean('TweakB', 'desc', true);" +
-        "goog.tweak.registerString('TweakC', 'desc', 'foo');" +
-        "alert(goog.tweak.getNumber('TweakA'));" +
-        "alert(goog.tweak.getBoolean('TweakB'));" +
-        "alert(goog.tweak.getString('TweakC'));",
-        "void 0; void 0; void 0; void 0; void 0; " +
-        "alert(1); alert(false); alert('!')");
+    test(
+        "goog.tweak.overrideDefaultValue('TweakA', 5);"
+            + "goog.tweak.overrideDefaultValue('TweakC', 'bar');"
+            + "goog.tweak.registerNumber('TweakA', 'desc');"
+            + "goog.tweak.registerBoolean('TweakB', 'desc', true);"
+            + "goog.tweak.registerString('TweakC', 'desc', 'foo');"
+            + "alert(goog.tweak.getNumber('TweakA'));"
+            + "alert(goog.tweak.getBoolean('TweakB'));"
+            + "alert(goog.tweak.getString('TweakC'));",
+        "void 0; void 0; void 0; void 0; void 0; " + "alert(1); alert(false); alert('!')");
   }
 
   public void testCompilerOverridesNoStripping1() {
     defaultValueOverrides.put("TweakA", Node.newNumber(1));
     defaultValueOverrides.put("TweakB", new Node(Token.FALSE));
     defaultValueOverrides.put("TweakC", Node.newString("!"));
-    test("goog.tweak.registerNumber('TweakA', 'desc');" +
-        "goog.tweak.registerBoolean('TweakB', 'desc', true);" +
-        "goog.tweak.registerString('TweakC', 'desc', 'foo');" +
-        "var a = goog.tweak.getCompilerOverrides_()",
-        "goog.tweak.registerNumber('TweakA', 'desc');" +
-        "goog.tweak.registerBoolean('TweakB', 'desc', true);" +
-        "goog.tweak.registerString('TweakC', 'desc', 'foo');" +
-        "var a = { TweakA: 1, TweakB: false, TweakC: '!' };");
+    test(
+        "goog.tweak.registerNumber('TweakA', 'desc');"
+            + "goog.tweak.registerBoolean('TweakB', 'desc', true);"
+            + "goog.tweak.registerString('TweakC', 'desc', 'foo');"
+            + "var a = goog.tweak.getCompilerOverrides_()",
+        "goog.tweak.registerNumber('TweakA', 'desc');"
+            + "goog.tweak.registerBoolean('TweakB', 'desc', true);"
+            + "goog.tweak.registerString('TweakC', 'desc', 'foo');"
+            + "var a = { TweakA: 1, TweakB: false, TweakC: '!' };");
   }
 
   public void testCompilerOverridesNoStripping2() {
     defaultValueOverrides.put("TweakA", Node.newNumber(1));
     defaultValueOverrides.put("TweakB", new Node(Token.FALSE));
     defaultValueOverrides.put("TweakC", Node.newString("!"));
-    test("goog.tweak.registerNumber('TweakA', 'desc');" +
-        "goog.tweak.registerBoolean('TweakB', 'desc', true);" +
-        "goog.tweak.registerString('TweakC', 'desc', 'foo');" +
-        "var a = goog.tweak.getCompilerOverrides_();" +
-        "var b = goog.tweak.getCompilerOverrides_()",
-        "goog.tweak.registerNumber('TweakA', 'desc');" +
-        "goog.tweak.registerBoolean('TweakB', 'desc', true);" +
-        "goog.tweak.registerString('TweakC', 'desc', 'foo');" +
-        "var a = { TweakA: 1, TweakB: false, TweakC: '!' };" +
-        "var b = { TweakA: 1, TweakB: false, TweakC: '!' };");
+    test(
+        "goog.tweak.registerNumber('TweakA', 'desc');"
+            + "goog.tweak.registerBoolean('TweakB', 'desc', true);"
+            + "goog.tweak.registerString('TweakC', 'desc', 'foo');"
+            + "var a = goog.tweak.getCompilerOverrides_();"
+            + "var b = goog.tweak.getCompilerOverrides_()",
+        "goog.tweak.registerNumber('TweakA', 'desc');"
+            + "goog.tweak.registerBoolean('TweakB', 'desc', true);"
+            + "goog.tweak.registerString('TweakC', 'desc', 'foo');"
+            + "var a = { TweakA: 1, TweakB: false, TweakC: '!' };"
+            + "var b = { TweakA: 1, TweakB: false, TweakC: '!' };");
   }
 
   public void testUnknownCompilerOverride() {

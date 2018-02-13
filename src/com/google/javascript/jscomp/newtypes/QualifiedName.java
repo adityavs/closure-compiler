@@ -15,11 +15,12 @@
  */
 package com.google.javascript.jscomp.newtypes;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 import com.google.common.base.Joiner;
-import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
-
+import com.google.common.collect.Iterables;
 import com.google.javascript.rhino.Node;
 
 /**
@@ -30,7 +31,7 @@ import com.google.javascript.rhino.Node;
  * @author dimvar@google.com (Dimitris Vardoulakis)
  */
 public final class QualifiedName {
-  ImmutableList<String> parts;
+  private final ImmutableList<String> parts;
 
   private QualifiedName(ImmutableList<String> parts) {
     this.parts = parts;
@@ -49,10 +50,11 @@ public final class QualifiedName {
     if (qnameNode == null || !qnameNode.isQualifiedName()) {
       return null;
     }
-    return qnameNode.isName()
-        ? new QualifiedName(qnameNode.getString())
-        : new QualifiedName(ImmutableList.copyOf(
-              Splitter.on('.').split(qnameNode.getQualifiedName())));
+    if (qnameNode.isGetProp()) {
+      String pname = qnameNode.getLastChild().getString();
+      return join(fromNode(qnameNode.getFirstChild()), new QualifiedName(pname));
+    }
+    return new QualifiedName(qnameNode.getQualifiedName());
   }
 
   public static QualifiedName fromQualifiedString(String qname) {
@@ -66,7 +68,7 @@ public final class QualifiedName {
   }
 
   public QualifiedName getAllButLeftmost() {
-    Preconditions.checkArgument(!isIdentifier());
+    checkArgument(!isIdentifier());
     return new QualifiedName(parts.subList(1, parts.size()));
   }
 
@@ -75,14 +77,15 @@ public final class QualifiedName {
   }
 
   public QualifiedName getAllButRightmost() {
-    Preconditions.checkArgument(!isIdentifier());
+    checkArgument(!isIdentifier());
     return new QualifiedName(parts.subList(0, parts.size() - 1));
   }
 
   public String getRightmostName() {
-    return parts.get(parts.size() - 1);
+    return Iterables.getLast(parts);
   }
 
+  @Override
   public String toString() {
     return Joiner.on(".").join(parts);
   }

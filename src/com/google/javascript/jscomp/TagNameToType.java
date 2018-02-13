@@ -17,13 +17,11 @@ package com.google.javascript.jscomp;
 
 import com.google.common.collect.ImmutableMap;
 
-import java.util.Map;
-
 /**
  * Contains a mapping from HTML Element tag name to the javascript type of that element at runtime.
  */
 class TagNameToType {
-  static Map<String, String> getMap() {
+  static ImmutableMap<String, String> getMap() {
       return new ImmutableMap.Builder<String, String>()
           .put("a", "HTMLAnchorElement")
           .put("area", "HTMLAreaElement")
@@ -39,6 +37,7 @@ class TagNameToType {
           .put("data", "HTMLDataElement")
           .put("datalist", "HTMLDataListElement")
           .put("del", "HTMLModElement")
+          .put("dialog", "HTMLDialogElement")
           .put("dir", "HTMLDirectoryElement")
           .put("div", "HTMLDivElement")
           .put("dl", "HTMLDListElement")
@@ -84,9 +83,12 @@ class TagNameToType {
           .put("style", "HTMLStyleElement")
           .put("table", "HTMLTableElement")
           .put("tbody", "HTMLTableSectionElement")
+          .put("tfoot", "HTMLTableSectionElement")
           .put("template", "HTMLTemplateElement")
+          .put("td", "HTMLTableSectionElement")
           .put("textarea", "HTMLTextAreaElement")
-          .put("thead", "HTMLTableSectionElement")
+          .put("th", "HTMLTableCellElement")
+          .put("thead", "HTMLTableCellElement")
           .put("time", "HTMLTimeElement")
           .put("title", "HTMLTitleElement")
           .put("tr", "HTMLTableRowElement")

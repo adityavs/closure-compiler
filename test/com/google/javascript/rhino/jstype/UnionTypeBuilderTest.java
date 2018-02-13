@@ -84,6 +84,11 @@ public class UnionTypeBuilderTest extends BaseJSTypeTestCase {
 
     assertUnion("?", UNKNOWN_TYPE);
     assertUnion("?", UNKNOWN_TYPE, UNKNOWN_TYPE);
+    assertUnion("(?|undefined)", UNKNOWN_TYPE, VOID_TYPE);
+    assertUnion("(?|undefined)", VOID_TYPE, UNKNOWN_TYPE);
+    assertUnion("(?|undefined)", VOID_TYPE, NUMBER_TYPE, UNKNOWN_TYPE);
+
+    assertUnion("(*|undefined)", ALL_TYPE, VOID_TYPE, NULL_TYPE);
 
     // NOTE: "(?)" means there are multiple unknown types in the union.
     assertUnion("?", UNKNOWN_TYPE, unresolvedNameA1);
@@ -107,7 +112,7 @@ public class UnionTypeBuilderTest extends BaseJSTypeTestCase {
             createFunctionWithReturn(ERROR_TYPE),
             ERROR_TYPE,
             createFunctionWithReturn(EVAL_ERROR_TYPE));
-    assertEquals("(Error|function (): Error)", union.toString());
+    assertEquals("(Error|function(): Error)", union.toString());
   }
 
   public void testRemovalOfDupes3() {
@@ -117,7 +122,32 @@ public class UnionTypeBuilderTest extends BaseJSTypeTestCase {
             createFunctionWithReturn(EVAL_ERROR_TYPE),
             EVAL_ERROR_TYPE,
             createFunctionWithReturn(ERROR_TYPE));
-    assertEquals("(Error|function (): Error)", union.toString());
+    assertEquals("(Error|function(): Error)", union.toString());
+  }
+
+  public void testRemovalOfDuplicateRecordTypes1() {
+    UnionTypeBuilder builder = new UnionTypeBuilder(registry);
+
+    addRecordType(builder, false);
+    addRecordType(builder, false);
+
+    assertEquals(1, builder.getAlternatesCount());
+  }
+
+  public void testRemovalOfDuplicateRecordTypes2() {
+    UnionTypeBuilder builder = new UnionTypeBuilder(registry);
+
+    addRecordType(builder, true);
+    addRecordType(builder, true);
+
+    assertEquals(1, builder.getAlternatesCount());
+  }
+
+  private void addRecordType(UnionTypeBuilder builder, boolean inferred) {
+    RecordTypeBuilder recBuilder = new RecordTypeBuilder(registry);
+    recBuilder.setSynthesized(inferred);
+    recBuilder.addProperty("prop", NUMBER_TYPE, null);
+    builder.addAlternate(recBuilder.build());
   }
 
   public void assertUnion(String expected, JSType ... types) {

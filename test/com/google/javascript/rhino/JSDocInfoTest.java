@@ -38,6 +38,7 @@
 
 package com.google.javascript.rhino;
 
+import static com.google.common.truth.Truth.assertThat;
 import static com.google.javascript.rhino.JSDocInfo.Visibility.PACKAGE;
 import static com.google.javascript.rhino.JSDocInfo.Visibility.PRIVATE;
 import static com.google.javascript.rhino.JSDocInfo.Visibility.PROTECTED;
@@ -54,7 +55,7 @@ import com.google.javascript.rhino.jstype.JSTypeNative;
 import com.google.javascript.rhino.jstype.JSTypeRegistry;
 import com.google.javascript.rhino.testing.Asserts;
 import com.google.javascript.rhino.testing.TestErrorReporter;
-
+import java.util.Collection;
 import junit.framework.TestCase;
 
 public class JSDocInfoTest extends TestCase {
@@ -91,7 +92,6 @@ public class JSDocInfoTest extends TestCase {
     assertFalse(info.isConstant());
     assertFalse(info.isConstructor());
     assertFalse(info.isHidden());
-    assertFalse(info.shouldPreserveTry());
   }
 
   public void testSetTypeAndVisibility() {
@@ -110,7 +110,6 @@ public class JSDocInfoTest extends TestCase {
     assertFalse(info.isConstant());
     assertFalse(info.isConstructor());
     assertFalse(info.isHidden());
-    assertFalse(info.shouldPreserveTry());
   }
 
   public void testSetReturnType() {
@@ -128,7 +127,6 @@ public class JSDocInfoTest extends TestCase {
     assertFalse(info.isConstant());
     assertFalse(info.isConstructor());
     assertFalse(info.isHidden());
-    assertFalse(info.shouldPreserveTry());
   }
 
   public void testSetReturnTypeAndBaseType() {
@@ -150,7 +148,6 @@ public class JSDocInfoTest extends TestCase {
     assertFalse(info.isConstant());
     assertFalse(info.isConstructor());
     assertFalse(info.isHidden());
-    assertFalse(info.shouldPreserveTry());
   }
 
   public void testSetEnumParameterType() {
@@ -169,7 +166,6 @@ public class JSDocInfoTest extends TestCase {
     assertFalse(info.isConstant());
     assertFalse(info.isConstructor());
     assertFalse(info.isHidden());
-    assertFalse(info.shouldPreserveTry());
   }
 
   public void testMultipleSetType() {
@@ -179,17 +175,23 @@ public class JSDocInfoTest extends TestCase {
     try {
       info.setReturnType(fromString("boolean"));
       fail("Expected exception");
-    } catch (IllegalStateException e) {}
+    } catch (IllegalStateException e) {
+      // expected
+    }
 
     try {
       info.setEnumParameterType(fromString("string"));
       fail("Expected exception");
-    } catch (IllegalStateException e) {}
+    } catch (IllegalStateException e) {
+      // expected
+    }
 
     try {
       info.declareTypedefType(fromString("string"));
       fail("Expected exception");
-    } catch (IllegalStateException e) {}
+    } catch (IllegalStateException e) {
+      // expected
+    }
 
     assertTypeEquals(NUMBER_TYPE, resolve(info.getType()));
     assertNull(info.getReturnType());
@@ -206,17 +208,23 @@ public class JSDocInfoTest extends TestCase {
     try {
       info.setType(fromString("number"));
       fail("Expected exception");
-    } catch (IllegalStateException e) {}
+    } catch (IllegalStateException e) {
+      // expected
+    }
 
     try {
       info.setEnumParameterType(fromString("string"));
       fail("Expected exception");
-    } catch (IllegalStateException e) {}
+    } catch (IllegalStateException e) {
+      // expected
+    }
 
     try {
       info.declareTypedefType(fromString("string"));
       fail("Expected exception");
-    } catch (IllegalStateException e) {}
+    } catch (IllegalStateException e) {
+      // expected
+    }
 
     assertTypeEquals(BOOLEAN_TYPE,
         resolve(info.getReturnType()));
@@ -233,17 +241,23 @@ public class JSDocInfoTest extends TestCase {
     try {
       info.setType(fromString("number"));
       fail("Expected exception");
-    } catch (IllegalStateException e) {}
+    } catch (IllegalStateException e) {
+      // expected
+    }
 
     try {
       info.setReturnType(fromString("string"));
       fail("Expected exception");
-    } catch (IllegalStateException e) {}
+    } catch (IllegalStateException e) {
+      // expected
+    }
 
     try {
       info.declareTypedefType(fromString("string"));
       fail("Expected exception");
-    } catch (IllegalStateException e) {}
+    } catch (IllegalStateException e) {
+      // expected
+    }
 
     assertNull(info.getType());
     assertNull(info.getTypedefType());
@@ -273,7 +287,6 @@ public class JSDocInfoTest extends TestCase {
     assertFalse(info.isConstructor());
     assertFalse(info.isDefine());
     assertFalse(info.isHidden());
-    assertFalse(info.shouldPreserveTry());
   }
 
   public void testSetConstructor() {
@@ -284,7 +297,6 @@ public class JSDocInfoTest extends TestCase {
     assertTrue(info.isConstructor());
     assertFalse(info.isDefine());
     assertFalse(info.isHidden());
-    assertFalse(info.shouldPreserveTry());
   }
 
   public void testSetDefine() {
@@ -295,7 +307,6 @@ public class JSDocInfoTest extends TestCase {
     assertFalse(info.isConstructor());
     assertTrue(info.isDefine());
     assertFalse(info.isHidden());
-    assertFalse(info.shouldPreserveTry());
   }
 
   public void testSetHidden() {
@@ -307,18 +318,6 @@ public class JSDocInfoTest extends TestCase {
     assertFalse(info.isConstructor());
     assertFalse(info.isDefine());
     assertTrue(info.isHidden());
-    assertFalse(info.shouldPreserveTry());
-  }
-
-  public void testSetShouldPreserveTry() {
-    JSDocInfo info = new JSDocInfo();
-    info.setShouldPreserveTry(true);
-
-    assertFalse(info.isConstant());
-    assertFalse(info.isConstructor());
-    assertFalse(info.isDefine());
-    assertFalse(info.isHidden());
-    assertTrue(info.shouldPreserveTry());
   }
 
   public void testSetOverride() {
@@ -326,7 +325,6 @@ public class JSDocInfoTest extends TestCase {
     info.setOverride(true);
 
     assertFalse(info.isDeprecated());
-    assertFalse(info.isNoAlias());
     assertTrue(info.isOverride());
   }
 
@@ -345,20 +343,49 @@ public class JSDocInfoTest extends TestCase {
     assertTrue(info.isPolymerBehavior());
   }
 
+  public void testSetPolymer() {
+    JSDocInfo info = new JSDocInfo();
+    assertFalse(info.isPolymer());
+    info.setPolymer(true);
+
+    assertTrue(info.isPolymer());
+  }
+
+  public void testSetCustomElement() {
+    JSDocInfo info = new JSDocInfo();
+    assertFalse(info.isCustomElement());
+    info.setCustomElement(true);
+
+    assertTrue(info.isCustomElement());
+  }
+
+  public void testSetMixinClass() {
+    JSDocInfo info = new JSDocInfo();
+    assertFalse(info.isMixinClass());
+    info.setMixinClass(true);
+
+    assertTrue(info.isMixinClass());
+  }
+
+  public void testSetMixinFunction() {
+    JSDocInfo info = new JSDocInfo();
+    assertFalse(info.isMixinFunction());
+    info.setMixinFunction(true);
+
+    assertTrue(info.isMixinFunction());
+  }
+
   public void testSetNoAlias() {
     JSDocInfo info = new JSDocInfo();
-    info.setNoAlias(true);
 
     assertFalse(info.isDeprecated());
     assertFalse(info.isOverride());
-    assertTrue(info.isNoAlias());
   }
 
   public void testSetDeprecated() {
     JSDocInfo info = new JSDocInfo();
     info.setDeprecated(true);
 
-    assertFalse(info.isNoAlias());
     assertFalse(info.isOverride());
     assertTrue(info.isDeprecated());
   }
@@ -368,14 +395,12 @@ public class JSDocInfoTest extends TestCase {
     info.setConstant(true);
     info.setConstructor(true);
     info.setHidden(true);
-    info.setShouldPreserveTry(true);
 
     assertFalse(info.hasType());
     assertTrue(info.isConstant());
     assertTrue(info.isConstructor());
     assertFalse(info.isDefine());
     assertTrue(info.isHidden());
-    assertTrue(info.shouldPreserveTry());
 
     info.setHidden(false);
 
@@ -383,7 +408,6 @@ public class JSDocInfoTest extends TestCase {
     assertTrue(info.isConstructor());
     assertFalse(info.isDefine());
     assertFalse(info.isHidden());
-    assertTrue(info.shouldPreserveTry());
 
     info.setConstant(false);
     info.setConstructor(false);
@@ -392,7 +416,6 @@ public class JSDocInfoTest extends TestCase {
     assertFalse(info.isConstructor());
     assertFalse(info.isDefine());
     assertFalse(info.isHidden());
-    assertTrue(info.shouldPreserveTry());
 
     info.setConstructor(true);
 
@@ -400,7 +423,6 @@ public class JSDocInfoTest extends TestCase {
     assertTrue(info.isConstructor());
     assertFalse(info.isDefine());
     assertFalse(info.isHidden());
-    assertTrue(info.shouldPreserveTry());
   }
 
   public void testClone() {
@@ -438,6 +460,37 @@ public class JSDocInfoTest extends TestCase {
     assertTrue(info.isConstant());
     assertTrue(info.isConstructor());
     assertTrue(info.isHidden());
+  }
+
+  public void testCloneTypeExpressions1() {
+    JSDocInfo info = new JSDocInfo();
+    info.setDescription("The source info");
+    info.setConstant(true);
+    info.setConstructor(true);
+    info.setHidden(true);
+    info.setBaseType(
+        new JSTypeExpression(
+            new Node(Token.BANG, Node.newString("Number")), ""));
+    info.setReturnType(fromString("string"));
+    info.declareParam(fromString("string"), "a");
+
+    JSDocInfo cloned = info.clone(true);
+
+    assertNotSame(info.getBaseType().getRoot(), cloned.getBaseType().getRoot());
+    assertTypeEquals(NUMBER_OBJECT_TYPE, resolve(cloned.getBaseType()));
+    assertEquals("The source info", cloned.getDescription());
+    assertNotSame(info.getReturnType().getRoot(), cloned.getReturnType().getRoot());
+    assertTypeEquals(STRING_TYPE, resolve(cloned.getReturnType()));
+    assertNotSame(info.getParameterType("a").getRoot(), cloned.getParameterType("a").getRoot());
+    assertTypeEquals(STRING_TYPE, resolve(cloned.getParameterType("a")));
+  }
+
+  public void testCloneTypeExpressions2() {
+    JSDocInfo info = new JSDocInfo();
+    info.declareParam(null, "a");
+    JSDocInfo cloned = info.clone(true);
+
+    assertNull(cloned.getParameterType("a"));
   }
 
   public void testSetFileOverviewWithDocumentationOff() {
@@ -487,6 +540,32 @@ public class JSDocInfoTest extends TestCase {
     JSDocInfo info = new JSDocInfo(true);
     info.declareTemplateTypeName("T");
     assertFalse(info.declareTemplateTypeName("T"));
+  }
+
+  public void testGetThrowsDescription() {
+    JSDocInfo info = new JSDocInfo(true);
+
+    // Set a description so that info is initialized.
+    info.setDescription("Lorem");
+
+    JSTypeExpression errorType = fromString("Error");
+    JSTypeExpression otherType = fromString("Other");
+    info.documentThrows(errorType, "Because it does.");
+    info.documentThrows(otherType, "");
+    assertEquals("Because it does.", info.getThrowsDescriptionForType(errorType));
+    assertEquals("", info.getThrowsDescriptionForType(otherType));
+    assertNull(info.getThrowsDescriptionForType(fromString("NeverSeen")));
+  }
+
+  // https://github.com/google/closure-compiler/issues/2328
+  public void testIssue2328() {
+    JSDocInfo info = new JSDocInfo();
+
+    // should be added to implemented interfaces
+    assertTrue("", info.addImplementedInterface(null));
+
+    Collection<Node> nodes = info.getTypeNodes();
+    assertThat(nodes).isEmpty();
   }
 
   /** Gets the type expression for a simple type name. */

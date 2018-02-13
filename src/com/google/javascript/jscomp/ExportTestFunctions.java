@@ -15,11 +15,11 @@
  */
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.javascript.jscomp.parsing.parser.util.format.SimpleFormat;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-
 import java.util.regex.Pattern;
 
 /**
@@ -27,14 +27,14 @@ import java.util.regex.Pattern;
  * by the test runner, even if the code is compiled.
  *
  */
-class ExportTestFunctions implements CompilerPass {
+public class ExportTestFunctions implements CompilerPass {
 
   private static final Pattern TEST_FUNCTIONS_NAME_PATTERN =
       Pattern.compile(
-          "^(?:((\\w+\\.)+prototype\\.)*" +
-          "(setUpPage|setUp|shouldRunTests|tearDown|tearDownPage|test[\\w\\$]+))$");
+          "^(?:((\\w+\\.)+prototype\\.||window\\.)*"
+              + "(setUpPage|setUp|shouldRunTests|tearDown|tearDownPage|test[\\w\\$]+))$");
 
-  private AbstractCompiler compiler;
+  private final AbstractCompiler compiler;
   private final String exportSymbolFunction;
   private final String exportPropertyFunction;
 
@@ -48,18 +48,15 @@ class ExportTestFunctions implements CompilerPass {
   ExportTestFunctions(AbstractCompiler compiler,
       String exportSymbolFunction, String exportPropertyFunction) {
 
-    Preconditions.checkNotNull(compiler);
+    checkNotNull(compiler);
     this.compiler = compiler;
     this.exportSymbolFunction = exportSymbolFunction;
     this.exportPropertyFunction = exportPropertyFunction;
   }
 
-  private class ExportTestFunctionsNodes extends
-      NodeTraversal.AbstractShallowCallback {
-
+  private class ExportTestFunctionsNodes extends NodeTraversal.AbstractShallowCallback {
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
-
       if (parent == null) {
         return;
       }
@@ -67,26 +64,45 @@ class ExportTestFunctions implements CompilerPass {
       if (parent.isScript()) {
         if (NodeUtil.isFunctionDeclaration(n)) {
           // Check for a test function statement.
-          String functionName = NodeUtil.getFunctionName(n);
+          String functionName = NodeUtil.getName(n);
           if (isTestFunction(functionName)) {
             exportTestFunctionAsSymbol(functionName, n, parent);
           }
-        } else if (isVarDeclaredFunction(n)) {
+        } else if (isNameDeclaredFunction(n)) {
           // Check for a test function expression.
-          Node functionNode = n.getFirstChild().getFirstChild();
-          String functionName = NodeUtil.getFunctionName(functionNode);
+          Node functionNode = n.getFirstFirstChild();
+          String functionName = NodeUtil.getName(functionNode);
           if (isTestFunction(functionName)) {
             exportTestFunctionAsSymbol(functionName, n, parent);
           }
+        } else if (isNameDeclaredClass(n)) {
+          Node classNode = n.getFirstFirstChild();
+          String className = NodeUtil.getName(classNode);
+          exportClass(parent, classNode, className, n);
+        } else if (n.isClass()) {
+          exportClass(parent, n);
         }
-      } else if (NodeUtil.isExprAssign(parent) &&
-            !n.getLastChild().isAssign()) {
+      } else if (NodeUtil.isExprAssign(parent) && !n.getLastChild().isAssign()) {
         // Check for a test method assignment.
         Node grandparent = parent.getParent();
         if (grandparent != null && grandparent.isScript()) {
-          String functionName = n.getFirstChild().getQualifiedName();
-          if (isTestFunction(functionName)) {
-            exportTestFunctionAsProperty(functionName, parent, n, grandparent);
+          //                                    NAME/(GETPROP -> ... -> NAME)
+          // SCRIPT -> EXPR_RESULT -> ASSIGN ->
+          //                                    FUNCTION/CLASS
+          Node firstChild = n.getFirstChild();
+          Node lastChild = n.getLastChild();
+          String nodeName = firstChild.getQualifiedName();
+
+          if (lastChild.isFunction()) {
+            if (isTestFunction(nodeName)) {
+              if (n.getFirstChild().isName()) {
+                exportTestFunctionAsSymbol(nodeName, parent, grandparent);
+              } else {
+                exportTestFunctionAsProperty(nodeName, parent, n, grandparent);
+              }
+            }
+          } else if (lastChild.isClass()) {
+            exportClass(grandparent, lastChild, nodeName, parent);
           }
         }
       } else if (n.isObjectLit()
@@ -94,7 +110,7 @@ class ExportTestFunctions implements CompilerPass {
         for (Node c : n.children()) {
           if (c.isStringKey() && !c.isQuotedString()) {
             c.setQuotedString();
-            compiler.reportCodeChange();
+            compiler.reportChangeToEnclosingScope(c);
           } else if (c.isMemberFunctionDef()) {
             rewriteMemberDefInObjLit(c, n);
           }
@@ -102,12 +118,49 @@ class ExportTestFunctions implements CompilerPass {
       }
     }
 
+    private void exportClass(Node scriptNode, Node classNode) {
+      String className = NodeUtil.getName(classNode);
+      exportClass(scriptNode, classNode, className, classNode);
+    }
+
+    private void exportClass(Node scriptNode, Node classNode, String className, Node baseNode) {
+      Node classMembers = classNode.getLastChild();
+      for (Node maybeMemberFunctionDef : classMembers.children()) {
+        if (maybeMemberFunctionDef.isMemberFunctionDef()) {
+          String methodName = maybeMemberFunctionDef.getString();
+          if (isTestFunction(methodName)) {
+            String functionRef = className + ".prototype." + methodName;
+            String classRef = className + ".prototype";
+
+            Node exportCallTarget =
+                NodeUtil.newQName(
+                    compiler, exportPropertyFunction, maybeMemberFunctionDef, methodName);
+            Node call = IR.call(exportCallTarget);
+            if (exportCallTarget.isName()) {
+              call.putBooleanProp(Node.FREE_CALL, true);
+            }
+
+            call.addChildToBack(
+                NodeUtil.newQName(compiler, classRef, maybeMemberFunctionDef, classRef));
+            call.addChildToBack(IR.string(methodName));
+            call.addChildToBack(
+                NodeUtil.newQName(compiler, functionRef, maybeMemberFunctionDef, functionRef));
+
+            Node expression = IR.exprResult(call);
+
+            scriptNode.addChildAfter(expression, baseNode);
+            compiler.reportChangeToEnclosingScope(expression);
+          }
+        }
+      }
+    }
+
     private void rewriteMemberDefInObjLit(Node memberDef, Node objLit) {
       String name = memberDef.getString();
-      Node stringKey = IR.stringKey(name, memberDef.getFirstChild().detachFromParent());
+      Node stringKey = IR.stringKey(name, memberDef.getFirstChild().detach());
       objLit.replaceChild(memberDef, stringKey);
       stringKey.setQuotedString();
-      compiler.reportCodeChange();
+      compiler.reportChangeToEnclosingScope(objLit);
     }
 
     // TODO(johnlenz): move test suite declaration into the
@@ -117,28 +170,53 @@ class ExportTestFunctions implements CompilerPass {
     }
 
     /**
-     * Whether node corresponds to a function expression declared with var,
-     * which is of the form:
+     * Get the node that corresponds to an expression declared with var, let or const.
+     * This has the AST structure VAR/LET/CONST -> NAME -> NODE
+     * @param node
+     */
+    private Node getNameDeclaredGrandchild(Node node) {
+      if (!NodeUtil.isNameDeclaration(node)) {
+        return null;
+      }
+      return node.getFirstFirstChild();
+    }
+
+    /**
+     * Whether node corresponds to a function expression declared with var, let
+     * or const which is of the form:
      * <pre>
-     * var functionName = function() {
+     * var/let/const functionName = function() {
      *   // Implementation
      * };
      * </pre>
-     * This has the AST structure VAR -> NAME -> FUNCTION
+     * This has the AST structure VAR/LET/CONST -> NAME -> FUNCTION
      * @param node
      */
-    private boolean isVarDeclaredFunction(Node node) {
-      if (!node.isVar()) {
-        return false;
-      }
-      Node grandchild = node.getFirstChild().getFirstChild();
+    private boolean isNameDeclaredFunction(Node node) {
+      Node grandchild = getNameDeclaredGrandchild(node);
       return grandchild != null && grandchild.isFunction();
+    }
+
+    /**
+     * Whether node corresponds to a class declared with var, let or const which
+     * is of the form:
+     * <pre>
+     * var/let/const className = class {
+     *   // Implementation
+     * };
+     * </pre>
+     * This has the AST structure VAR/LET/CONST -> NAME -> CLASS
+     * @param node
+     */
+    private boolean isNameDeclaredClass(Node node) {
+      Node grandchild = getNameDeclaredGrandchild(node);
+      return grandchild != null && grandchild.isClass();
     }
   }
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, new ExportTestFunctionsNodes());
+    NodeTraversal.traverseEs6(compiler, root, new ExportTestFunctionsNodes());
   }
 
   // Adds exportSymbol(testFunctionName, testFunction);
@@ -158,7 +236,7 @@ class ExportTestFunctions implements CompilerPass {
     Node expression = IR.exprResult(call);
 
     scriptNode.addChildAfter(expression, node);
-    compiler.reportCodeChange();
+    compiler.reportChangeToEnclosingScope(expression);
   }
 
 
@@ -168,6 +246,9 @@ class ExportTestFunctions implements CompilerPass {
 
     String testFunctionName =
         NodeUtil.getPrototypePropertyName(node.getFirstChild());
+    if (node.getFirstChild().getQualifiedName().startsWith("window.")) {
+      testFunctionName = node.getFirstChild().getQualifiedName().substring("window.".length());
+    }
     String objectName = fullyQualifiedFunctionName.substring(0,
         fullyQualifiedFunctionName.lastIndexOf('.'));
     String exportCallStr = SimpleFormat.format("%s(%s, '%s', %s);",
@@ -178,8 +259,8 @@ class ExportTestFunctions implements CompilerPass {
         .removeChildren();
     exportCall.useSourceInfoFromForTree(scriptNode);
 
-    scriptNode.addChildAfter(exportCall, parent);
-    compiler.reportCodeChange();
+    scriptNode.addChildrenAfter(exportCall, parent);
+    compiler.reportChangeToEnclosingScope(exportCall);
   }
 
 
@@ -191,7 +272,7 @@ class ExportTestFunctions implements CompilerPass {
    * @param functionName The name of the function
    * @return {@code true} if the function is recognized as a test function.
    */
-  private static boolean isTestFunction(String functionName) {
+  public static boolean isTestFunction(String functionName) {
     return functionName != null
         && TEST_FUNCTIONS_NAME_PATTERN.matcher(functionName).matches();
   }

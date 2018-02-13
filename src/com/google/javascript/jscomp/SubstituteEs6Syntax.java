@@ -16,16 +16,14 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkArgument;
+
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
 
 /**
- * An optimization that minimizes code by simplifying expressions that
- * can be represented more succinctly with ES6 syntax, like arrow functions,
- * classes, etc.
+ * An optimization that does peephole optimizations of ES6 code.
  *
  */
 class SubstituteEs6Syntax extends AbstractPostOrderCallback implements HotSwapCompilerPass {
@@ -33,7 +31,6 @@ class SubstituteEs6Syntax extends AbstractPostOrderCallback implements HotSwapCo
   private final AbstractCompiler compiler;
 
   public SubstituteEs6Syntax(AbstractCompiler compiler) {
-    Preconditions.checkState(compiler.getOptions().getLanguageOut().isEs6OrHigher());
     this.compiler = compiler;
   }
 
@@ -44,28 +41,23 @@ class SubstituteEs6Syntax extends AbstractPostOrderCallback implements HotSwapCo
 
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
-    NodeTraversal.traverse(compiler, scriptRoot, this);
-    compiler.setLanguageMode(compiler.getOptions().getLanguageOut());
+    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
   }
 
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
-    switch(n.getType()) {
-      case Token.FUNCTION:
-        if (n.getFirstChild().getString().isEmpty() && !n.isArrowFunction()) {
-          if (parent.isStringKey()) {
-            parent.setType(Token.MEMBER_FUNCTION_DEF);
-            compiler.reportCodeChange();
-          } else if (!NodeUtil.isVarArgsFunction(n) // i.e. doesn't reference arguments
-              && !NodeUtil.referencesThis(n.getLastChild())) {
-            // When possible, change regular function to arrow functions
-            n.setIsArrowFunction(true);
-            compiler.reportCodeChange();
-          }
-        }
+    switch (n.getToken()) {
+      case FUNCTION:
         if (n.isArrowFunction()) {
           maybeSimplifyArrowFunctionBody(n, n.getLastChild());
         }
+        break;
+      case STRING_KEY:
+        if (n.getFirstChild().isName() && n.getFirstChild().getString().equals(n.getString())) {
+          n.setShorthandProperty(true);
+        }
+        break;
+      default:
         break;
     }
   }
@@ -74,12 +66,13 @@ class SubstituteEs6Syntax extends AbstractPostOrderCallback implements HotSwapCo
    * If possible, replace functions of the form ()=>{ return x; } with ()=>x
    */
   private void maybeSimplifyArrowFunctionBody(Node arrowFunction, Node body) {
-    Preconditions.checkArgument(arrowFunction.isArrowFunction());
-    if (!body.isBlock() || body.getChildCount() != 1 || !body.getFirstChild().isReturn()) {
+    checkArgument(arrowFunction.isArrowFunction());
+    if (!body.isNormalBlock() || !body.hasOneChild() || !body.getFirstChild().isReturn()) {
       return;
     }
     Node returnValue = body.getFirstChild().removeFirstChild();
-    arrowFunction.replaceChild(body, returnValue != null ? returnValue : IR.name("undefined"));
-    compiler.reportCodeChange();
+    Node replacement = returnValue != null ? returnValue : IR.name("undefined");
+    arrowFunction.replaceChild(body, replacement);
+    compiler.reportChangeToEnclosingScope(replacement);
   }
 }

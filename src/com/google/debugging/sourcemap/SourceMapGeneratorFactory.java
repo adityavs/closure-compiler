@@ -23,13 +23,6 @@ public final class SourceMapGeneratorFactory {
   /**
    * @return The appropriate source map object for the given source map format.
    */
-  public static SourceMapGenerator getInstance() {
-    return getInstance(SourceMapFormat.DEFAULT);
-  }
-
-  /**
-   * @return The appropriate source map object for the given source map format.
-   */
   public static SourceMapGenerator getInstance(SourceMapFormat format) {
     switch (format) {
       case DEFAULT:
@@ -39,4 +32,6 @@ public final class SourceMapGeneratorFactory {
         throw new IllegalStateException("unsupported source map format");
     }
   }
+
+  private SourceMapGeneratorFactory() {}
 }

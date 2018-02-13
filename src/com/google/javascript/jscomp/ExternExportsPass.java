@@ -16,16 +16,18 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.base.Joiner;
-import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.JSDocInfoBuilder;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
-
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -73,8 +75,8 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
     protected final Node value;
 
     Export(String symbolName, Node value) {
-      this.symbolName = Preconditions.checkNotNull(symbolName);
-      this.value = Preconditions.checkNotNull(value);
+      this.symbolName = checkNotNull(symbolName);
+      this.value = checkNotNull(value);
     }
 
     /**
@@ -82,7 +84,7 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
      * it to the externsRoot AST.
      */
     void generateExterns() {
-      appendExtern(getExportedPath(), getValue(value));
+      appendExtern(getExportedPath(), getValue());
     }
 
     /**
@@ -116,8 +118,18 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
             || (alreadyExportedPaths.contains(pathPrefix)
                 && !isCompletePathPrefix);
 
+        boolean exportedValueDefinesNewType = false;
+
+        if (valueToExport != null) {
+          JSDocInfo jsdoc = NodeUtil.getBestJSDocInfo(valueToExport);
+          if (jsdoc != null && jsdoc.containsTypeDefinition()) {
+            exportedValueDefinesNewType = true;
+          }
+        }
+
         if (!skipPathPrefix) {
            Node initializer;
+           JSDocInfo jsdoc = null;
 
           /* Namespaces get initialized to {}, functions to
            * externed versions of their value, and if we can't
@@ -135,14 +147,19 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
             if (valueToExport.isFunction()) {
               initializer = createExternFunction(valueToExport);
             } else {
-              Preconditions.checkState(valueToExport.isObjectLit());
+              checkState(valueToExport.isObjectLit());
               initializer = createExternObjectLit(valueToExport);
             }
+          } else if (!isCompletePathPrefix && exportedValueDefinesNewType) {
+            jsdoc = buildNamespaceJSDoc();
+            initializer = createExternObjectLit(IR.objectlit());
+            // Don't add the empty jsdoc here
+            initializer.setJSDocInfo(null);
           } else {
             initializer = IR.empty();
           }
 
-          appendPathDefinition(pathPrefix, initializer);
+          appendPathDefinition(pathPrefix, initializer, jsdoc);
         }
       }
     }
@@ -168,7 +185,8 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
       return pathPrefixes;
     }
 
-    private void appendPathDefinition(String path, Node initializer) {
+    private void appendPathDefinition(
+        String path, Node initializer, JSDocInfo jsdoc) {
       Node pathDefinition;
 
       if (!path.contains(".")) {
@@ -184,6 +202,14 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
         } else {
           pathDefinition = NodeUtil.newExpr(
               IR.assign(qualifiedPath, initializer));
+        }
+      }
+      if (jsdoc != null) {
+        if (pathDefinition.isExprResult()) {
+          pathDefinition.getFirstChild().setJSDocInfo(jsdoc);
+        } else {
+          checkState(pathDefinition.isVar());
+          pathDefinition.setJSDocInfo(jsdoc);
         }
       }
 
@@ -207,7 +233,7 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
       // Use the original parameter names so that the externs look pretty.
       Node param = paramList.getFirstChild();
       while (param != null && param.isName()) {
-        String originalName = (String) param.getProp(Node.ORIGINALNAME_PROP);
+        String originalName = param.getOriginalName();
         if (originalName != null) {
           param.setString(originalName);
         }
@@ -215,15 +241,36 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
       }
       Node externFunction = IR.function(IR.name(""), paramList, IR.block());
 
-      externFunction.setJSType(exportedFunction.getJSType());
+      if (exportedFunction.getTypeI() != null) {
+        externFunction.setTypeI(exportedFunction.getTypeI());
+        // When this function is printed, it will have a regular jsdoc, so we
+        // don't want inline jsdocs as well
+        deleteInlineJsdocs(externFunction);
+      }
 
       return externFunction;
+    }
+
+    private void deleteInlineJsdocs(Node fn) {
+      checkArgument(fn.isFunction());
+      for (Node param : NodeUtil.getFunctionParameters(fn).children()) {
+        param.setJSDocInfo(null);
+      }
+      // Delete the inline return as well, if any
+      fn.getFirstChild().setJSDocInfo(null);
     }
 
     private JSDocInfo buildEmptyJSDoc() {
       // TODO(johnlenz): share the JSDocInfo here rather than building
       // a new one each time.
       return new JSDocInfoBuilder(false).build(true);
+    }
+
+    private JSDocInfo buildNamespaceJSDoc() {
+      JSDocInfoBuilder builder = new JSDocInfoBuilder(false);
+      builder.recordConstancy();
+      builder.recordSuppressions(ImmutableSet.of("const", "duplicate"));
+      return builder.build();
     }
 
     /**
@@ -233,7 +280,7 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
      */
     private Node createExternObjectLit(Node exportedObjectLit) {
       Node lit = IR.objectlit();
-      lit.setJSType(exportedObjectLit.getJSType());
+      lit.setTypeI(exportedObjectLit.getTypeI());
 
       // This is an indirect way of telling the typed code generator
       // "print the type of this"
@@ -259,7 +306,7 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
      * a function or object literal, the node is returned. Otherwise,
      * {@code null} is returned.
      */
-    protected Node getValue(Node qualifiedNameNode) {
+    protected Node getValue() {
       String qualifiedName = value.getQualifiedName();
 
       if (qualifiedName == null) {
@@ -273,14 +320,14 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
 
       Node definition;
 
-      switch (definitionParent.getType()) {
-        case Token.ASSIGN:
+      switch (definitionParent.getToken()) {
+        case ASSIGN:
           definition = definitionParent.getLastChild();
           break;
-        case Token.VAR:
+        case VAR:
           definition = definitionParent.getLastChild().getLastChild();
           break;
-        case Token.FUNCTION:
+        case FUNCTION:
           if (NodeUtil.isFunctionDeclaration(definitionParent)) {
             definition = definitionParent;
           } else {
@@ -288,7 +335,7 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
           }
           break;
         default:
-            return null;
+          return null;
       }
 
       if (!definition.isFunction() && !definition.isObjectLit()) {
@@ -329,7 +376,7 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
     public PropertyExport(String exportPath, String symbolName, Node value) {
       super(symbolName, value);
 
-      this.exportPath = Preconditions.checkNotNull(exportPath);
+      this.exportPath = checkNotNull(exportPath);
     }
 
     @Override
@@ -366,8 +413,7 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
     this.exports = new ArrayList<>();
     this.compiler = compiler;
     this.definitionMap = new HashMap<>();
-    this.externsRoot = IR.block();
-    this.externsRoot.setIsSyntheticBlock(true);
+    this.externsRoot = IR.script();
     this.alreadyExportedPaths = new HashSet<>();
     this.mappedPaths = new HashMap<>();
 
@@ -392,7 +438,7 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
 
   @Override
   public void process(Node externs, Node root) {
-    new NodeTraversal(compiler, this).traverse(root);
+    NodeTraversal.traverseEs6(compiler, root, this);
 
     // Sort by path length to ensure that the longer
     // paths (which may depend on the shorter ones)
@@ -410,26 +456,30 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
     for (Export export : sorted) {
       export.generateExterns();
     }
+
+    setGeneratedExternsOnCompiler();
   }
 
-  /**
-   * Returns the generated externs.
-   */
-  public String getGeneratedExterns() {
+  private void setGeneratedExternsOnCompiler() {
     CodePrinter.Builder builder = new CodePrinter.Builder(externsRoot)
       .setPrettyPrint(true)
       .setOutputTypes(true)
       .setTypeRegistry(compiler.getTypeIRegistry());
 
-    return builder.build();
+    compiler.setExternExports(Joiner.on("\n").join(
+        "/**",
+        " * @fileoverview Generated externs.",
+        " * @externs",
+        " */",
+        builder.build()));
   }
 
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
-    switch (n.getType()) {
+    switch (n.getToken()) {
 
-      case Token.NAME:
-      case Token.GETPROP:
+      case NAME:
+      case GETPROP:
         String name = n.getQualifiedName();
         if (name == null) {
           return;
@@ -458,6 +508,9 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
           handleSymbolExportCall(parent);
         }
 
+        break;
+      default:
+        break;
     }
   }
 
@@ -526,7 +579,7 @@ final class ExternExportsPass extends NodeTraversal.AbstractPostOrderCallback
       return;
     }
 
-    String constructorName = NodeUtil.getFunctionName(constructorNode);
+    String constructorName = NodeUtil.getName(constructorNode);
     String propertyName = definitionNode.getLastChild().getString();
     String prototypeName = constructorName + ".prototype";
     Node propertyNameNode = NodeUtil.newQName(compiler, "this." + propertyName);

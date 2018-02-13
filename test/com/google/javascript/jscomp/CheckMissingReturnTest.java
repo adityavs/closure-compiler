@@ -24,14 +24,15 @@ import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
  */
 public final class CheckMissingReturnTest extends CompilerTestCase {
 
-  public CheckMissingReturnTest() {
-    enableTypeCheck(CheckLevel.OFF);
+  @Override
+  protected void setUp() throws Exception {
+    super.setUp();
+    enableTypeCheck(); // NOTE: CheckMissingReturn is an OTI-only pass.
   }
 
   @Override
   protected CompilerPass getProcessor(final Compiler compiler) {
-    return new CombinedCompilerPass(compiler,
-        new CheckMissingReturn(compiler, CheckLevel.ERROR));
+    return new CombinedCompilerPass(compiler, new CheckMissingReturn(compiler));
   }
 
   public void testMissingReturn() {
@@ -65,8 +66,6 @@ public final class CheckMissingReturnTest extends CompilerTestCase {
     // Returning a union that includes void or undefined.
     testNotMissing("number|undefined", "var x;");
     testNotMissing("number|void", "var x;");
-    testNotMissing("(number,void)", "var x;");
-    testNotMissing("(number,undefined)", "var x;");
     testNotMissing("*", "var x;");
 
     // Test try catch finally.
@@ -130,31 +129,31 @@ public final class CheckMissingReturnTest extends CompilerTestCase {
     // return statements in the three possible configurations: both scopes
     // return; enclosed doesn't return; enclosing doesn't return.
     testNotMissing(
-        "try {" +
-        "   /** @return {number} */ function f() {" +
-        "       try { return 1; }" +
-        "       finally { }" +
-        "   };" +
-        "   return 1;" +
-        "}" +
-        "finally { }");
+        "try {"
+            + "   /** @return {number} */ function f() {"
+            + "       try { return 1; }"
+            + "       finally { }"
+            + "   };"
+            + "   return 1;"
+            + "}"
+            + "finally { }");
     testMissing(
-        "try {" +
-        "   /** @return {number} */ function f() {" +
-        "       try { }" +
-        "       finally { }" +
-        "   };" +
-        "   return 1;" +
-        "}" +
-        "finally { }");
+        "try {"
+            + "   /** @return {number} */ function f() {"
+            + "       try { }"
+            + "       finally { }"
+            + "   };"
+            + "   return 1;"
+            + "}"
+            + "finally { }");
     testMissing(
-        "try {" +
-        "   /** @return {number} */ function f() {" +
-        "       try { return 1; }" +
-        "       finally { }" +
-        "   };" +
-        "}" +
-        "finally { }");
+        "try {"
+            + "   /** @return {number} */ function f() {"
+            + "       try { return 1; }"
+            + "       finally { }"
+            + "   };"
+            + "}"
+            + "finally { }");
   }
 
   public void testKnownConditions() {
@@ -195,8 +194,7 @@ public final class CheckMissingReturnTest extends CompilerTestCase {
 
   public void testIssue779() {
     testNotMissing(
-        "var a = f(); try { alert(); if (a > 0) return 1; }" +
-        "finally { a = 5; } return 2;");
+        "var a = f(); try { alert(); if (a > 0) return 1; }" + "finally { a = 5; } return 2;");
   }
 
   public void testConstructors() {
@@ -210,9 +208,9 @@ public final class CheckMissingReturnTest extends CompilerTestCase {
 
   public void testClosureAsserts() {
     String closureDefs =
-        "/** @const */ var goog = {};\n" +
-        "goog.asserts = {};\n" +
-        "goog.asserts.fail = function(x) {};";
+        "/** @const */ var goog = {};\n"
+            + "goog.asserts = {};\n"
+            + "goog.asserts.fail = function(x) {};";
 
     testNotMissing(closureDefs + "goog.asserts.fail('');");
 
@@ -232,7 +230,7 @@ public final class CheckMissingReturnTest extends CompilerTestCase {
 
   private static String createShorthandFunctionInObjLit(
       String returnType, String body) {
-    return LINE_JOINER.join(
+    return lines(
         "var obj = {",
         "  /** @return {" + returnType + "} */",
         "  foo() {", body, "}",
@@ -241,7 +239,7 @@ public final class CheckMissingReturnTest extends CompilerTestCase {
 
   private void testMissingInTraditionalFunction(String returnType, String body) {
     String js = createFunction(returnType, body);
-    testError(js, CheckMissingReturn.MISSING_RETURN_STATEMENT);
+    testWarning(js, CheckMissingReturn.MISSING_RETURN_STATEMENT);
   }
 
   private void testNotMissingInTraditionalFunction(String returnType, String body) {
@@ -249,19 +247,24 @@ public final class CheckMissingReturnTest extends CompilerTestCase {
   }
 
   private void testMissingInShorthandFunction(String returnType, String body) {
-    setAcceptedLanguage(LanguageMode.ECMASCRIPT6);
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2015);
     String js = createShorthandFunctionInObjLit(returnType, body);
-    testError(js, CheckMissingReturn.MISSING_RETURN_STATEMENT);
+    testWarning(js, CheckMissingReturn.MISSING_RETURN_STATEMENT);
   }
 
   private void testNotMissingInShorthandFunction(String returnType, String body) {
-    setAcceptedLanguage(LanguageMode.ECMASCRIPT6);
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2015);
     testSame(createShorthandFunctionInObjLit(returnType, body));
   }
 
   private void testMissing(String returnType, String body) {
     testMissingInTraditionalFunction(returnType, body);
     testMissingInShorthandFunction(returnType, body);
+  }
+
+  /** Creates function with return type {number} */
+  private void testMissing(String body) {
+    testMissing("number", body);
   }
 
   private void testNotMissing(String returnType, String body) {
@@ -274,8 +277,27 @@ public final class CheckMissingReturnTest extends CompilerTestCase {
     testNotMissing("number", body);
   }
 
-  /** Creates function with return type {number} */
-  private void testMissing(String body) {
-    testMissing("number", body);
+  public void testArrowFunctions() {
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2015);
+
+    // undefined return statement
+    testNoWarning(lines("/** @return {undefined} */", "() => {}"));
+
+    // arrow function with expression function body
+    testSame(lines("/** @return {number} */", "() => 1"));
+
+    testSame(lines("/** @return {number} */", "(a) => (a > 3) ? 1 : 0"));
+
+    // arrow function with block function body
+    testSame(
+        lines(
+            "/** @return {number} */", "(a) => { if (a > 3) { return 1; } else { return 0; }}"));
+
+    testWarning(
+        lines("/** @return {number} */", "(a) => { if (a > 3) { return 1; } else { } }"),
+        CheckMissingReturn.MISSING_RETURN_STATEMENT);
+
+    // arrow function return is object literal
+    testSame("(a) => ({foo: 1});");
   }
 }

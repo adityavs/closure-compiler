@@ -525,7 +525,7 @@ angular.JQLite.append = function(element) {};
 
 /**
  * @param {string} name
- * @param {(string|boolean)=} opt_value
+ * @param {(string|boolean|null)=} opt_value
  * @return {!angular.JQLite|string|boolean}
  */
 angular.JQLite.attr = function(name, opt_value) {};
@@ -1522,7 +1522,8 @@ angular.$location.protocol = function() {};
 angular.$location.replace = function() {};
 
 /**
- * @param {(string|Object.<string, string>)=} opt_search
+ * @param {(string|Object.<string, string>|Object.<string, Array.<string>>)=}
+ *     opt_search
  * @param {?(string|Array.<string>|boolean)=} opt_paramValue
  * @return {(!Object|angular.$location)}
  */

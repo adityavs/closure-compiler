@@ -273,11 +273,11 @@ public final class ClosureReverseAbstractInterpreterTest extends
     Node call = n.getLastChild().getLastChild();
     Node name = call.getLastChild();
 
-    TypedScope scope = SyntacticScopeCreator.makeTyped(compiler).createScope(n, null);
+    TypedScope scope = (TypedScope) SyntacticScopeCreator.makeTyped(compiler).createScope(n, null);
     FlowScope flowScope = LinkedFlowScope.createEntryLattice(scope);
 
-    assertEquals(Token.CALL, call.getType());
-    assertEquals(Token.NAME, name.getType());
+    assertEquals(Token.CALL, call.getToken());
+    assertEquals(Token.NAME, name.getToken());
 
     flowScope.inferSlotType("a", type);
     ClosureReverseAbstractInterpreter rai =

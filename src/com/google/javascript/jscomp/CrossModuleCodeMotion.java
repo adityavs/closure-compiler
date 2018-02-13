@@ -16,52 +16,63 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
-import com.google.common.base.Predicate;
-import com.google.javascript.jscomp.CodingConvention.SubclassRelationship;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.Reference;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.ReferenceCollection;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
+import com.google.javascript.jscomp.CrossModuleReferenceCollector.TopLevelStatement;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.BitSet;
+import java.util.Collection;
 import java.util.Deque;
 import java.util.HashMap;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
-import java.util.logging.Logger;
+import java.util.Set;
 
 /**
- * A {@link Compiler} pass for moving code to a deeper module if possible.
- * - currently it only moves functions + variables
+ * A compiler pass for moving global variable declarations and assignments to their properties to a
+ * deeper module if possible.
  *
+ * <ol>
+ * <li> Collect all global-level statements and the references they contain.
+ * <li> Statements that do not declare global variables are assumed to exist for their side-effects
+ *      and are considered immovable.
+ * <li> Statements that declare global variables may be movable. See CrossModuleReferenceCollector.
+ * <li> Within each module gather all declarations for a single global variable into a
+ *      DeclarationStatementGroup (DSG). Keep track of the references to other globals that appear
+ *      in the DSG. A DSG is movable if all of its statements are movable.
+ * <li> Gather the DSGs for each global variable and note all of the modules that contain immovable
+ *      references to it.
+ * <li> The global variables form a directed graph. Global A has an edge to B if A has a DSG with a
+ *      reference to B.
+ * <li> Convert this to a directed-acyclic graph by grouping together all of the strongly-connected
+ *      global variables into GlobalSymbolCycles. There is an edge from GlobalSymbolCycle A to
+ *      GlobalSymbolCycle B if A contains a DSG (in one of its GlobalSymbols) that contains a
+ *      reference to a GlobalSymbol in B.
+ * <li> Sort the GlobalSymbolCycles into a list c[1], c[2], c[3],..., c[n], such that there are no
+ *      references to GlobalSymbols in c[i] from DSGs in GlobalSymbolCycles c[i+1]...c[n].
+ * <li> Traverse the list in that order, so statements for GlobalSymbol X will only be moved after
+ *      all statements that refer to X have already been moved.
+ * <li> Within a GlobalSymbolCycle, combine statements from DSGs in the same module and keep them
+ *      in the same order when moving them.
+ * </ol>
  */
 class CrossModuleCodeMotion implements CompilerPass {
-
-  private static final Logger logger =
-      Logger.getLogger(CrossModuleCodeMotion.class.getName());
 
   private final AbstractCompiler compiler;
   private final JSModuleGraph graph;
 
   /**
-   * Map from module to the node in that module that should parent any string
-   * variable declarations that have to be moved into that module
+   * Map from module to the node in that module that should parent variable declarations that have
+   * to be moved into that module
    */
-  private final Map<JSModule, Node> moduleVarParentMap =
-      new HashMap<>();
-
-  /*
-   * NOTE - I made this a LinkedHashMap to make testing easier. With a regular
-   * HashMap, the variables may not output in a consistent order
-   */
-  private final Map<Var, NamedInfo> namedInfo =
-      new LinkedHashMap<>();
-
-  private final Map<Node, InstanceofInfo> instanceofNodes =
-      new LinkedHashMap<>();
+  private final Map<JSModule, Node> moduleInsertionPointMap = new HashMap<>();
 
   private final boolean parentModuleCanSeeSymbolsDeclaredInChildren;
 
@@ -76,469 +87,679 @@ class CrossModuleCodeMotion implements CompilerPass {
       boolean parentModuleCanSeeSymbolsDeclaredInChildren) {
     this.compiler = compiler;
     this.graph = graph;
-    this.parentModuleCanSeeSymbolsDeclaredInChildren =
-        parentModuleCanSeeSymbolsDeclaredInChildren;
+    this.parentModuleCanSeeSymbolsDeclaredInChildren = parentModuleCanSeeSymbolsDeclaredInChildren;
   }
 
   @Override
   public void process(Node externs, Node root) {
-    logger.fine("Moving functions + variable into deeper modules");
-
     // If there are <2 modules, then we will never move anything, so we're done
     if (graph != null && graph.getModuleCount() > 1) {
-
-      // Traverse the tree and find the modules where a var is declared + used
-      collectReferences(root);
-
-      // Make is so we can ignore constructor references in instanceof.
-      if (parentModuleCanSeeSymbolsDeclaredInChildren) {
-        makeInstanceOfCodeOrderIndependent();
-      }
-
-      // Move the functions + variables to a deeper module [if possible]
-      moveCode();
+      CrossModuleReferenceCollector referenceCollector =
+          new CrossModuleReferenceCollector(compiler, new Es6SyntacticScopeCreator(compiler));
+      referenceCollector.process(root);
+      Collection<GlobalSymbol> globalSymbols =
+          new GlobalSymbolCollector().collectGlobalSymbols(referenceCollector);
+      moveGlobalSymbols(globalSymbols);
+      addInstanceofGuards(globalSymbols);
     }
   }
 
-  /** move the code accordingly */
-  private void moveCode() {
-    for (NamedInfo info : namedInfo.values()) {
-      JSModule deepestDependency = info.deepestModule;
-
-      // Only move if all are true:
-      // a) allowMove is true
-      // b) it was used + declared somewhere [if not, then it will be removed
-      // as dead or invalid code elsewhere]
-      // c) the new dependency depends on the declModule
-      if (info.allowMove && deepestDependency != null) {
-        Iterator<Declaration> it = info.declarationIterator();
-        JSModuleGraph moduleGraph = compiler.getModuleGraph();
-        while (it.hasNext()) {
-          Declaration decl = it.next();
-          if (decl.module != null &&
-              moduleGraph.dependsOn(deepestDependency,
-                  decl.module)) {
-
-            // Find the appropriate spot to move it to
-            Node destParent = moduleVarParentMap.get(deepestDependency);
-            if (destParent == null) {
-              destParent = compiler.getNodeForCodeInsertion(deepestDependency);
-              moduleVarParentMap.put(deepestDependency, destParent);
-            }
-
-            // VAR Nodes are normalized to have only one child.
-            Node declParent = decl.node.getParent();
-            Preconditions.checkState(
-                !declParent.isVar() || declParent.hasOneChild(),
-                "AST not normalized.");
-
-            // Remove it
-            declParent.detachFromParent();
-
-            // Add it to the new spot
-            destParent.addChildToFront(declParent);
-
-            compiler.reportCodeChange();
-          }
+  private void addInstanceofGuards(Collection<GlobalSymbol> globalSymbols) {
+    for (GlobalSymbol globalSymbol : globalSymbols) {
+      for (InstanceofReference instanceofReference : globalSymbol.instanceofReferencesToGuard) {
+        if (!globalSymbol.declarationsCoverModule(instanceofReference.getModule())) {
+          addGuardToInstanceofReference(instanceofReference.getReference().getNode());
         }
       }
     }
   }
 
-  /** useful information for each variable candidate */
-  private class NamedInfo {
-    boolean allowMove = true;
+  /** Collects all global symbols, their declaration statements and references. */
+  private class GlobalSymbolCollector {
 
-    // The deepest module where the variable is used. Starts at null
-    private JSModule deepestModule = null;
-
-    // The module where declarations appear
-    private JSModule declModule = null;
-
-    // information on the spot where the item was declared
-    private final Deque<Declaration> declarations =
-        new ArrayDeque<>();
-
-    // Add a Module where it is used
-    void addUsedModule(JSModule m) {
-      // If we are not allowed to move it, all bets are off
-      if (!allowMove) {
-        return;
-      }
-
-      // If we have no deepest module yet, set this one
-      if (deepestModule == null) {
-        deepestModule = m;
-      } else {
-        // Find the deepest common dependency
-        deepestModule =
-            graph.getDeepestCommonDependencyInclusive(m, deepestModule);
-      }
-    }
-
-    boolean isUsedInOrDependencyOfModule(JSModule m) {
-      if (deepestModule == null || m == null) {
-        return false;
-      }
-      return m == deepestModule || graph.dependsOn(m, deepestModule);
-    }
+    final Map<Var, GlobalSymbol> globalSymbolforVar = new HashMap<>();
 
     /**
-     * Add a declaration for this name.
-     * @return Whether this is a valid declaration. If this returns false,
-     *    this should be added as a reference.
+     * Returning the symbols in the reverse order in which they are defined helps to minimize
+     * unnecessary reordering of declaration statements.
      */
-    boolean addDeclaration(Declaration d) {
-      // all declarations must appear in the same module.
-      if (declModule != null && d.module != declModule) {
-        return false;
-      }
-      declarations.push(d);
-      declModule = d.module;
-      return true;
-    }
+    final Deque<GlobalSymbol> symbolStack = new ArrayDeque<>();
 
-    /**
-     * Returns an iterator over the declarations, in the order that they were
-     * declared.
-     */
-    Iterator<Declaration> declarationIterator() {
-      return declarations.iterator();
-    }
-  }
+    Collection<GlobalSymbol> collectGlobalSymbols(
+        CrossModuleReferenceCollector referenceCollector) {
 
-  private static class Declaration {
-    final JSModule module;
-    final Node node;
-
-    Declaration(JSModule module, Node node) {
-      this.module = module;
-      this.node = node;
-    }
-  }
-
-  /**
-   * return true if the node has any form of conditional in its ancestry
-   * TODO(nicksantos) keep track of the conditionals in the ancestry, so
-   * that we don't have to recrawl it.
-   */
-  private static boolean hasConditionalAncestor(Node n) {
-    for (Node ancestor : n.getAncestors()) {
-      switch (ancestor.getType()) {
-        case Token.DO:
-        case Token.FOR:
-        case Token.HOOK:
-        case Token.IF:
-        case Token.SWITCH:
-        case Token.WHILE:
-        case Token.FUNCTION:
-          return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * get the information on a variable
-   */
-  private NamedInfo getNamedInfo(Var v) {
-    NamedInfo info = namedInfo.get(v);
-    if (info == null) {
-      info = new NamedInfo();
-      namedInfo.put(v, info);
-    }
-    return info;
-  }
-
-  /**
-   * Process the reads to named variables
-   */
-  private void processRead(Reference ref, NamedInfo info) {
-    // A name is recursively defined if:
-    //   1: It is calling itself.
-    //   2: One of its property calls itself.
-    // Recursive definition should not block movement.
-    String name = ref.getNode().getString();
-    boolean recursive = false;
-    Node rootNode = ref.getScope().getRootNode();
-    if (rootNode.isFunction()) {
-
-      // CASE #1:
-      String scopeFuncName = rootNode.getFirstChild().getString();
-      Node scopeFuncParent = rootNode.getParent();
-      if (scopeFuncName.equals(name)) {
-        recursive = true;
-      } else if (scopeFuncParent.isName() &&
-          scopeFuncParent.getString().equals(name)) {
-        recursive = true;
-      } else {
-        // CASE #2:
-        // Suppose name is Foo, we keep look up the scope stack to look for
-        // a scope with "Foo.prototype.bar = function() { ..... "
-        for (Scope s = ref.getScope();
-             s.getParent() != null; s = s.getParent()) {
-          Node curRoot = s.getRootNode();
-          if (curRoot.getParent().isAssign()) {
-            Node owner = curRoot.getParent().getFirstChild();
-            while (owner.isGetProp()) {
-              owner = owner.getFirstChild();
-            }
-            if (owner.isName() &&
-                owner.getString().equals(name)) {
-              recursive = true;
-              break;
-            }
-          }
-        }
-      }
-    }
-
-    if (!recursive) {
-      info.addUsedModule(getModule(ref));
-    }
-  }
-
-  private void collectReferences(Node root) {
-    ReferenceCollectingCallback collector = new ReferenceCollectingCallback(
-        compiler, ReferenceCollectingCallback.DO_NOTHING_BEHAVIOR,
-        new Predicate<Var>() {
-          @Override public boolean apply(Var var) {
-            // Only collect global and non-exported names.
-            return var.isGlobal() &&
-                !compiler.getCodingConvention().isExported(var.getName());
-          }
-        });
-    NodeTraversal.traverse(compiler, root, collector);
-
-    for (Var v : collector.getAllSymbols()) {
-      ReferenceCollection refCollection = collector.getReferences(v);
-      NamedInfo info = getNamedInfo(v);
-      for (Reference ref : refCollection) {
-        processReference(collector, ref, info);
-      }
-    }
-  }
-
-  private void processReference(
-      ReferenceCollectingCallback collector, Reference ref, NamedInfo info) {
-    Node n = ref.getNode();
-    Node parent = n.getParent();
-    if (info.allowMove) {
-      if (maybeProcessDeclaration(collector, ref, info)) {
-        // Check to see if the declaration is conditional starting at the
-        // grandparent of the name node. Since a function declaration
-        // is considered conditional (the function might not be called)
-        // we would need to skip the parent in this check as the name could
-        // just be a function itself.
-        if (hasConditionalAncestor(parent.getParent())) {
-          info.allowMove = false;
-        }
-      } else {
-        if (parentModuleCanSeeSymbolsDeclaredInChildren &&
-            parent.isInstanceOf() && parent.getLastChild() == n) {
-          instanceofNodes.put(parent, new InstanceofInfo(getModule(ref), info));
+      for (TopLevelStatement statement : referenceCollector.getTopLevelStatements()) {
+        if (statement.isDeclarationStatement()) {
+          processDeclarationStatement(statement);
         } else {
-          // Otherwise, it's a read
-          processRead(ref, info);
+          processImmovableStatement(statement);
         }
       }
+      return symbolStack;
     }
-  }
 
-  private JSModule getModule(Reference ref) {
-    return compiler.getInput(ref.getInputId()).getModule();
-  }
-
-  /**
-   * Determines whether the given NAME node belongs to a declaration that
-   * can be moved across modules. If it is, registers it properly.
-   *
-   * There are four types of movable declarations:
-   * 1) var NAME = [movable object];
-   * 2) function NAME() {}
-   * 3) NAME = [movable object];
-   *    NAME.prop = [movable object];
-   *    NAME.prop.prop2 = [movable object];
-   *    etc.
-   * 4) Class-defining function calls, like "inherits" and "mixin".
-   *    NAME.inherits([some other name]);
-   * where "movable object" is a literal or a function.
-   */
-  private boolean maybeProcessDeclaration(
-      ReferenceCollectingCallback collector, Reference ref, NamedInfo info) {
-    Node name = ref.getNode();
-    Node parent = name.getParent();
-    Node grandparent = parent.getParent();
-    switch (parent.getType()) {
-      case Token.VAR:
-        if (canMoveValue(collector, ref.getScope(), name.getFirstChild())) {
-          return info.addDeclaration(
-              new Declaration(getModule(ref), name));
-        }
-        return false;
-
-      case Token.FUNCTION:
-        if (NodeUtil.isFunctionDeclaration(parent)) {
-          return info.addDeclaration(
-              new Declaration(getModule(ref), name));
-        }
-        return false;
-
-      case Token.ASSIGN:
-      case Token.GETPROP:
-        Node child = name;
-
-        // Look for assignment expressions where the name is the root
-        // of a qualified name on the left hand side of the assignment.
-        for (Node current : name.getAncestors()) {
-          if (current.isGetProp()) {
-            // fallthrough
-          } else if (current.isAssign() &&
-                     current.getFirstChild() == child) {
-            Node currentParent = current.getParent();
-            if (currentParent.isExprResult() &&
-                canMoveValue(
-                    collector, ref.getScope(), current.getLastChild())) {
-              return info.addDeclaration(
-                  new Declaration(getModule(ref), current));
-            }
-          } else {
-            return false;
-          }
-
-          child = current;
-        }
-        return false;
-
-      case Token.CALL:
-        if (NodeUtil.isExprCall(grandparent)) {
-          SubclassRelationship relationship =
-              compiler.getCodingConvention().getClassesDefinedByCall(parent);
-          if (relationship != null &&
-              name.getString().equals(relationship.subclassName)) {
-            return info.addDeclaration(
-                new Declaration(getModule(ref), parent));
-          }
-        }
-        return false;
-
-      default:
-        return false;
-    }
-  }
-
-  /**
-   * Determines whether the given value is eligible to be moved across modules.
-   */
-  private static boolean canMoveValue(
-      ReferenceCollectingCallback collector, Scope scope, Node n) {
-    // the value is only movable if it's
-    // a) nothing,
-    // b) a constant literal,
-    // c) a function, or
-    // d) an array/object literal of movable values.
-    // e) a function stub generated by CrossModuleMethodMotion.
-    if (n == null || NodeUtil.isLiteralValue(n, true) ||
-        n.isFunction()) {
-      return true;
-    } else if (n.isCall()) {
-      Node functionName = n.getFirstChild();
-      return functionName.isName() &&
-          (functionName.getString().equals(
-              CrossModuleMethodMotion.STUB_METHOD_NAME) ||
-           functionName.getString().equals(
-              CrossModuleMethodMotion.UNSTUB_METHOD_NAME));
-    } else if (n.isArrayLit() || n.isObjectLit()) {
-      boolean isObjectLit = n.isObjectLit();
-      for (Node child = n.getFirstChild(); child != null;
-           child = child.getNext()) {
-        if (!canMoveValue(collector, scope,
-                          isObjectLit ? child.getFirstChild() : child)) {
-          return false;
-        }
-      }
-
-      return true;
-    } else if (n.isName()) {
-      // If the value is guaranteed to never be changed after
-      // this reference, then we can move it.
-      Var v = scope.getVar(n.getString());
-      if (v != null && v.isGlobal()) {
-        ReferenceCollection refCollection = collector.getReferences(v);
-        if (refCollection != null &&
-            refCollection.isWellDefined() &&
-            refCollection.isAssignedOnceInLifetime()) {
-          return true;
-        }
+    private void processImmovableStatement(TopLevelStatement statement) {
+      for (Reference ref : statement.getNonDeclarationReferences()) {
+        processImmovableReference(ref, statement.getModule());
       }
     }
 
-    return false;
-  }
+    private void processImmovableReference(Reference ref, JSModule module) {
+      GlobalSymbol globalSymbol = getGlobalSymbol(ref.getSymbol());
+      if (parentModuleCanSeeSymbolsDeclaredInChildren) {
+        // It is possible to move the declaration of `Foo` after
+        // `'undefined' != typeof Foo && x instanceof Foo`.
+        // We'll add the undefined check, if necessary.
+        Node n = ref.getNode();
+        if (isGuardedInstanceofReference(n) || isUndefinedTypeofGuardReference(n)) {
+          return;
+        } else if (isUnguardedInstanceofReference(n)) {
+          ImmovableInstanceofReference instanceofReference =
+              new ImmovableInstanceofReference(module, ref);
 
-  /**
-   * Transforms instanceof usages into an expression that short circuits to
-   * false if tested with a constructor that is undefined. This allows ignoring
-   * instanceof with respect to cross module code motion.
-   */
-  private void makeInstanceOfCodeOrderIndependent() {
-    Node tmp = IR.block();
-    for (Map.Entry<Node, InstanceofInfo> entry : instanceofNodes.entrySet()) {
-      Node n = entry.getKey();
-      InstanceofInfo info = entry.getValue();
-      if (!info.namedInfo.allowMove || !info.mustBeGuardedByTypeof()) {
-        continue;
+          globalSymbol.instanceofReferencesToGuard.push(instanceofReference);
+          return;
+        }
       }
-      // In order for the compiler pass to be idempotent, this checks whether
-      // the instanceof is already wrapped in the code that is generated below.
-      Node parent = n.getParent();
-      if (parent.isAnd() && parent.getLastChild() == n
-          && parent.getFirstChild().isNE()) {
-        Node ne = parent.getFirstChild();
-        if (ne.getFirstChild().isString()
-            && "undefined".equals(ne.getFirstChild().getString())
-            && ne.getLastChild().isTypeOf()) {
-          Node ref = ne.getLastChild().getFirstChild();
-          if (ref.isEquivalentTo(n.getLastChild())) {
+      globalSymbol.addImmovableReference(module);
+    }
+
+    private void processDeclarationStatement(TopLevelStatement statement) {
+      GlobalSymbol declaredSymbol =
+          getGlobalSymbol(statement.getDeclaredNameReference().getSymbol());
+      DeclarationStatementGroup dsg = declaredSymbol.addDeclarationStatement(statement);
+      processDeclarationStatementContainedReferences(statement, declaredSymbol, dsg);
+    }
+
+    private void processDeclarationStatementContainedReferences(
+        TopLevelStatement statement, GlobalSymbol declaredSymbol, DeclarationStatementGroup dsg) {
+      for (Reference ref : statement.getNonDeclarationReferences()) {
+        GlobalSymbol refSymbol = getGlobalSymbol(ref.getSymbol());
+        if (refSymbol.equals(declaredSymbol)) {
+          continue; // ignore circular reference
+        }
+        if (parentModuleCanSeeSymbolsDeclaredInChildren) {
+          // It is possible to move the declaration of `Foo` after
+          // `'undefined' != typeof Foo && x instanceof Foo`.
+          // We'll add the undefined check, if necessary.
+          Node n = ref.getNode();
+          if (isGuardedInstanceofReference(n) || isUndefinedTypeofGuardReference(n)) {
+            continue;
+          } else if (isUnguardedInstanceofReference(n)) {
+            MovableInstanceofReference instanceofReference =
+                new MovableInstanceofReference(dsg, ref);
+
+            refSymbol.instanceofReferencesToGuard.push(instanceofReference);
             continue;
           }
         }
+        dsg.addReferenceToGlobalSymbol(refSymbol);
+        refSymbol.addReferringGlobalSymbol(declaredSymbol);
       }
-      // Wrap "foo instanceof Bar" in
-      // "('undefined' != typeof Bar && foo instanceof Bar)"
-      Node reference = n.getLastChild().cloneNode();
-      Preconditions.checkState(reference.isName());
-      n.getParent().replaceChild(n, tmp);
-      Node and = IR.and(
-          new Node(Token.NE,
-              IR.string("undefined"),
-              new Node(Token.TYPEOF, reference)
-          ),
-          n
-      );
-      and.useSourceInfoIfMissingFromForTree(n);
-      tmp.getParent().replaceChild(tmp, and);
-      compiler.reportCodeChange();
+    }
+
+    private GlobalSymbol getGlobalSymbol(Var var) {
+      GlobalSymbol globalSymbol = globalSymbolforVar.get(var);
+      if (globalSymbol == null) {
+        globalSymbol = new GlobalSymbol(var);
+        globalSymbolforVar.put(var, globalSymbol);
+        symbolStack.push(globalSymbol);
+      }
+      return globalSymbol;
     }
   }
 
-  private class InstanceofInfo {
-    private final JSModule module;
-    private final NamedInfo namedInfo;
+  /**
+   * Moves all of the declaration statements that can move to their best possible module location.
+   */
+  private void moveGlobalSymbols(Collection<GlobalSymbol> globalSymbols) {
+    for (GlobalSymbolCycle globalSymbolCycle :
+        new OrderAndCombineGlobalSymbols(globalSymbols).orderAndCombine()) {
+      // Symbols whose declarations refer to each other must be grouped together and their
+      // declaration statements moved together.
+      globalSymbolCycle.moveDeclarationStatements();
+    }
+  }
 
-    InstanceofInfo(JSModule module, NamedInfo namedInfo) {
-      this.module = module;
-      this.namedInfo = namedInfo;
+  /** Represents a global symbol whose declaration statements may be moved. */
+  private class GlobalSymbol {
+    final Var var;
+    /**
+     * As we traverse the statements in execution order the top of the stack represents the most
+     * recently seen DSG for the variable.
+     */
+    final Deque<DeclarationStatementGroup> dsgStack = new ArrayDeque<>();
+
+    final BitSet modulesWithImmovableReferences = new BitSet(graph.getModuleCount());
+
+    /**
+     * Symbols whose declaration statements refer to this symbol.
+     *
+     * This is a LinkedHashSet in order to enforce a consistent ordering when we iterate over these
+     * to identify cycles. This guarantees that the order in which statements are moved won't
+     * depend on the arbitrary ordering of HashSet.
+     */
+    final Set<GlobalSymbol> referencingGlobalSymbols = new LinkedHashSet<>();
+    /** Instanceof references we may need to update with a guard after moving declarations. */
+    Deque<InstanceofReference> instanceofReferencesToGuard = new ArrayDeque<>();
+    /** Used by OrderAndCombineGlobalSymbols to find reference cycles. */
+    int preorderNumber = -1;
+    /** Used by OrderAndCombineGlobalSymbols to find reference cycles. */
+    boolean hasBeenAssignedToAStronglyConnectedComponent = false;
+    /** Used to confirm all symbols get moved in the correct order. */
+    boolean isMoveDeclarationStatementsDone = false;
+
+    GlobalSymbol(Var var) {
+      this.var = var;
+    }
+
+    @Override
+    public String toString() {
+      return var.getName();
+    }
+
+    void addImmovableReference(JSModule module) {
+      modulesWithImmovableReferences.set(module.getIndex());
+    }
+
+    /** Adds the statement to the appropriate DeclarationStatementGroup and returns it. */
+    DeclarationStatementGroup addDeclarationStatement(TopLevelStatement statement) {
+      JSModule module = statement.getModule();
+      DeclarationStatementGroup lastDsg = dsgStack.peek();
+      if (lastDsg == null) {
+        lastDsg = new DeclarationStatementGroup(this, module);
+        dsgStack.push(lastDsg);
+      }
+      DeclarationStatementGroup statementDsg;
+      if (module.equals(lastDsg.currentModule)) {
+        statementDsg = lastDsg;
+      } else {
+        // new module requires a new DSG
+        statementDsg = new DeclarationStatementGroup(this, module);
+        dsgStack.push(statementDsg);
+      }
+      statementDsg.statementStack.push(statement);
+      return statementDsg;
+    }
+
+    void addReferringGlobalSymbol(GlobalSymbol declaredSymbol) {
+      referencingGlobalSymbols.add(declaredSymbol);
     }
 
     /**
-     * Returns true if this instance of instanceof is in a deeper module than
-     * the deepest module (by reference) of the related name.
-     * In that case the name may be undefined when the instanceof runs and we
-     * have to guard it with typeof.
+     * Does the module depend on at least one of the modules containing declaration statements for
+     * this symbol?
      */
-    boolean mustBeGuardedByTypeof() {
-      return !this.namedInfo.isUsedInOrDependencyOfModule(this.module);
+    boolean declarationsCoverModule(JSModule module) {
+      for (DeclarationStatementGroup dsg : dsgStack) {
+        if (module.equals(dsg.currentModule) || graph.dependsOn(module, dsg.currentModule)) {
+          return true;
+        }
+      }
+      return false;
     }
+  }
+
+  /**
+   * Represents a set of global symbols that all refer to each other, and so must be considered
+   * for movement as a group.
+   */
+  private class GlobalSymbolCycle {
+    final Deque<GlobalSymbol> symbols = new ArrayDeque<>();
+
+    void addSymbol(GlobalSymbol symbol) {
+      symbols.add(symbol);
+    }
+
+    void moveDeclarationStatements() {
+      for (GlobalSymbol symbol : symbols) {
+        checkState(!symbol.isMoveDeclarationStatementsDone, "duplicate attempt to move %s", symbol);
+      }
+      BitSet modulesWithImmovableReferences = new BitSet(graph.getModuleCount());
+      List<DeclarationStatementGroupCycle> cyclesLatestFirst = getDsgCyclesLatestFirst();
+      for (DeclarationStatementGroupCycle dsgCycle : cyclesLatestFirst) {
+        // Each move may change modulesWithImmovableReferences
+        for (GlobalSymbol symbol : symbols) {
+          modulesWithImmovableReferences.or(symbol.modulesWithImmovableReferences);
+        }
+        dsgCycle.moveToPreferredModule(modulesWithImmovableReferences);
+      }
+      for (GlobalSymbol symbol : symbols) {
+        symbol.isMoveDeclarationStatementsDone = true;
+      }
+    }
+
+    List<DeclarationStatementGroupCycle> getDsgCyclesLatestFirst() {
+      List<DeclarationStatementGroupCycle> cyclesLatestFirst = new ArrayList<>();
+      Deque<DeclarationStatementGroup> dsgsLatestFirst = getDsgsLatestFirst();
+      DeclarationStatementGroupCycle cycle = null;
+      for (DeclarationStatementGroup dsg : dsgsLatestFirst) {
+        if (cycle == null || !cycle.currentModule.equals(dsg.currentModule)) {
+          cycle = new DeclarationStatementGroupCycle(this, dsg.currentModule);
+          cyclesLatestFirst.add(cycle);
+        }
+        cycle.dsgs.add(dsg);
+      }
+      return cyclesLatestFirst;
+    }
+
+    private Deque<DeclarationStatementGroup> getDsgsLatestFirst() {
+      Deque<DeclarationStatementGroup> resultStack = new ArrayDeque<>();
+      for (GlobalSymbol symbol : symbols) {
+        Deque<DeclarationStatementGroup> stack1 = resultStack;
+        Deque<DeclarationStatementGroup> stack2 = new ArrayDeque<>(symbol.dsgStack);
+        resultStack = new ArrayDeque<>(stack1.size() + stack2.size());
+        while (true) {
+          if (stack1.isEmpty()) {
+            resultStack.addAll(stack2);
+            break;
+          } else if (stack2.isEmpty()) {
+            resultStack.addAll(stack1);
+            break;
+          } else {
+            DeclarationStatementGroup dsg1 = stack1.peek();
+            DeclarationStatementGroup dsg2 = stack2.peek();
+            if (dsg1.currentModule.getIndex() > dsg2.currentModule.getIndex()) {
+              resultStack.add(stack1.pop());
+              checkState(
+                  stack1.isEmpty()
+                      || stack1.peek().currentModule.getIndex() <= dsg1.currentModule.getIndex(),
+                  "DSG stacks are out of order.");
+            } else {
+              resultStack.add(stack2.pop());
+              checkState(
+                  stack2.isEmpty()
+                      || stack2.peek().currentModule.getIndex() <= dsg2.currentModule.getIndex(),
+                  "DSG stacks are out of order.");
+            }
+          }
+        }
+      }
+      return resultStack;
+    }
+  }
+
+  private void addGuardToInstanceofReference(Node referenceNode) {
+    checkState(
+        isUnguardedInstanceofReference(referenceNode),
+        "instanceof Reference is already guarded: %s",
+        referenceNode);
+    Node instanceofNode = checkNotNull(referenceNode.getParent());
+    Node referenceForTypeOf = referenceNode.cloneNode();
+    Node tmp = IR.block();
+    // Wrap "foo instanceof Bar" in
+    // "('undefined' != typeof Bar && foo instanceof Bar)"
+    instanceofNode.replaceWith(tmp);
+    Node and =
+        IR.and(
+            new Node(Token.NE, IR.string("undefined"), new Node(Token.TYPEOF, referenceForTypeOf)),
+            instanceofNode);
+    and.useSourceInfoIfMissingFromForTree(instanceofNode);
+    tmp.replaceWith(and);
+    compiler.reportChangeToEnclosingScope(and);
+  }
+
+  /**
+   * A group of declaration statements that must be moved (or not) as a group.
+   *
+   * <p>All of the statements must be in the same module initially. If there are declarations for
+   * the same variable in different modules, they will be grouped separately.
+   */
+  private static class DeclarationStatementGroup {
+
+    final GlobalSymbol declaredGlobalSymbol;
+    final Set<GlobalSymbol> referencedGlobalSymbols = new HashSet<>();
+    /** module containing the statements */
+    JSModule currentModule;
+    /** statements in the group, latest first */
+    Deque<TopLevelStatement> statementStack = new ArrayDeque<>();
+
+    DeclarationStatementGroup(GlobalSymbol declaredGlobalSymbol, JSModule currentModule) {
+      this.declaredGlobalSymbol = declaredGlobalSymbol;
+      this.currentModule = currentModule;
+    }
+
+    boolean allStatementsCanMove() {
+      for (TopLevelStatement s : statementStack) {
+        if (!s.isMovableDeclaration()) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    void addReferenceToGlobalSymbol(GlobalSymbol refSymbol) {
+      referencedGlobalSymbols.add(refSymbol);
+    }
+
+    void makeReferencesImmovable() {
+      declaredGlobalSymbol.addImmovableReference(currentModule);
+      for (GlobalSymbol symbol : referencedGlobalSymbols) {
+        checkState(
+            !symbol.isMoveDeclarationStatementsDone,
+            "symbol %s moved before referring symbol %s",
+            symbol,
+            declaredGlobalSymbol);
+        symbol.addImmovableReference(currentModule);
+      }
+    }
+  }
+
+  /**
+   * Orders DeclarationStatementGroups so that each DSG appears in the list only after all of the
+   * DSGs that contain references to it.
+   *
+   * <p>DSGs that form cycles are combined into a single DSG. This happens when declarations within
+   * a module form cycles by referring to each other.
+   *
+   * <p>This is an implementation of the path-based strong component algorithm as it is described in
+   * the Wikipedia article https://en.wikipedia.org/wiki/Path-based_strong_component_algorithm.
+   */
+  private class OrderAndCombineGlobalSymbols {
+    final Collection<GlobalSymbol> inputSymbols;
+    /** Tracks DSGs that may be part of a strongly connected component (reference cycle). */
+    final Deque<GlobalSymbol> componentContents = new ArrayDeque<>();
+    /** Tracks DSGs that may be the root of a strongly connected component (reference cycle). */
+    final Deque<GlobalSymbol> componentRoots = new ArrayDeque<>();
+    /** Filled with lists of strongly connected DSGs as they are discovered. */
+    final Deque<GlobalSymbolCycle> stronglyConnectedSymbols;
+
+    int preorderCounter = 0;
+
+    OrderAndCombineGlobalSymbols(Collection<GlobalSymbol> dsgs) {
+      inputSymbols = dsgs;
+      stronglyConnectedSymbols = new ArrayDeque<>(dsgs.size());
+    }
+
+    Deque<GlobalSymbolCycle> orderAndCombine() {
+      for (GlobalSymbol globalSymbol : inputSymbols) {
+        if (globalSymbol.preorderNumber < 0) {
+          processGlobalSymbol(globalSymbol);
+        } // else already processed
+      }
+      // At this point stronglyConnectedSymbols has been filled.
+      return stronglyConnectedSymbols;
+    }
+
+    /**
+     * Determines to which strongly connected component this GlobalSymbol belongs.
+     *
+     * <p>Called exactly once for each GlobalSymbol. When this method returns we will have
+     * determined which strongly connected component contains globalSymbol. Either:
+     *
+     * <ul>
+     *   <li>globalSymbol was the first member of the strongly connected component we encountered,
+     *       and the entire component has now been added to stronglyConnectedSymbols.
+     *   <li>OR, we encountered the first member of the strongly connected component in an earlier
+     *       call to this method on the call stack. In this case the top of componentRoots will be
+     *       the first member, and we'll add the component to stronglyConnectedSymbols once
+     *       execution has fallen back to the call made with that GlobalSymbol.
+     * </ul>
+     */
+    void processGlobalSymbol(GlobalSymbol symbol) {
+      // preorderNumber is used to track whether we've already processed a DSG and the order in
+      // which they have been processed. It is initially -1.
+      checkState(symbol.preorderNumber < 0, "already processed: %s", symbol);
+      symbol.preorderNumber = preorderCounter++;
+      componentRoots.push(symbol); // could be the start of a new strongly connected component
+      componentContents.push(symbol); // could be part of an existing strongly connected component
+      for (GlobalSymbol referringSymbol : symbol.referencingGlobalSymbols) {
+        if (referringSymbol.preorderNumber < 0) {
+          processGlobalSymbol(referringSymbol);
+        } else {
+          if (!referringSymbol.hasBeenAssignedToAStronglyConnectedComponent) {
+            // This GlobalSymbol is part of a not-yet-completed strongly connected component.
+            // Back off the potential roots stack to the earliest symbol that is part of the
+            // component.
+            while (componentRoots.peek().preorderNumber > referringSymbol.preorderNumber) {
+              componentRoots.pop();
+            }
+          }
+        }
+      }
+      if (componentRoots.peek().equals(symbol)) {
+        // After exploring all paths from here, this symbol is still at the top of the potential
+        // component roots stack, so this symbol is the root of a strongly connected component.
+        componentRoots.pop();
+        GlobalSymbolCycle cycle = new GlobalSymbolCycle();
+        // this symbol and all those after it on the componentContents stack are part of a single
+        // cycle.
+        GlobalSymbol connectedSymbol;
+        do {
+          connectedSymbol = componentContents.pop();
+          cycle.addSymbol(connectedSymbol);
+          connectedSymbol.hasBeenAssignedToAStronglyConnectedComponent = true;
+        } while (!connectedSymbol.equals(symbol));
+        this.stronglyConnectedSymbols.add(cycle);
+      }
+    }
+  }
+
+  /**
+   * One or more DeclarationStatementGroups that that share the same module and whose declared
+   * global symbols refer to each other.
+   */
+  private class DeclarationStatementGroupCycle {
+    GlobalSymbolCycle globalSymbolCycle;
+    JSModule currentModule;
+    Deque<DeclarationStatementGroup> dsgs;
+
+    DeclarationStatementGroupCycle(GlobalSymbolCycle globalSymbolCycle, JSModule currentModule) {
+      this.globalSymbolCycle = globalSymbolCycle;
+      this.currentModule = currentModule;
+      this.dsgs = new ArrayDeque<>();
+    }
+
+    void moveToPreferredModule(BitSet modulesWithImmovableReferences) {
+      JSModule preferredModule = getPreferredModule(modulesWithImmovableReferences);
+      if (!preferredModule.equals(currentModule)) {
+        moveStatementsToModule(preferredModule);
+      }
+      // Now that all the statements have been moved, update the current module for all the DSGs
+      // and treat all of the references they contain as now immovable.
+      for (DeclarationStatementGroup dsg : dsgs) {
+        dsg.currentModule = preferredModule;
+        dsg.makeReferencesImmovable();
+      }
+    }
+
+    private void moveStatementsToModule(JSModule preferredModule) {
+      Node destParent = moduleInsertionPointMap.get(preferredModule);
+      if (destParent == null) {
+        destParent = compiler.getNodeForCodeInsertion(preferredModule);
+        moduleInsertionPointMap.put(preferredModule, destParent);
+      }
+      Deque<TopLevelStatement> statementsLastFirst = getStatementsLastFirst();
+      for (TopLevelStatement statement : statementsLastFirst) {
+        Node statementNode = statement.getStatementNode();
+        // Remove it
+        compiler.reportChangeToEnclosingScope(statementNode);
+        statementNode.detach();
+
+        // Add it to the new spot
+        destParent.addChildToFront(statementNode);
+        compiler.reportChangeToEnclosingScope(statementNode);
+      }
+    }
+
+    private Deque<TopLevelStatement> getStatementsLastFirst() {
+      Deque<TopLevelStatement> result = new ArrayDeque<>();
+
+      for (DeclarationStatementGroup dsg : dsgs) {
+        // combine previous result with statements for current DSG
+        Deque<TopLevelStatement> stack1 = new ArrayDeque<>(dsg.statementStack);
+        Deque<TopLevelStatement> stack2 = result;
+        result = new ArrayDeque<>(stack1.size() + stack2.size());
+        while (true) {
+          if (stack1.isEmpty()) {
+            result.addAll(stack2);
+            break;
+          } else if (stack2.isEmpty()) {
+            result.addAll(stack1);
+            break;
+          } else {
+            TopLevelStatement s1 = stack1.peek();
+            TopLevelStatement s2 = stack2.peek();
+            if (s1.getOriginalOrder() > s2.getOriginalOrder()) {
+              result.add(stack1.pop());
+              checkState(
+                  stack1.isEmpty() || stack1.peek().getOriginalOrder() < s1.getOriginalOrder(),
+                  "Statements are recorded in the wrong order.");
+            } else {
+              result.add(stack2.pop());
+              checkState(
+                  stack2.isEmpty() || stack2.peek().getOriginalOrder() < s2.getOriginalOrder(),
+                  "Statements are recorded in the wrong order.");
+            }
+          }
+        }
+      }
+      return result;
+    }
+
+    private JSModule getPreferredModule(BitSet modulesWithImmovableReferences) {
+      if (modulesWithImmovableReferences.isEmpty()) {
+        return currentModule;
+      } else if (!allStatementsCanMove()) {
+        return currentModule;
+      } else {
+        return graph.getSmallestCoveringSubtree(currentModule, modulesWithImmovableReferences);
+      }
+    }
+
+    boolean allStatementsCanMove() {
+      for (DeclarationStatementGroup dsg : dsgs) {
+        if (!dsg.allStatementsCanMove()) {
+          return false;
+        }
+      }
+      return true;
+    }
+  }
+
+  interface InstanceofReference {
+    JSModule getModule();
+
+    Reference getReference();
+  }
+
+  private static class ImmovableInstanceofReference implements InstanceofReference {
+    JSModule module;
+    Reference reference;
+
+    ImmovableInstanceofReference(JSModule module, Reference reference) {
+      this.module = module;
+      this.reference = reference;
+    }
+
+    @Override
+    public JSModule getModule() {
+      return module;
+    }
+
+    @Override
+    public Reference getReference() {
+      return reference;
+    }
+  }
+
+  private static class MovableInstanceofReference implements InstanceofReference {
+    DeclarationStatementGroup containingDsg;
+    Reference reference;
+
+    MovableInstanceofReference(DeclarationStatementGroup containingDsg, Reference reference) {
+      this.containingDsg = containingDsg;
+      this.reference = reference;
+    }
+
+    @Override
+    public JSModule getModule() {
+      return containingDsg.currentModule;
+    }
+
+    @Override
+    public Reference getReference() {
+      return reference;
+    }
+  }
+
+  /**
+   * Is the reference node the first {@code Ref} in an expression like {@code 'undefined' != typeof
+   * Ref && x instanceof Ref}?
+   *
+   * <p>It's safe to ignore this kind of reference when moving the definition of {@code Ref}.
+   */
+  private boolean isUndefinedTypeofGuardReference(Node reference) {
+    // reference => typeof => `!=`
+    Node undefinedTypeofGuard = reference.getGrandparent();
+    if (undefinedTypeofGuard != null
+        && isUndefinedTypeofGuardFor(undefinedTypeofGuard, reference)) {
+      Node andNode = undefinedTypeofGuard.getParent();
+      return andNode != null
+          && andNode.isAnd()
+          && isInstanceofFor(andNode.getLastChild(), reference);
+    } else {
+      return false;
+    }
+  }
+
+  /**
+   * Is the expression of the form {@code 'undefined' != typeof Ref}?
+   *
+   * @param expression
+   * @param reference Ref node must be equivalent to this node
+   */
+  private boolean isUndefinedTypeofGuardFor(Node expression, Node reference) {
+    if (expression.isNE()) {
+      Node undefinedString = expression.getFirstChild();
+      Node typeofNode = expression.getLastChild();
+      return undefinedString.isString()
+          && undefinedString.getString().equals("undefined")
+          && typeofNode.isTypeOf()
+          && typeofNode.getFirstChild().isEquivalentTo(reference);
+    } else {
+      return false;
+    }
+  }
+
+  /**
+   * Is the reference node the second {@code Ref} in an expression like {@code 'undefined' != typeof
+   * Ref && x instanceof Ref}?
+   *
+   * <p>It's safe to ignore this kind of reference when moving the definition of {@code Ref}.
+   */
+  private boolean isGuardedInstanceofReference(Node reference) {
+    Node instanceofNode = reference.getParent();
+    if (isInstanceofFor(instanceofNode, reference)) {
+      Node andNode = instanceofNode.getParent();
+      return andNode != null
+          && andNode.isAnd()
+          && isUndefinedTypeofGuardFor(andNode.getFirstChild(), reference);
+    } else {
+      return false;
+    }
+  }
+
+  /** Is the reference the right hand side of an {@code instanceof} and not guarded? */
+  private boolean isUnguardedInstanceofReference(Node reference) {
+    Node instanceofNode = reference.getParent();
+    if (isInstanceofFor(instanceofNode, reference)) {
+      Node andNode = instanceofNode.getParent();
+      return !(andNode != null
+          && andNode.isAnd()
+          && isUndefinedTypeofGuardFor(andNode.getFirstChild(), reference));
+    } else {
+      return false;
+    }
+  }
+
+  /**
+   * Is the expression of the form {@code x instanceof Ref}?
+   *
+   * @param expression
+   * @param reference Ref node must be equivalent to this node
+   */
+  private boolean isInstanceofFor(Node expression, Node reference) {
+    return expression.isInstanceOf() && expression.getLastChild().isEquivalentTo(reference);
   }
 }

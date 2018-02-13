@@ -16,11 +16,12 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.javascript.rhino.Node;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -37,18 +38,17 @@ import java.util.logging.Logger;
  */
 class PhaseOptimizer implements CompilerPass {
 
-  private static final Logger logger =
-      Logger.getLogger(PhaseOptimizer.class.getName());
+  private static final Logger logger = Logger.getLogger(PhaseOptimizer.class.getName());
   private final AbstractCompiler compiler;
   private final PerformanceTracker tracker;
   private final List<CompilerPass> passes;
   private boolean inLoop;
-  private PassFactory sanityCheck;
+  private PassFactory validityCheck;
   private boolean printAstHashcodes = false;
 
   private double progress = 0.0;
   private double progressStep = 0.0;
-  private final ProgressRange progressRange;
+  private ProgressRange progressRange;
 
   // These fields are used during optimization loops.
   // They are declared here for two reasons:
@@ -57,23 +57,15 @@ class PhaseOptimizer implements CompilerPass {
   private NamedPass currentPass;
   // For each pass, remember the time at the end of the pass's last run.
   private Map<NamedPass, Integer> lastRuns;
-  private Node currentScope;
-  // Starts at 0, increases as "interesting" things happen.
-  // Nothing happens at time START_TIME, the first pass starts at time 1.
-  // The correctness of scope-change tracking relies on Node/getIntProp
-  // returning 0 if the custom attribute on a node hasn't been set.
-  private int timestamp;
   // The time of the last change made to the program by any pass.
   private int lastChange;
   private static final int START_TIME = 0;
   private final Node jsRoot;
-  // Compiler/reportChangeToScope must call reportCodeChange to update all
-  // change handlers. This flag prevents double update in ScopedChangeHandler.
-  private boolean crossScopeReporting;
 
-  // Used for sanity checks between loopable passes
-  private Node lastAst;
-  private Map<Node, Node> mtoc; // Stands for "main to clone"
+  private final boolean useSizeHeuristicToStopOptimizationLoop;
+
+  // Checks that passes have reported code changes correctly.
+  private ChangeVerifier changeVerifier;
 
   /**
    * When processing loopable passes in order, the PhaseOptimizer can be in one
@@ -86,43 +78,63 @@ class PhaseOptimizer implements CompilerPass {
     RUN_PASSES_THAT_CHANGED_STH_IN_PREV_ITER
   }
 
-  // NOTE(dimvar): There used to be some code that tried various orderings of
-  // loopable passes and picked the fastest one. This code became stale
-  // gradually and I decided to remove it. It was also never tried after the
-  // new pass scheduler was written. If we need to revisit this order in the
-  // future, we should write new code to do it.
+  /**
+   * NOTE(dimvar): There used to be some code that tried various orderings of loopable passes and
+   * picked the fastest one. This code became stale gradually and I decided to remove it. It was
+   * also never tried after the new pass scheduler was written. If we need to revisit this order in
+   * the future, we should write new code to do it.
+   *
+   * <p>It is important that inlineVariables and peepholeOptimizations run after inlineFunctions,
+   * because inlineFunctions relies on them to clean up patterns it introduces. This affects our
+   * size-based loop-termination heuristic.
+   */
   @VisibleForTesting
-  static final List<String> OPTIMAL_ORDER = ImmutableList.of(
-     "deadAssignmentsElimination",
-     "inlineFunctions",
-     "removeUnusedPrototypeProperties",
-     "removeUnreachableCode",
-     "removeUnusedVars",
-     "minimizeExitPoints",
-     "inlineVariables",
-     "collapseObjectLiterals",
-     "peepholeOptimizations");
+  static final ImmutableList<String> OPTIMAL_ORDER =
+      ImmutableList.of(
+          PassNames.INLINE_FUNCTIONS,
+          PassNames.INLINE_VARIABLES,
+          PassNames.DEAD_ASSIGNMENT_ELIMINATION,
+          PassNames.COLLAPSE_OBJECT_LITERALS,
+          PassNames.REMOVE_UNUSED_CODE,
+          PassNames.REMOVE_UNUSED_PROTOTYPE_PROPERTIES,
+          PassNames.REMOVE_UNUSED_CLASS_PROPERTIES,
+          PassNames.PEEPHOLE_OPTIMIZATIONS,
+          PassNames.REMOVE_UNREACHABLE_CODE);
+
+  static final ImmutableList<String> CODE_REMOVING_PASSES =
+      ImmutableList.of(PassNames.PEEPHOLE_OPTIMIZATIONS, PassNames.REMOVE_UNREACHABLE_CODE);
 
   static final int MAX_LOOPS = 100;
   static final String OPTIMIZE_LOOP_ERROR =
       "Fixed point loop exceeded the maximum number of iterations.";
 
+  /** @see CompilerOptions#optimizationLoopMaxIterations */
+  private final int optimizationLoopMaxIterations;
+
   /**
    * @param comp the compiler that owns/creates this.
    * @param tracker an optional performance tracker
-   * @param range the progress range for the process function or null
-   *        if progress should not be reported.
    */
-  PhaseOptimizer(
-      AbstractCompiler comp, PerformanceTracker tracker, ProgressRange range) {
+  PhaseOptimizer(AbstractCompiler comp, PerformanceTracker tracker) {
     this.compiler = comp;
     this.jsRoot = comp.getJsRoot();
     this.tracker = tracker;
     this.passes = new ArrayList<>();
-    this.progressRange = range;
     this.inLoop = false;
-    this.crossScopeReporting = false;
-    this.timestamp = this.lastChange = START_TIME;
+    this.lastChange = START_TIME;
+    this.useSizeHeuristicToStopOptimizationLoop =
+        comp.getOptions().useSizeHeuristicToStopOptimizationLoop;
+    int maxIterations = comp.getOptions().optimizationLoopMaxIterations;
+    if (maxIterations > 0 && maxIterations <= MAX_LOOPS) {
+      this.optimizationLoopMaxIterations = maxIterations;
+    } else {
+      this.optimizationLoopMaxIterations = MAX_LOOPS;
+    }
+  }
+
+  PhaseOptimizer withProgress(ProgressRange range) {
+    this.progressRange = range;
+    return this;
   }
 
   /**
@@ -138,22 +150,19 @@ class PhaseOptimizer implements CompilerPass {
    */
   void consume(List<PassFactory> factories) {
     Loop currentLoop = new Loop();
-    boolean isCurrentLoopPopulated = false;
     for (PassFactory factory : factories) {
       if (factory.isOneTimePass()) {
-        if (isCurrentLoopPopulated) {
+        if (currentLoop.isPopulated()) {
           passes.add(currentLoop);
           currentLoop = new Loop();
-          isCurrentLoopPopulated = false;
         }
         addOneTimePass(factory);
       } else {
         currentLoop.addLoopedPass(factory);
-        isCurrentLoopPopulated = true;
       }
     }
 
-    if (isCurrentLoopPopulated) {
+    if (currentLoop.isPopulated()) {
       passes.add(currentLoop);
     }
   }
@@ -179,18 +188,11 @@ class PhaseOptimizer implements CompilerPass {
   }
 
   /**
-   * Adds a sanity checker to be run after every pass. Intended for development.
+   * Adds a checker to be run after every pass. Intended for development.
    */
-  void setSanityCheck(PassFactory sanityCheck) {
-    this.sanityCheck = sanityCheck;
-    setSanityCheckState();
-  }
-
-  private void setSanityCheckState() {
-    if (inLoop) {
-      lastAst = jsRoot.cloneTree();
-      mtoc = NodeUtil.mapMainToClone(jsRoot, lastAst);
-    }
+  void setValidityCheck(PassFactory validityCheck) {
+    this.validityCheck = validityCheck;
+    this.changeVerifier = new ChangeVerifier(compiler).snapshot(jsRoot);
   }
 
   /**
@@ -213,7 +215,18 @@ class PhaseOptimizer implements CompilerPass {
           / passes.size();
       progress = progressRange.initialValue;
     }
+
+    // When looking at this code, one can mistakenly think that the instance of
+    // PhaseOptimizer keeps all compiler passes live. This would be undesirable. A pass can
+    // create large data structures that are only useful to the pass, and we shouldn't
+    // retain them until the end of the compilation. But if you look at
+    // NamedPass#process, the actual pass is created and immediately executed, and no
+    // reference to it is retained in PhaseOptimizer:
+    //   factory.create(compiler).process(externs, root);
     for (CompilerPass pass : passes) {
+      if (Thread.interrupted()) {
+        throw new RuntimeException(new InterruptedException());
+      }
       pass.process(externs, root);
       if (hasHaltingErrors()) {
         return;
@@ -223,27 +236,24 @@ class PhaseOptimizer implements CompilerPass {
 
   private void maybePrintAstHashcodes(String passName, Node root) {
     if (printAstHashcodes) {
-      String hashCodeMsg = "AST hashCode after " + passName + ": " +
-          compiler.toSource(root).hashCode();
-      System.err.println(hashCodeMsg);
-      compiler.addToDebugLog(hashCodeMsg);
+      String hashCodeMsg = "AST hashCode after " + passName + ": "
+          + compiler.toSource(root).hashCode();
+      logger.info(hashCodeMsg);
     }
   }
 
   /**
-   * Runs the sanity check if it is available.
+   * Runs the validity check if it is available.
    */
-  private void maybeSanityCheck(Node externs, Node root) {
-    if (sanityCheck != null) {
-      sanityCheck.create(compiler).process(externs, root);
-      // The cross-module passes are loopable and ran together, but do not
-      // participate in the other optimization loops, and are not relevant to
-      // tracking changed scopes.
-      if (inLoop &&
-          !currentPass.name.equals(Compiler.CROSS_MODULE_CODE_MOTION_NAME) &&
-          !currentPass.name.equals(Compiler.CROSS_MODULE_METHOD_MOTION_NAME)) {
-        NodeUtil.verifyScopeChanges(mtoc, jsRoot, true, compiler);
-      }
+  private void maybeRunValidityCheck(String passName, Node externs, Node root) {
+    if (validityCheck == null) {
+      return;
+    }
+    try {
+      validityCheck.create(compiler).process(externs, root);
+      changeVerifier.checkRecordedChanges(passName, jsRoot);
+    } catch (Exception e) {
+      throw new IllegalStateException("Validity checks failed for pass: " + passName, e);
     }
   }
 
@@ -266,16 +276,24 @@ class PhaseOptimizer implements CompilerPass {
 
     @Override
     public void process(Node externs, Node root) {
-      logger.fine(name);
-      if (sanityCheck != null) {
-        // Before running the pass, clone the AST so you can sanity-check the
+      if (!factory.featureSet().contains(compiler.getFeatureSet())) {
+        logger.warning("Skipping pass " + name);
+        logger.info(
+            "pass supports: " + factory.featureSet()
+                + "\ncurrent AST contains: " + compiler.getFeatureSet());
+        return;
+      }
+
+      logger.fine("Running pass " + name);
+      if (validityCheck != null) {
+        // Before running the pass, clone the AST so you can check the
         // changed AST against the clone after the pass finishes.
-        setSanityCheckState();
+        changeVerifier = new ChangeVerifier(compiler).snapshot(jsRoot);
       }
       if (tracker != null) {
         tracker.recordPassStart(name, factory.isOneTimePass());
       }
-      tracer = new Tracer("JSCompiler");
+      tracer = new Tracer("Compiler", name);
 
       compiler.beforePass(name);
 
@@ -301,25 +319,17 @@ class PhaseOptimizer implements CompilerPass {
           tracker.recordPassStop(name, traceRuntime);
         }
         maybePrintAstHashcodes(name, root);
-        maybeSanityCheck(externs, root);
+        maybeRunValidityCheck(name, externs, root);
       } catch (IllegalStateException e) {
         // TODO(johnlenz): Remove this once the normalization checks report
         // errors instead of exceptions.
-        throw new RuntimeException("Sanity check failed for " + name, e);
+        throw new RuntimeException("Validity check failed for " + name, e);
       }
     }
 
     @Override
     public String toString() {
       return "pass: " + name;
-    }
-  }
-
-  void setScope(Node n) {
-    // NodeTraversal causes setScope calls outside loops; ignore them.
-    if (inLoop) {
-      // Find the top-level node in the scope.
-      currentScope = n.isFunction() ? n : getEnclosingScope(n);
     }
   }
 
@@ -334,37 +344,6 @@ class PhaseOptimizer implements CompilerPass {
         || n.getChangeTime() > timeOfLastRun;
   }
 
-  private Node getEnclosingScope(Node n) {
-    while (n != jsRoot && n.getParent() != null) {
-      n = n.getParent();
-      if (n.isFunction()) {
-        return n;
-      }
-    }
-    return n;
-  }
-
-  void reportChangeToEnclosingScope(Node n) {
-    lastChange = timestamp;
-    getEnclosingScope(n).setChangeTime(timestamp);
-    // Every code change happens at a different time
-    timestamp++;
-  }
-
-  /**
-   * Records that the currently-running pass may report cross-scope changes.
-   * When this happens, we don't want to falsely report the current scope as
-   * changed when reportChangeToScope is called from Compiler.
-   */
-  void startCrossScopeReporting() {
-    crossScopeReporting = true;
-  }
-
-  /** The currently-running pass won't report cross-scope changes. */
-  void endCrossScopeReporting() {
-    crossScopeReporting = false;
-  }
-
   /**
    * A change handler that marks scopes as changed when reportChange is called.
    */
@@ -372,27 +351,19 @@ class PhaseOptimizer implements CompilerPass {
     private int lastCodeChangeQuery;
 
     ScopedChangeHandler() {
-      this.lastCodeChangeQuery = timestamp;
+      this.lastCodeChangeQuery = compiler.getChangeStamp();
     }
 
     @Override
     public void reportChange() {
-      if (crossScopeReporting) {
-        // This call was caused by Compiler/reportChangeToEnclosingScope,
-        // do nothing.
-        return;
-      }
-      lastChange = timestamp;
-      currentScope.setChangeTime(timestamp);
-      // Every code change happens at a different time
-      timestamp++;
+      lastChange = compiler.getChangeStamp();
     }
 
     private boolean hasCodeChangedSinceLastCall() {
       boolean result = lastChange > lastCodeChangeQuery;
-      lastCodeChangeQuery = timestamp;
+      lastCodeChangeQuery = compiler.getChangeStamp();
       // The next call to the method will happen at a different time
-      timestamp++;
+      compiler.incrementChangeStamp();
       return result;
     }
   }
@@ -409,6 +380,8 @@ class PhaseOptimizer implements CompilerPass {
     private final List<NamedPass> myPasses = new ArrayList<>();
     private final Set<String> myNames = new HashSet<>();
     private ScopedChangeHandler scopeHandler;
+    private boolean isCodeRemovalLoop = false;
+    private int howmanyIterationsUnderThreshold = 0;
 
     void addLoopedPass(PassFactory factory) {
       String name = factory.getName();
@@ -420,14 +393,15 @@ class PhaseOptimizer implements CompilerPass {
 
     @Override
     public void process(Node externs, Node root) {
-      Preconditions.checkState(!inLoop, "Nested loops are forbidden");
+      checkState(!inLoop, "Nested loops are forbidden");
       inLoop = true;
       optimizePasses();
+      this.isCodeRemovalLoop = isCodeRemovalLoop();
 
       // Set up function-change tracking
       scopeHandler = new ScopedChangeHandler();
       compiler.addChangeHandler(scopeHandler);
-      setScope(root);
+
       // lastRuns is initialized before each loop. This way, when a pass is run
       // in the 2nd loop for the 1st time, it looks at all scopes.
       lastRuns = new HashMap<>();
@@ -440,24 +414,40 @@ class PhaseOptimizer implements CompilerPass {
       Set<NamedPass> runInPrevIter = new HashSet<>();
       State state = State.RUN_PASSES_NOT_RUN_IN_PREV_ITER;
       boolean lastIterMadeChanges;
-      int count = 0;
+      int count = 1;
+      int astSize = NodeUtil.countAstSize(root);
+      int previousAstSize = astSize;
+
+      // The loop starts at state RUN_PASSES_NOT_RUN_IN_PREV_ITER and runs all passes.
+      // After that, it goes to state RUN_PASSES_THAT_CHANGED_STH_IN_PREV_ITER, and
+      // runs several iterations in that state, until there are no longer any changes
+      // to the AST, and then it goes back to RUN_PASSES_NOT_RUN_IN_PREV_ITER.
+      // We call one sequence of RUN_PASSES_NOT_RUN_IN_PREV_ITER followed by
+      // RUN_PASSES_THAT_CHANGED_STH_IN_PREV_ITER a batch.
+      // At the end of every loop batch, if the batch made so few changes that the
+      // changed percentage of the AST is below some threshold, we stop the loop
+      // without waiting to reach a fixpoint.
 
       try {
         while (true) {
-          if (count++ > MAX_LOOPS) {
+          if (count > optimizationLoopMaxIterations && this.isCodeRemovalLoop) {
+            return;
+          }
+          if (count > MAX_LOOPS) {
             compiler.throwInternalError(OPTIMIZE_LOOP_ERROR, null);
           }
+          count++;
           lastIterMadeChanges = false;
           for (NamedPass pass : myPasses) {
             if ((state == State.RUN_PASSES_NOT_RUN_IN_PREV_ITER
                     && !runInPrevIter.contains(pass))
                 || (state == State.RUN_PASSES_THAT_CHANGED_STH_IN_PREV_ITER
                         && madeChanges.contains(pass))) {
-              timestamp++;
+              compiler.incrementChangeStamp();
               currentPass = pass;
               pass.process(externs, root);
               runInPrevIter.add(pass);
-              lastRuns.put(pass, timestamp);
+              lastRuns.put(pass, compiler.getChangeStamp());
               if (hasHaltingErrors()) {
                 return;
               } else if (scopeHandler.hasCodeChangedSinceLastCall()) {
@@ -471,14 +461,17 @@ class PhaseOptimizer implements CompilerPass {
             }
           }
 
+          previousAstSize = astSize;
+          astSize = NodeUtil.countAstSize(root);
           if (state == State.RUN_PASSES_NOT_RUN_IN_PREV_ITER) {
-            if (lastIterMadeChanges) {
+            if (lastIterMadeChanges && isAstSufficientlyChanging(previousAstSize, astSize)) {
               state = State.RUN_PASSES_THAT_CHANGED_STH_IN_PREV_ITER;
             } else {
               return;
             }
-          } else { // state == State.RUN_PASSES_THAT_CHANGED_STH_IN_PREV_ITER
-            if (!lastIterMadeChanges) {
+          } else {
+            checkState(state == State.RUN_PASSES_THAT_CHANGED_STH_IN_PREV_ITER);
+            if (!lastIterMadeChanges || !isAstSufficientlyChanging(previousAstSize, astSize)) {
               state = State.RUN_PASSES_NOT_RUN_IN_PREV_ITER;
             }
           }
@@ -487,6 +480,37 @@ class PhaseOptimizer implements CompilerPass {
         inLoop = false;
         compiler.removeChangeHandler(scopeHandler);
       }
+    }
+
+    /**
+     * If two loop batches in a row made the code less than 0.05% smaller than the previous
+     * batches, stop before the fixpoint.
+     * The 0.05% threshold is based on the following heuristic: 1% size difference matters
+     * to our users. 0.1% size difference is borderline relevant. 0.05% difference
+     * between loop batches is unlikely to grow the final output more than 0.1%.
+     *
+     * Use this criterion only for the two code-removing loops.
+     * The code-motion loop may move code around but not remove code, so this criterion
+     * is not correct for stopping early.
+     *
+     * NOTE: the size heuristic is not robust when passes in the code-removing loop increase
+     * the AST size; all passes in the loop must make the code smaller. Otherwise, what may seem
+     * like a small size difference may indeed be big changes, and we miss it because we don't
+     * compute the AST size after each pass. This can happen because inlineFunctions may increase
+     * code size, and relies on peephole and inlineVariables to clean up. As long as these passes
+     * run after it in the loop, we should be OK.
+     */
+    private boolean isAstSufficientlyChanging(int oldAstSize, int newAstSize) {
+      if (useSizeHeuristicToStopOptimizationLoop && this.isCodeRemovalLoop) {
+        float percentChange = 100 * (Math.abs(newAstSize - oldAstSize) / (float) oldAstSize);
+        if (percentChange < 0.05) {
+          this.howmanyIterationsUnderThreshold++;
+        } else {
+          this.howmanyIterationsUnderThreshold = 0;
+        }
+        return this.howmanyIterationsUnderThreshold < 2;
+      }
+      return true;
     }
 
     /** Re-arrange the passes in an optimal order. */
@@ -509,6 +533,19 @@ class PhaseOptimizer implements CompilerPass {
 
       myPasses.removeAll(optimalPasses);
       myPasses.addAll(optimalPasses);
+    }
+
+    boolean isPopulated() {
+      return !myPasses.isEmpty();
+    }
+
+    private boolean isCodeRemovalLoop() {
+      for (NamedPass pass : this.myPasses) {
+        if (CODE_REMOVING_PASSES.contains(pass.name)) {
+          return true;
+        }
+      }
+      return false;
     }
   }
 

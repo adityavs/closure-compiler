@@ -13,28 +13,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.google.javascript.jscomp;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.javascript.jscomp.CompilerTestCase.lines;
+import static com.google.javascript.jscomp.parsing.Config.JsDocParsing.INCLUDE_DESCRIPTIONS_NO_WHITESPACE;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Ordering;
+import com.google.common.testing.EqualsTester;
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
 import com.google.javascript.jscomp.SymbolTable.Reference;
 import com.google.javascript.jscomp.SymbolTable.Symbol;
 import com.google.javascript.jscomp.SymbolTable.SymbolScope;
-import com.google.javascript.jscomp.testing.BlackHoleErrorManager;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.JSDocInfo.Visibility;
 import com.google.javascript.rhino.Token;
-
-import junit.framework.TestCase;
-
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import junit.framework.TestCase;
 
 /**
  * @author nicksantos@google.com (Nick Santos)
@@ -42,22 +41,42 @@ import java.util.Set;
 
 public final class SymbolTableTest extends TestCase {
 
-  private static final String EXTERNS = CompilerTypeTestCase.DEFAULT_EXTERNS +
-      "var Number;" +
-      "\nfunction customExternFn(customExternArg) {}";
+  private static final String EXTERNS = CompilerTypeTestCase.DEFAULT_EXTERNS
+      + "var Number;"
+      + "\nfunction customExternFn(customExternArg) {}";
 
   private CompilerOptions options;
 
   @Override
-  public void setUp() throws Exception {
+  protected void setUp() throws Exception {
     super.setUp();
 
     options = new CompilerOptions();
+    options.setLanguageIn(LanguageMode.ECMASCRIPT_2017);
+    options.setLanguageOut(LanguageMode.ECMASCRIPT5);
     options.setCodingConvention(new ClosureCodingConvention());
-    CompilationLevel.SIMPLE_OPTIMIZATIONS.setOptionsForCompilationLevel(
-        options);
+    CompilationLevel.SIMPLE_OPTIMIZATIONS.setOptionsForCompilationLevel(options);
     WarningLevel.VERBOSE.setOptionsForWarningLevel(options);
-    options.setIdeMode(true);
+    options.setChecksOnly(true);
+    options.setPreserveDetailedSourceInfo(true);
+    options.setContinueAfterErrors(true);
+    options.setAllowHotswapReplaceScript(true);
+    options.setParseJsDocDocumentation(INCLUDE_DESCRIPTIONS_NO_WHITESPACE);
+  }
+
+  /**
+   * Make sure rewrite of super() call containing a function literal doesn't cause
+   * the SymbolTable to crash.
+   */
+  public void testFunctionInCall() {
+    createSymbolTable(
+        lines(
+            "class Y { constructor(fn) {} }",
+            "class X extends Y {",
+            "  constructor() {",
+            "    super(function() {});",
+            "  }",
+            "}"));
   }
 
   public void testGlobalVar() throws Exception {
@@ -122,8 +141,8 @@ public final class SymbolTableTest extends TestCase {
 
     assertThat(refs).hasSize(2);
     assertEquals(x.getDeclaration(), refs.get(0));
-    assertEquals(Token.VAR, refs.get(0).getNode().getParent().getType());
-    assertEquals(Token.ASSIGN, refs.get(1).getNode().getParent().getType());
+    assertEquals(Token.VAR, refs.get(0).getNode().getParent().getToken());
+    assertEquals(Token.ASSIGN, refs.get(1).getNode().getParent().getToken());
   }
 
   public void testLocalVarReferences() throws Exception {
@@ -134,8 +153,8 @@ public final class SymbolTableTest extends TestCase {
 
     assertThat(refs).hasSize(2);
     assertEquals(x.getDeclaration(), refs.get(0));
-    assertEquals(Token.PARAM_LIST, refs.get(0).getNode().getParent().getType());
-    assertEquals(Token.RETURN, refs.get(1).getNode().getParent().getType());
+    assertEquals(Token.PARAM_LIST, refs.get(0).getNode().getParent().getToken());
+    assertEquals(Token.RETURN, refs.get(1).getNode().getParent().getToken());
   }
 
   public void testLocalThisReferences() throws Exception {
@@ -154,9 +173,8 @@ public final class SymbolTableTest extends TestCase {
 
   public void testLocalThisReferences2() throws Exception {
     SymbolTable table = createSymbolTable(
-        "/** @constructor */ function F() {}" +
-        "F.prototype.baz = " +
-        "    function() { this.foo = 3; this.bar = 5; };");
+        "/** @constructor */ function F() {}\n"
+            + "F.prototype.baz = function() { this.foo = 3; this.bar = 5; };");
 
     Symbol baz = getGlobalVar(table, "F.prototype.baz");
     assertNotNull(baz);
@@ -168,6 +186,7 @@ public final class SymbolTableTest extends TestCase {
     assertThat(refs).hasSize(2);
   }
 
+  // No 'this' reference is created for empty functions.
   public void testLocalThisReferences3() throws Exception {
     SymbolTable table = createSymbolTable(
         "/** @constructor */ function F() {}");
@@ -176,10 +195,28 @@ public final class SymbolTableTest extends TestCase {
     assertNotNull(baz);
 
     Symbol t = table.getParameterInFunction(baz, "this");
-    assertNotNull(t);
+    assertNull(t);
+  }
 
-    List<Reference> refs = table.getReferenceList(t);
-    assertThat(refs).isEmpty();
+  public void testObjectLiteral() throws Exception {
+    SymbolTable table = createSymbolTable("var obj = {foo: 0};");
+
+    Symbol foo = getGlobalVar(table, "obj.foo");
+    assertThat(foo.getName()).isEqualTo("foo");
+  }
+
+  public void testObjectLiteralQuoted() throws Exception {
+    SymbolTable table = createSymbolTable("var obj = {'foo': 0};");
+
+    Symbol foo = getGlobalVar(table, "obj.foo");
+    assertThat(foo.getName()).isEqualTo("foo");
+  }
+
+  public void testObjectLiteralWithNewlineInKey() throws Exception {
+    SymbolTable table = createSymbolTable("var obj = {'foo\\nbar': 0};");
+
+    Symbol foo = getGlobalVar(table, "obj.foo\\nbar");
+    assertThat(foo.getName()).isEqualTo("obj.foo\\nbar");
   }
 
   public void testNamespacedReferences() throws Exception {
@@ -487,7 +524,7 @@ public final class SymbolTableTest extends TestCase {
 
     List<Reference> refs = table.getReferenceList(fooPrototype);
     assertThat(refs).hasSize(1);
-    assertEquals(Token.NAME, refs.get(0).getNode().getType());
+    assertEquals(Token.NAME, refs.get(0).getNode().getToken());
 
     // Make sure that the ctor and its prototype are declared at the
     // same node.
@@ -506,7 +543,7 @@ public final class SymbolTableTest extends TestCase {
     List<Reference> refs = ImmutableList.copyOf(
         table.getReferences(fooPrototype));
     assertThat(refs).hasSize(1);
-    assertEquals(Token.GETPROP, refs.get(0).getNode().getType());
+    assertEquals(Token.GETPROP, refs.get(0).getNode().getToken());
     assertEquals("Foo.prototype", refs.get(0).getNode().getQualifiedName());
   }
 
@@ -518,7 +555,7 @@ public final class SymbolTableTest extends TestCase {
 
     List<Reference> refs = table.getReferenceList(fooPrototype);
     assertThat(refs).hasSize(1);
-    assertEquals(Token.GETPROP, refs.get(0).getNode().getType());
+    assertEquals(Token.GETPROP, refs.get(0).getNode().getToken());
 
     // Make sure that the ctor and its prototype are declared at the
     // same node.
@@ -573,7 +610,7 @@ public final class SymbolTableTest extends TestCase {
     // so it's not meaningful to check the number of references.
     // We really want to make sure that all the references are in the externs,
     // except the last one.
-    assertTrue(refs.size() > 1);
+    assertThat(refs.size()).isGreaterThan(1);
 
     int last = refs.size() - 1;
     for (int i = 0; i < refs.size(); i++) {
@@ -838,9 +875,9 @@ public final class SymbolTableTest extends TestCase {
     assertNotNull(abc);
     assertThat(table.getReferenceList(abc)).hasSize(1);
 
-    assertEquals("{b: {c: function (): undefined}}", a.getType().toString());
-    assertEquals("{c: function (): undefined}", ab.getType().toString());
-    assertEquals("function (): undefined", abc.getType().toString());
+    assertEquals("{b: {c: function(): undefined}}", a.getType().toString());
+    assertEquals("{c: function(): undefined}", ab.getType().toString());
+    assertEquals("function(): undefined", abc.getType().toString());
   }
 
   public void testMethodInAnonObject2() throws Exception {
@@ -853,9 +890,9 @@ public final class SymbolTableTest extends TestCase {
     assertNotNull(abc);
     assertThat(table.getReferenceList(abc)).hasSize(1);
 
-    assertEquals("{b: {c: function (): undefined}}", a.getType().toString());
-    assertEquals("{c: function (): undefined}", ab.getType().toString());
-    assertEquals("function (): undefined", abc.getType().toString());
+    assertEquals("{b: {c: function(): undefined}}", a.getType().toString());
+    assertEquals("{c: function(): undefined}", ab.getType().toString());
+    assertEquals("function(): undefined", abc.getType().toString());
   }
 
   public void testJSDocOnlySymbol() throws Exception {
@@ -1069,12 +1106,47 @@ public final class SymbolTableTest extends TestCase {
         getGlobalVar(table, "SubFoo.prototype.plugh").getVisibility());
   }
 
+  public void testPrototypeSymbolEqualityForTwoPathsToSamePrototype() {
+    String input =
+        lines(
+            "/**\n",
+            "* An employer.\n",
+            "*\n",
+            "* @param {String} name name of employer.\n",
+            "* @param {String} address address of employer.\n",
+            "* @constructor\n",
+            "*/\n",
+            "function Employer(name, address) {\n",
+            "this.name = name;\n",
+            "this.address = address;\n",
+            "}\n",
+            "\n",
+            "/**\n",
+            "* @return {String} information about an employer.\n",
+            "*/\n",
+            "Employer.prototype.getInfo = function() {\n",
+            "return this.name + '.' + this.address;\n",
+            "};");
+    SymbolTable table = createSymbolTable(input);
+    Symbol employer = getGlobalVar(table, "Employer");
+    assertNotNull(employer);
+    SymbolScope propertyScope = employer.getPropertyScope();
+    assertNotNull(propertyScope);
+    Symbol prototypeOfEmployer = propertyScope.getQualifiedSlot("prototype");
+    assertNotNull(prototypeOfEmployer);
+
+    Symbol employerPrototype = getGlobalVar(table, "Employer.prototype");
+    assertNotNull(employerPrototype);
+
+    new EqualsTester().addEqualityGroup(employerPrototype, prototypeOfEmployer).testEquals();
+  }
+
   private void assertSymmetricOrdering(
       Ordering<Symbol> ordering, Symbol first, Symbol second) {
     assertEquals(0, ordering.compare(first, first));
     assertEquals(0, ordering.compare(second, second));
-    assertTrue(ordering.compare(first, second) < 0);
-    assertTrue(ordering.compare(second, first) > 0);
+    assertThat(ordering.compare(first, second)).isLessThan(0);
+    assertThat(ordering.compare(second, first)).isGreaterThan(0);
   }
 
   private Symbol getGlobalVar(SymbolTable table, String name) {
@@ -1104,8 +1176,7 @@ public final class SymbolTableTest extends TestCase {
   private List<Symbol> getVars(SymbolTable table) {
     List<Symbol> result = new ArrayList<>();
     for (Symbol symbol : table.getAllSymbols()) {
-      if (symbol.getDeclaration() != null &&
-          !symbol.getDeclaration().getNode().isFromExterns()) {
+      if (symbol.getDeclaration() != null && !symbol.getDeclaration().getNode().isFromExterns()) {
         result.add(symbol);
       }
     }
@@ -1118,8 +1189,7 @@ public final class SymbolTableTest extends TestCase {
     List<SourceFile> externs = ImmutableList.of(
         SourceFile.fromCode("externs1", EXTERNS));
 
-    Compiler compiler = new Compiler();
-    BlackHoleErrorManager.silence(compiler);
+    Compiler compiler = new Compiler(new BlackHoleErrorManager());
     compiler.compile(externs, inputs, options);
     return assertSymbolTableValid(compiler.buildKnownSymbolTable());
   }
@@ -1130,7 +1200,7 @@ public final class SymbolTableTest extends TestCase {
    */
   private SymbolTable assertSymbolTableValid(SymbolTable table) {
     Set<Symbol> allSymbols = new HashSet<>();
-    Iterables.addAll(allSymbols, table.getAllSymbols());
+    allSymbols.addAll(table.getAllSymbols());
     for (Symbol sym : table.getAllSymbols()) {
       // Make sure that grabbing the symbol's scope and looking it up
       // again produces the same symbol.
@@ -1143,9 +1213,9 @@ public final class SymbolTableTest extends TestCase {
 
       Symbol scope = table.getSymbolForScope(table.getScope(sym));
       assertTrue(
-          "The symbol's scope is a zombie scope that shouldn't exist.\n" +
-          "Symbol: " + sym + "\n" +
-          "Scope: " + table.getScope(sym),
+          "The symbol's scope is a zombie scope that shouldn't exist.\n"
+              + "Symbol: " + sym + "\n"
+              + "Scope: " + table.getScope(sym),
           scope == null || allSymbols.contains(scope));
     }
 
@@ -1153,7 +1223,7 @@ public final class SymbolTableTest extends TestCase {
     Symbol global = getGlobalVar(table, SymbolTable.GLOBAL_THIS);
     assertNotNull(global);
     assertNotNull(global.getDeclaration());
-    assertEquals(Token.SCRIPT, global.getDeclaration().getNode().getType());
+    assertEquals(Token.SCRIPT, global.getDeclaration().getNode().getToken());
 
     List<Reference> globalRefs = table.getReferenceList(global);
 

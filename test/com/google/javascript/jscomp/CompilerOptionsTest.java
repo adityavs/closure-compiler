@@ -16,12 +16,16 @@
 
 package com.google.javascript.jscomp;
 
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
-import junit.framework.TestCase;
-
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Map;
+import junit.framework.TestCase;
 
 /**
  * Tests for {@link CompilerOptions}.
@@ -46,4 +50,49 @@ public final class CompilerOptionsTest extends TestCase {
   public void assertEquivalent(Node a, Node b) {
     assertTrue(a.isEquivalentTo(b));
   }
+
+  public void testLanguageModeFromString() {
+    assertEquals(LanguageMode.ECMASCRIPT3, LanguageMode.fromString("ECMASCRIPT3"));
+    // Whitespace should be trimmed, characters converted to uppercase and leading 'ES' replaced
+    // with 'ECMASCRIPT'.
+    assertEquals(LanguageMode.ECMASCRIPT3, LanguageMode.fromString("  es3  "));
+    assertNull(LanguageMode.fromString("junk"));
+  }
+
+  public void testEmitUseStrictWorksInEs3() {
+    CompilerOptions options = new CompilerOptions();
+    options.setEmitUseStrict(true);
+    options.setLanguageOut(LanguageMode.ECMASCRIPT3);
+
+    assertTrue(options.shouldEmitUseStrict());
+  }
+
+  public void testSerialization() throws Exception {
+    CompilerOptions options = new CompilerOptions();
+    options.setDefineToBooleanLiteral("trueVar", true);
+    options.setDefineToBooleanLiteral("falseVar", false);
+    options.setDefineToNumberLiteral("threeVar", 3);
+    options.setDefineToStringLiteral("strVar", "str");
+    options.setAliasableStrings(new HashSet<>(Arrays.asList("AliasA", "AliasB")));
+    options.setOptimizeArgumentsArray(true);
+    options.setAmbiguateProperties(false);
+    options.setOutputCharset(StandardCharsets.US_ASCII);
+
+    ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+    options.serialize(byteArrayOutputStream);
+
+    options =
+        CompilerOptions.deserialize(new ByteArrayInputStream(byteArrayOutputStream.toByteArray()));
+
+    Map<String, Node> actual = options.getDefineReplacements();
+    assertEquivalent(new Node(Token.TRUE), actual.get("trueVar"));
+    assertEquivalent(new Node(Token.FALSE), actual.get("falseVar"));
+    assertEquivalent(Node.newNumber(3), actual.get("threeVar"));
+    assertEquivalent(Node.newString("str"), actual.get("strVar"));
+    assertEquals(new HashSet<>(Arrays.asList("AliasA", "AliasB")), options.aliasableStrings);
+    assertFalse(options.shouldAmbiguateProperties());
+    assertTrue(options.optimizeArgumentsArray);
+    assertEquals(StandardCharsets.US_ASCII, options.getOutputCharset());
+  }
+
 }

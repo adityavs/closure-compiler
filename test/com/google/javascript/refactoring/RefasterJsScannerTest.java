@@ -16,20 +16,23 @@
 
 package com.google.javascript.refactoring;
 
+import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
+import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.javascript.jscomp.Compiler;
 import com.google.javascript.jscomp.CompilerOptions;
 import com.google.javascript.jscomp.SourceFile;
-
+import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.util.List;
 
 /**
  * Unit tests for {RefasterJsScanner}.
@@ -46,6 +49,11 @@ import java.util.List;
 
 @RunWith(JUnit4.class)
 public class RefasterJsScannerTest {
+
+  @BeforeClass
+  public static void noLogSpam() {
+    Logger.getLogger("com.google").setLevel(Level.OFF);
+  }
 
   @Test
   public void testInitialize_missingTemplates() throws Exception {
@@ -119,7 +127,7 @@ public class RefasterJsScannerTest {
         + "function after_foo() {\n"
         + "  'bar';\n"
         + "}\n";
-    assertChanges("", originalCode, expectedCode, template);
+    assertChanges("", originalCode, template, expectedCode);
   }
 
   @Test
@@ -130,7 +138,7 @@ public class RefasterJsScannerTest {
         + "/** @type {string} */\n"
         + "Location.prototype.href;\n"
         + "function foo() {}\n"
-        + "/** @type {Location} var loc;";
+        + "/** @type {Location} */ var loc;";
     String originalCode = "loc.href = 'str';";
     String expectedCode = "foo();";
     String template = ""
@@ -141,7 +149,24 @@ public class RefasterJsScannerTest {
         + "function after_foo() {\n"
         + "  foo();\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
+  }
+
+  @Test
+  public void test_operatorPrecedence() throws Exception {
+    String originalCode = "f(1 || 2) && f(3) && f(4) == 5 && 6 == f(7) && 8 + f(9);";
+    String expectedCode =
+        "(1 || 2) == 0 && 3 == 0 && (4 == 0) == 5 && 6 == (7 == 0) && 8 + (9 == 0);";
+    String template = Joiner.on("\n").join(
+        "/** @param {?} x */",
+        "function before_foo(x) {",
+        "  f(x);",
+        "};",
+        "/** @param {?} x */",
+        "function after_foo(x) {",
+        "  x == 0;",
+        "}");
+    assertChanges("", originalCode, template, expectedCode);
   }
 
   @Test
@@ -150,7 +175,7 @@ public class RefasterJsScannerTest {
         + "/** @constructor */\n"
         + "function FooType() {}\n"
         + "FooType.prototype.bar = function() {};\n"
-        + "var obj = new FooType();";
+        + "/** @type {FooType} */ var obj;";
     String originalCode = "obj.bar();";
     String expectedCode = "obj.baz();";
     String template = ""
@@ -166,7 +191,7 @@ public class RefasterJsScannerTest {
         + "function after_foo(foo) {\n"
         + "  foo.baz();\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -174,7 +199,7 @@ public class RefasterJsScannerTest {
     String externs = ""
         + "/** @constructor */\n"
         + "function FooType() {}\n"
-        + "FooType.prototype.bar = function() {};"
+        + "FooType.prototype.bar = function() {};\n"
         + "FooType.prototype.baz = function() {};";
     String preamble = "var obj = new FooType();\n";
     String postamble = "var someOtherCode = 3;\n";
@@ -183,7 +208,7 @@ public class RefasterJsScannerTest {
         + "obj.bar();\n"
         + "obj.baz();\n"
         + postamble;
-    String expectedCode = preamble + "\n" + postamble;
+    String expectedCode = preamble + postamble;
     String template = ""
         + "/**\n"
         + " * @param {FooType} foo\n"
@@ -197,7 +222,7 @@ public class RefasterJsScannerTest {
         + " */\n"
         + "function after_foo(foo) {\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -207,7 +232,7 @@ public class RefasterJsScannerTest {
         + "function MyClass() {};\n"
         + "MyClass.prototype.foo = function() {};\n"
         + "MyClass.prototype.bar = function() {};\n"
-        + "var clazz = new MyClass();";
+        + "/** @type {MyClass} */ var clazz;";
     String originalCode = "alert(clazz.foo());";
     String expectedCode = "alert(clazz.bar());";
     String template = ""
@@ -219,7 +244,7 @@ public class RefasterJsScannerTest {
         + "function after_foo(clazz) {\n"
         + "  clazz.bar();\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -236,7 +261,7 @@ public class RefasterJsScannerTest {
         + "function after_foo() {\n"
         + "  MyClass.prototype.bar\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -255,7 +280,7 @@ public class RefasterJsScannerTest {
         + "function after_foo() {\n"
         + "  MyClass.prototype.bar\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -265,7 +290,7 @@ public class RefasterJsScannerTest {
         + "function MyClass() {};\n"
         + "MyClass.prototype.foo = function() {};\n"
         + "MyClass.prototype.bar = function() {};\n"
-        + "var clazz = new MyClass();\n";
+        + "/** @type {MyClass} */ var clazz;\n";
     String originalCode = "clazz.foo();";
     String expectedCode = "clazz.bar();";
     String template = ""
@@ -277,7 +302,7 @@ public class RefasterJsScannerTest {
         + "function after_foo(clazz) {\n"
         + "  clazz.bar();\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -294,11 +319,11 @@ public class RefasterJsScannerTest {
         + "function after_template(msg) {\n"
         + "  throw getError();\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
 
     originalCode = "function f() {throw Error('foo');}";
     expectedCode = "function f() {throw getError();}";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
 
     originalCode = ""
         + "if (true) {\n"
@@ -308,7 +333,7 @@ public class RefasterJsScannerTest {
         + "if (true) {\n"
         + "  throw getError();\n"
         + "}";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
 }
 
   @Test
@@ -323,7 +348,7 @@ public class RefasterJsScannerTest {
         + "function after_template() {\n"
         + "  getBar();\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -338,14 +363,14 @@ public class RefasterJsScannerTest {
         + "function after_template() {\n"
         + "  getBar();\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
   public void test_returnStatement() throws Exception {
     String externs = "/** @return {string} */ function getFoo() {return 'foo';}";
-    String originalCode = "function() { return getFoo(); }";
-    String expectedCode = "function() { return getBar(); }";
+    String originalCode = "function f() { return getFoo(); }";
+    String expectedCode = "function f() { return getBar(); }";
     String template = ""
         + "function before_template() {\n"
         + "  getFoo();\n"
@@ -353,11 +378,11 @@ public class RefasterJsScannerTest {
         + "function after_template() {\n"
         + "  getBar();\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
 
-    originalCode = "function() { return getFoo() == 'foo'; }";
-    expectedCode = "function() { return getBar() == 'foo'; }";
-    assertChanges(externs, originalCode, expectedCode, template);
+    originalCode = "function f() { return getFoo() == 'foo'; }";
+    expectedCode = "function f() { return getBar() == 'foo'; }";
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -380,14 +405,14 @@ public class RefasterJsScannerTest {
         + "function after_template() {\n"
         + "  getBar();\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
   public void test_caseStatement() throws Exception {
     String externs = ""
         + "var str = 'foo';\n"
-        + "var CONSTANT = 'bar';n";
+        + "var CONSTANT = 'bar';\n";
     String originalCode = ""
         + "switch(str) {\n"
         + "  case CONSTANT:\n"
@@ -405,7 +430,7 @@ public class RefasterJsScannerTest {
         + "function after_template() {\n"
         + "  getValue()\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -413,7 +438,7 @@ public class RefasterJsScannerTest {
     String externs = ""
         + "var obj = {};\n"
         + "obj.prop = 6;"
-        + "var CONSTANT = 3;n";
+        + "var CONSTANT = 3;\n";
     String originalCode = "for (var i = CONSTANT; i < 5; i++) {}";
     String expectedCode = "for (var i = CONSTANT2; i < 5; i++) {}";
     String template = ""
@@ -423,11 +448,11 @@ public class RefasterJsScannerTest {
         + "function after_template() {\n"
         + "  CONSTANT2\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
 
     originalCode = "for (var i = 0; i < CONSTANT; i++) {}";
     expectedCode = "for (var i = 0; i < CONSTANT2; i++) {}";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
 
     originalCode = "for (var i = 0; i < CONSTANT; i++) {}";
     expectedCode = "for (var i = 0; i < obj.prop; i++) {}";
@@ -438,7 +463,7 @@ public class RefasterJsScannerTest {
         + "function after_template() {\n"
         + "  obj.prop\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
 
     originalCode = "for (var prop in obj) {}";
     expectedCode = "for (var prop in getObj()) {}";
@@ -449,7 +474,7 @@ public class RefasterJsScannerTest {
         + "function after_template() {\n"
         + "  getObj()\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -466,7 +491,7 @@ public class RefasterJsScannerTest {
         + "function after_template() {\n"
         + "  3;\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -484,7 +509,7 @@ public class RefasterJsScannerTest {
         + "function after_template() {\n"
         + "  getNewIndex();\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
   @Test
@@ -503,41 +528,462 @@ public class RefasterJsScannerTest {
         + "function after_template(fn) {\n"
         + "  fn().someOtherFn();\n"
         + "}\n";
-    assertChanges(externs, originalCode, expectedCode, template);
+    assertChanges(externs, originalCode, template, expectedCode);
   }
 
-  private Compiler createCompiler() {
+  @Test
+  public void test_strictSubtypeMatching() throws Exception {
+    String externs = ""
+        + "/** @constructor */\n"
+        + "function T() {};\n"
+        + "/** @type {string} */\n"
+        + "T.prototype.p;\n"
+        + "/** @constructor @extends {T} */\n"
+        + "function S() {};\n"
+        + "/** @param {!T} someT */\n"
+        + "function setP(someT) {};\n";
+    String template = ""
+        + "/** @param {!T} t */\n"
+        + "function before_template(t) {\n"
+        + "  t.p = 'foo';\n"
+        + "}\n"
+        + "/** @param {!T} t */\n"
+        + "function after_template(t) {\n"
+        + "  setP(t);\n"
+        + "}\n";
+    String originalCode = "theT.p = 'foo';";
+    String expectedCode = "setP(theT);";
+
+    // {!T} matches {!T}
+    assertChanges(externs + "/** @type {!T} */ var theT;", originalCode, template, expectedCode);
+
+    // {?T} in the code does not match {!T} in the template.
+    assertChanges(
+        externs + "/** @type {?T} */ var theT;",
+        originalCode,
+        template,
+        (String) null); // No changes.
+
+    // {unknown} does not match {!T}
+    assertChanges(externs + "var theT;", originalCode, template, (String) null); // No changes.
+
+    // {!S} matches {!T}
+    assertChanges(externs + "/** @type {!S} */ var theT;", originalCode, template, expectedCode);
+
+    // {?S} does not match {!T}
+    assertChanges(
+        externs + "/** @type {?S} */ var theT;",
+        originalCode,
+        template,
+        (String) null); // No changes.
+  }
+
+  @Test
+  public void test_templatesEvaluatedInOrder() throws Exception {
+    String externs = ""
+        + "/** @constructor */\n"
+        + "function T() {};\n"
+        + "/** @type {string} */\n"
+        + "T.prototype.p;\n"
+        + "/** @constructor @extends {T} */\n"
+        + "function S() {};\n"
+        + "/** @param {!T} someT */\n"
+        + "function setP(someT) {};\n"
+        + "/** @param {!S} someS */\n"
+        + "function setPonS(someS) {};\n"
+        + "/** @type {!T} */ var theT;"
+        + "/** @type {!S} */ var theS;";
+    String template = ""
+        + "/** @param {!S} s */\n"
+        + "function before_template_S(s) {\n"
+        + "  s.p = 'foo';\n"
+        + "}\n"
+        + "/** @param {!S} s */\n"
+        + "function after_template_S(t) {\n"
+        + "  setPonS(s);\n"
+        + "}\n"
+        + "\n"
+        + "/** @param {!T} t */\n"
+        + "function before_template_T(t) {\n"
+        + "  t.p = 'foo';\n"
+        + "}\n"
+        + "/** @param {!T} t */\n"
+        + "function after_template_T(t) {\n"
+        + "  setP(t);\n"
+        + "}\n";
+    String originalCode = "theT.p = 'foo'; theS.p = 'foo';";
+    // Templates are evaluated in order:
+    //  - theT.p does not match before_template_S but matches before_template_T
+    //  - theS.p would match either template (see {@link #test_strictSubtypeMatching}),
+    //    but since before_template_S comes first it takes precedence.
+    String expectedCode = "setP(theT); setPonS(theS);";
+    assertChanges(externs, originalCode, template, expectedCode);
+  }
+
+  @Test
+  public void test_es6() throws Exception {
+    String externs = ""
+        + "/** @constructor */\n"
+        + "function FooType() {}\n"
+        + "/** @param {string} str */"
+        + "FooType.prototype.bar = function(str) {};\n"
+        + "/** @param {string} str */"
+        + "FooType.prototype.baz = function(str) {};\n";
+    String template = ""
+        + "/**\n"
+        + " * @param {FooType} foo\n"
+        + " * @param {string} str\n"
+        + " */\n"
+        + "function before_foo(foo, str) {\n"
+        + "  foo.bar(str);\n"
+        + "};\n"
+        + "/**\n"
+        + " * @param {FooType} foo\n"
+        + " * @param {string} str\n"
+        + " */\n"
+        + "function after_foo(foo, str) {\n"
+        + "  foo.baz(str);\n"
+        + "}\n";
+    String originalCode = ""
+        + "goog.module('foo.bar');\n"
+        + "const STR = '3';\n"
+        + "const Clazz = class {\n"
+        + "  constructor() { /** @const */ this.obj = new FooType(); }\n"
+        + "  someMethod() { this.obj.bar(STR); }\n"
+        + "};\n"
+        + "exports.Clazz = Clazz;\n";
+    String expectedCode = ""
+        + "goog.module('foo.bar');\n"
+        + "const STR = '3';\n"
+        + "const Clazz = class {\n"
+        + "  constructor() { /** @const */ this.obj = new FooType(); }\n"
+        + "  someMethod() { this.obj.baz(STR); }\n"
+        + "};\n"
+        + "exports.Clazz = Clazz;\n";
+    assertChanges(externs, originalCode, template, expectedCode);
+  }
+
+  @Test
+  public void test_unknownTemplateTypes() throws Exception {
+    // By declaring a new type in the template code that does not appear in the original code,
+    // the result of this refactoring should be a no-op. However, if template type matching isn't
+    // correct, the template type could be treated as an unknown type which would incorrectly
+    // match the original code. This test ensures this behavior is right.
+    String externs = "";
+    String originalCode = ""
+        + "/** @constructor */\n"
+        + "function Clazz() {};\n"
+        + "var cls = new Clazz();\n"
+        + "cls.showError('boo');\n";
+    String template = ""
+        + "/** @constructor */\n"
+        + "function SomeClassNotInCompilationUnit() {};\n"
+        + "var foo = new SomeClassNotInCompilationUnit();\n"
+        + "foo.showError('bar');\n"
+        + "\n"
+        + "/**"
+        + " * @param {SomeClassNotInCompilationUnit} obj\n"
+        + " * @param {string} msg\n"
+        + " */\n"
+        + "function before_template(obj, msg) {\n"
+        + "  obj.showError(msg);\n"
+        + "}\n"
+        + "/**"
+        + " * @param {SomeClassNotInCompilationUnit} obj\n"
+        + " * @param {string} msg\n"
+        + " */\n"
+        + "function after_template(obj, msg) {\n"
+        + "  obj.showError(msg, false);\n"
+        + "}\n";
+    assertChanges(externs, originalCode, template, (String) null);
+  }
+
+  @Test
+  public void test_unknownTemplateTypesNonNullable() throws Exception {
+    // By declaring a new type in the template code that does not appear in the original code,
+    // the result of this refactoring should be a no-op. However, if template type matching isn't
+    // correct, the template type could be treated as an unknown type which would incorrectly
+    // match the original code. This test ensures this behavior is right.
+    String externs = "";
+    String originalCode = ""
+        + "/** @constructor */\n"
+        + "function Clazz() {};\n"
+        + "var cls = new Clazz();\n"
+        + "cls.showError('boo');\n";
+    String template = ""
+        + "/** @constructor */\n"
+        + "function SomeClassNotInCompilationUnit() {};\n"
+        + "var foo = new SomeClassNotInCompilationUnit();\n"
+        + "foo.showError('bar');\n"
+        + "\n"
+        + "/**"
+        + " * @param {!SomeClassNotInCompilationUnit} obj\n"
+        + " * @param {string} msg\n"
+        + " */\n"
+        + "function before_template(obj, msg) {\n"
+        + "  obj.showError(msg);\n"
+        + "}\n"
+        + "/**"
+        + " * @param {!SomeClassNotInCompilationUnit} obj\n"
+        + " * @param {string} msg\n"
+        + " */\n"
+        + "function after_template(obj, msg) {\n"
+        + "  obj.showError(msg, false);\n"
+        + "}\n";
+    assertChanges(externs, originalCode, template, (String) null);
+  }
+
+  @Test
+  public void test_importConstGoogRequire() throws Exception {
+    String externs = "";
+    String originalCode =
+        Joiner.on('\n').join(
+            "goog.module('testcase');",
+            "",
+            "function f() { var loc = 'str'; }");
+    String expectedCode =
+        Joiner.on('\n').join(
+        "goog.module('testcase');",
+            "const foo = goog.require('goog.foo');",
+            "",
+            "function f() { var loc = foo.f(); }");
+    String template =
+        Joiner.on('\n').join(
+            "/**",
+            "* +require {goog.foo}",
+            "*/",
+            "function before_foo() {",
+            "  var a = 'str';",
+            "};",
+            "function after_foo() {",
+            "  var a = goog.foo.f();",
+            "}");
+    assertChanges(externs, originalCode, template, expectedCode);
+  }
+
+  @Test
+  public void test_importConstGoogRequireMultipleImports() throws Exception {
+    String externs = "";
+    String originalCode =
+        Joiner.on('\n').join(
+        "goog.module('testcase');",
+            "const alpha = goog.require('goog.alpha');",
+            "const omega = goog.require('goog.omega');",
+            "",
+            "function f() { var loc = 'str'; }");
+    String expectedCode =
+        Joiner.on('\n').join(
+        "goog.module('testcase');",
+            "const alpha = goog.require('goog.alpha');",
+            "const foo = goog.require('goog.foo');",
+            "const omega = goog.require('goog.omega');",
+            "",
+            "function f() { var loc = foo.f(); }");
+    String template =
+        Joiner.on('\n').join(
+            "/**",
+            "* +require {goog.foo}",
+            "*/",
+            "function before_foo() {",
+            "  var a = 'str';",
+            "};",
+            "function after_foo() {",
+            "  var a = goog.foo.f();",
+            "}");
+    assertChanges(externs, originalCode, template, expectedCode);
+  }
+
+  @Test
+  public void test_importConstGoogRequireAlreadyNamed() throws Exception {
+    String externs = "";
+    String originalCode =
+        Joiner.on('\n').join(
+        "goog.module('testcase');",
+            "const bar = goog.require('goog.foo');",
+            "",
+            "var loc = 'str';");
+    String expectedCode =
+        Joiner.on('\n').join(
+        "goog.module('testcase');",
+            "const bar = goog.require('goog.foo');",
+            "",
+            "var loc = bar.f();");
+    String template =
+        Joiner.on('\n').join(
+            "/**",
+            "* +require {goog.foo}",
+            "*/",
+            "function before_foo() {",
+            "  var a = 'str';",
+            "};",
+            "function after_foo() {",
+            "  var a = goog.foo.f();",
+            "}");
+    assertChanges(externs, originalCode, template, expectedCode);
+  }
+
+  @Test
+  public void test_multipleChoices() throws Exception {
+    String externs = "";
+
+    String originalCode = Joiner.on('\n').join("goog.module('testcase');", "", "var loc = 'str';");
+    String expectedCode1 =
+        Joiner.on('\n').join("goog.module('testcase');", "", "var loc = 'foo' + 'str';");
+    String expectedCode2 =
+        Joiner.on('\n').join("goog.module('testcase');", "", "var loc = 'bar' + 'str';");
+    String template =
+        Joiner.on('\n')
+            .join(
+                "/**",
+                "* @param {string} str",
+                "*/",
+                "function before_foo(str) {",
+                "  var a = str;",
+                "};",
+                "/**",
+                " * @param {string} str",
+                "*/",
+                "function after_option_1_foo(str) {",
+                "  var a = 'foo' + str",
+                "}",
+                "/**",
+                " * @param {string} str",
+                "*/",
+                "function after_option_2_foo(str) {",
+                "  var a = 'bar' + str",
+                "}");
+    assertChanges(externs, originalCode, template, expectedCode1, expectedCode2);
+  }
+
+  @Test
+  public void test_multipleChoicesDifferentImports() throws Exception {
+    String externs = "";
+
+    String originalCode = Joiner.on('\n').join("goog.module('testcase');", "", "var loc = 'str';");
+    String expectedCode1 =
+        Joiner.on('\n')
+            .join(
+                "goog.module('testcase');",
+                "const bar = goog.require('goog.bar');",
+                "const foo = goog.require('goog.foo');",
+                "",
+                "var loc = foo.f(bar.b('option1'));");
+    String expectedCode2 =
+        Joiner.on('\n')
+            .join(
+                "goog.module('testcase');",
+                "const baz = goog.require('goog.baz');",
+                "const foo = goog.require('goog.foo');",
+                "",
+                "var loc = foo.f(baz.f('option2'));");
+    String template =
+        Joiner.on('\n')
+            .join(
+                "/**",
+                "* +require {goog.foo}",
+                "*/",
+                "function before_foo() {",
+                "  var a = 'str';",
+                "};",
+                "/**",
+                "* +require {goog.foo}", // Duplicates should be ok
+                "* +require {goog.bar}",
+                "*/",
+                "function after_option_1_foo() {",
+                "  var a = goog.foo.f(goog.bar.b('option1'))",
+                "}",
+                "/**",
+                "* +require {goog.baz}",
+                "*/",
+                "function after_option_2_foo() {",
+                "  var a = goog.foo.f(goog.baz.f('option2'))",
+                "}");
+    assertChanges(externs, originalCode, template, expectedCode1, expectedCode2);
+  }
+
+  @Test
+  public void test_withGetCssName() throws Exception {
+    String externs = "";
+
+    String originalCode = Joiner.on('\n').join(
+        "goog.module('testcase');",
+        "",
+        "document.getElementById('foo').class = goog.getCssName('str');");
+    String expectedCode =
+        Joiner.on('\n').join(
+        "goog.module('testcase');",
+        "",
+        "document.getElementById('foo').class = 'foo' + goog.getCssName('str');");
+    String template =
+        Joiner.on('\n')
+            .join(
+                "/**",
+                "* @param {?} obj",
+                "* @param {?} value",
+                "*/",
+                "function before_foo(obj, value) {",
+                "  obj.class = value;",
+                "};",
+                "/**",
+                " * @param {?} obj",
+                " * @param {?} value",
+                "*/",
+                "function after_foo(obj, value) {",
+                "  obj.class = 'foo' + value;",
+                "}");
+    assertChanges(externs, originalCode, template, expectedCode);
+  }
+
+  private static Compiler createCompiler() {
     return new Compiler();
   }
 
-  private RefasterJsScanner createScanner(Compiler compiler, String template) throws Exception {
+  private static RefasterJsScanner createScanner(Compiler compiler, String template)
+      throws Exception {
     RefasterJsScanner scanner = new RefasterJsScanner();
     scanner.loadRefasterJsTemplateFromCode(template);
     scanner.initialize(compiler);
     return scanner;
   }
 
-  private void compileTestCode(Compiler compiler, String testCode, String externs) {
+  private static void compileTestCode(Compiler compiler, String testCode, String externs) {
     CompilerOptions options = RefactoringDriver.getCompilerOptions();
     compiler.compile(
-        ImmutableList.of(SourceFile.fromCode("externs", externs)),
+        ImmutableList.of(SourceFile.fromCode("externs", "function Symbol() {};" + externs)),
         ImmutableList.of(SourceFile.fromCode("test", testCode)),
         options);
   }
 
-  private void assertChanges(
-      String externs, String originalCode, String expectedCode, String refasterJsTemplate)
+  private static void assertChanges(
+      String externs, String originalCode, String refasterJsTemplate, String... expectedChoices)
       throws Exception {
     RefasterJsScanner scanner = new RefasterJsScanner();
     scanner.loadRefasterJsTemplateFromCode(refasterJsTemplate);
 
-    RefactoringDriver driver = new RefactoringDriver.Builder(scanner)
-        .addExternsFromCode(externs)
-        .addInputsFromCode(originalCode)
-        .build();
-    List<SuggestedFix> fixes = driver.drive();
-    String newCode = ApplySuggestedFixes.applySuggestedFixesToCode(
-        fixes, ImmutableMap.of("input", originalCode)).get("input");
-    assertEquals(expectedCode, newCode);
+    RefactoringDriver driver =
+        new RefactoringDriver.Builder()
+            .addExternsFromCode("function Symbol() {};" + externs)
+            .addInputsFromCode(originalCode)
+            .addInputsFromCode(
+                Joiner.on('\n')
+                    .join(
+                        "goog.module('goog.foo');",
+                        "/** Trivial function. \n",
+                        " * @return {string}",
+                        " */",
+                        "exports.f = function () { ",
+                        "  return 'str';",
+                        "};"),
+                "foo.js")
+            .build();
+    List<SuggestedFix> fixes = driver.drive(scanner);
+    ImmutableList<ImmutableMap<String, String>> outputChoices =
+        ApplySuggestedFixes.applyAllSuggestedFixChoicesToCode(
+            fixes, ImmutableMap.of("input", originalCode));
+    assertThat(outputChoices).hasSize(expectedChoices.length);
+
+    for (int i = 0; i < outputChoices.size(); i++) {
+      assertEquals("Choice " + i, expectedChoices[i], outputChoices.get(i).get("input"));
+    }
   }
 }

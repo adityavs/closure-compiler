@@ -38,6 +38,8 @@
 
 package com.google.javascript.rhino;
 
+import static com.google.common.truth.Truth.assertThat;
+
 import com.google.javascript.rhino.Node.NodeMismatch;
 import com.google.javascript.rhino.jstype.JSTypeNative;
 import com.google.javascript.rhino.jstype.JSTypeRegistry;
@@ -66,36 +68,36 @@ public class NodeTest extends TestCase {
   }
 
   public void testCheckTreeEqualsImplSame() {
-    Node node1 = new Node(1, new Node(2));
-    Node node2 = new Node(1, new Node(2));
+    Node node1 = new Node(Token.LET, new Node(Token.VAR));
+    Node node2 = new Node(Token.LET, new Node(Token.VAR));
     assertEquals(null, node1.checkTreeEqualsImpl(node2));
   }
 
   public void testCheckTreeEqualsImplDifferentType() {
-    Node node1 = new Node(1, new Node(2));
-    Node node2 = new Node(2, new Node(2));
+    Node node1 = new Node(Token.LET, new Node(Token.VAR));
+    Node node2 = new Node(Token.VAR, new Node(Token.VAR));
     assertEquals(new NodeMismatch(node1, node2),
         node1.checkTreeEqualsImpl(node2));
   }
 
   public void testCheckTreeEqualsImplDifferentChildCount() {
-    Node node1 = new Node(1, new Node(2));
-    Node node2 = new Node(1);
+    Node node1 = new Node(Token.LET, new Node(Token.VAR));
+    Node node2 = new Node(Token.LET);
     assertEquals(new NodeMismatch(node1, node2),
         node1.checkTreeEqualsImpl(node2));
   }
 
   public void testCheckTreeEqualsImplDifferentChild() {
-    Node child1 = new Node(1);
-    Node child2 = new Node(2);
-    Node node1 = new Node(1, child1);
-    Node node2 = new Node(1, child2);
+    Node child1 = new Node(Token.LET);
+    Node child2 = new Node(Token.VAR);
+    Node node1 = new Node(Token.LET, child1);
+    Node node2 = new Node(Token.LET, child2);
     assertEquals(new NodeMismatch(child1, child2),
         node1.checkTreeEqualsImpl(node2));
   }
 
   public void testCheckTreeEqualsSame() {
-    Node node1 = new Node(1);
+    Node node1 = new Node(Token.LET);
     assertEquals(null, node1.checkTreeEquals(node1));
   }
 
@@ -106,13 +108,13 @@ public class NodeTest extends TestCase {
   }
 
   public void testCheckTreeEqualsBooleanSame() {
-    Node node1 = new Node(1);
+    Node node1 = new Node(Token.LET);
     assertEquals(true, node1.isEquivalentTo(node1));
   }
 
   public void testCheckTreeEqualsBooleanDifferent() {
-    Node node1 = new Node(1);
-    Node node2 = new Node(2);
+    Node node1 = new Node(Token.LET);
+    Node node2 = new Node(Token.VAR);
     assertEquals(false, node1.isEquivalentTo(node2));
   }
 
@@ -125,7 +127,7 @@ public class NodeTest extends TestCase {
 
   public void testCheckTreeEqualsImplDifferentIncProp() {
     Node node1 = new Node(Token.INC);
-    node1.putIntProp(Node.INCRDECR_PROP, 1);
+    node1.putBooleanProp(Node.INCRDECR_PROP, true);
     Node node2 = new Node(Token.INC);
     assertNotNull(node1.checkTreeEqualsImpl(node2));
   }
@@ -166,17 +168,17 @@ public class NodeTest extends TestCase {
   }
 
   public void testVarArgs1() {
-    assertFalse(new Node(1).isVarArgs());
+    assertFalse(new Node(Token.LET).isVarArgs());
   }
 
   public void testVarArgs2() {
-    Node n = new Node(1);
+    Node n = new Node(Token.LET);
     n.setVarArgs(false);
     assertFalse(n.isVarArgs());
   }
 
   public void testVarArgs3() {
-    Node n = new Node(1);
+    Node n = new Node(Token.LET);
     n.setVarArgs(true);
     assertTrue(n.isVarArgs());
   }
@@ -191,21 +193,21 @@ public class NodeTest extends TestCase {
     assertTrue(IR.name("a").isQualifiedName());
     assertTrue(IR.name("$").isQualifiedName());
     assertTrue(IR.name("_").isQualifiedName());
-    assertTrue(IR.getprop(IR.name("a"),IR.string("b")).isQualifiedName());
-    assertTrue(IR.getprop(IR.thisNode(),IR.string("b")).isQualifiedName());
+    assertTrue(IR.getprop(IR.name("a"), IR.string("b")).isQualifiedName());
+    assertTrue(IR.getprop(IR.thisNode(), IR.string("b")).isQualifiedName());
     assertFalse(IR.number(0).isQualifiedName());
     assertFalse(IR.arraylit().isQualifiedName());
     assertFalse(IR.objectlit().isQualifiedName());
     assertFalse(IR.string("").isQualifiedName());
-    assertFalse(IR.getelem(IR.name("a"),IR.string("b")).isQualifiedName());
+    assertFalse(IR.getelem(IR.name("a"), IR.string("b")).isQualifiedName());
     assertFalse( // a[b].c
         IR.getprop(
-            IR.getelem(IR.name("a"),IR.string("b")),
+            IR.getelem(IR.name("a"), IR.string("b")),
             IR.string("c"))
             .isQualifiedName());
     assertFalse( // a.b[c]
         IR.getelem(
-            IR.getprop(IR.name("a"),IR.string("b")),
+            IR.getprop(IR.name("a"), IR.string("b")),
             IR.string("c"))
             .isQualifiedName());
     assertFalse(IR.call(IR.name("a")).isQualifiedName());
@@ -216,7 +218,7 @@ public class NodeTest extends TestCase {
         .isQualifiedName());
     assertFalse( // (a.b)()
         IR.call(
-            IR.getprop(IR.name("a"),IR.string("b")))
+            IR.getprop(IR.name("a"), IR.string("b")))
         .isQualifiedName());
     assertFalse(IR.string("a").isQualifiedName());
     assertFalse(IR.regexp(IR.string("x")).isQualifiedName());
@@ -262,12 +264,12 @@ public class NodeTest extends TestCase {
         IR.string("b")).matchesQualifiedName("a.b"));
     assertFalse( // a[b].c
         IR.getprop(
-            IR.getelem(IR.name("a"),IR.string("b")),
+            IR.getelem(IR.name("a"), IR.string("b")),
             IR.string("c"))
             .matchesQualifiedName("a.b.c"));
     assertFalse( // a.b[c]
         IR.getelem(
-            IR.getprop(IR.name("a"),IR.string("b")),
+            IR.getprop(IR.name("a"), IR.string("b")),
             IR.string("c"))
             .matchesQualifiedName("a.b.c"));
     assertFalse(IR.call(IR.name("a")).matchesQualifiedName("a"));
@@ -278,7 +280,7 @@ public class NodeTest extends TestCase {
         .matchesQualifiedName("a.b"));
     assertFalse( // (a.b)()
         IR.call(
-            IR.getprop(IR.name("a"),IR.string("b")))
+            IR.getprop(IR.name("a"), IR.string("b")))
         .matchesQualifiedName("a.b"));
     assertFalse(IR.string("a").matchesQualifiedName("a"));
     assertFalse(IR.regexp(IR.string("x")).matchesQualifiedName("x"));
@@ -311,12 +313,12 @@ public class NodeTest extends TestCase {
         IR.string("b")).matchesQualifiedName(qname("a.b")));
     assertFalse( // a[b].c
         IR.getprop(
-            IR.getelem(IR.name("a"),IR.string("b")),
+            IR.getelem(IR.name("a"), IR.string("b")),
             IR.string("c"))
             .matchesQualifiedName(qname("a.b.c")));
     assertFalse( // a.b[c]
         IR.getelem(
-            IR.getprop(IR.name("a"),IR.string("b")),
+            IR.getprop(IR.name("a"), IR.string("b")),
             IR.string("c"))
             .matchesQualifiedName("a.b.c"));
     assertFalse(IR.call(IR.name("a")).matchesQualifiedName(qname("a")));
@@ -327,7 +329,7 @@ public class NodeTest extends TestCase {
         .matchesQualifiedName(qname("a.b")));
     assertFalse( // (a.b)()
         IR.call(
-            IR.getprop(IR.name("a"),IR.string("b")))
+            IR.getprop(IR.name("a"), IR.string("b")))
         .matchesQualifiedName(qname("a.b")));
     assertFalse(IR.string("a").matchesQualifiedName(qname("a")));
     assertFalse(IR.regexp(IR.string("x")).matchesQualifiedName(qname("x")));
@@ -363,12 +365,14 @@ public class NodeTest extends TestCase {
 
   public void testCloneAnnontations() {
     Node n = getVarRef("a");
+    n.setLength(1);
     assertFalse(n.getBooleanProp(Node.IS_CONSTANT_NAME));
     n.putBooleanProp(Node.IS_CONSTANT_NAME, true);
     assertTrue(n.getBooleanProp(Node.IS_CONSTANT_NAME));
 
     Node nodeClone = n.cloneNode();
     assertTrue(nodeClone.getBooleanProp(Node.IS_CONSTANT_NAME));
+    assertThat(nodeClone.getLength()).isEqualTo(1);
   }
 
   public void testSharedProps1() {
@@ -401,7 +405,7 @@ public class NodeTest extends TestCase {
   public void testSharedProps3() {
     Node n = getVarRef("A");
     n.putIntProp(Node.SIDE_EFFECT_FLAGS, 2);
-    n.putIntProp(Node.INCRDECR_PROP, 3);
+    n.putBooleanProp(Node.INCRDECR_PROP, true);
     Node m = new Node(Token.TRUE);
     m.clonePropsFrom(n);
 
@@ -444,7 +448,7 @@ public class NodeTest extends TestCase {
   }
 
   public void testGetIndexOfChild() {
-    Node assign = getAssignExpr("b","c");
+    Node assign = getAssignExpr("b", "c");
     assertEquals(2, assign.getChildCount());
 
     Node firstChild = assign.getFirstChild();
@@ -456,25 +460,8 @@ public class NodeTest extends TestCase {
     assertEquals(-1, assign.getIndexOfChild(assign));
   }
 
-  public void testCopyInformationFrom() {
-    Node assign = getAssignExpr("b","c");
-    assign.setSourceEncodedPosition(99);
-    assign.setSourceFileForTesting("foo.js");
-
-    Node lhs = assign.getFirstChild();
-    lhs.copyInformationFrom(assign);
-    assertEquals(99, lhs.getSourcePosition());
-    assertEquals("foo.js", lhs.getSourceFileName());
-
-    assign.setSourceEncodedPosition(101);
-    assign.setSourceFileForTesting("bar.js");
-    lhs.copyInformationFrom(assign);
-    assertEquals(99, lhs.getSourcePosition());
-    assertEquals("foo.js", lhs.getSourceFileName());
-  }
-
   public void testUseSourceInfoIfMissingFrom() {
-    Node assign = getAssignExpr("b","c");
+    Node assign = getAssignExpr("b", "c");
     assign.setSourceEncodedPosition(99);
     assign.setSourceFileForTesting("foo.js");
 
@@ -491,7 +478,7 @@ public class NodeTest extends TestCase {
   }
 
   public void testUseSourceInfoFrom() {
-    Node assign = getAssignExpr("b","c");
+    Node assign = getAssignExpr("b", "c");
     assign.setSourceEncodedPosition(99);
     assign.setSourceFileForTesting("foo.js");
 
@@ -526,6 +513,86 @@ public class NodeTest extends TestCase {
         "this.b", IR.getprop(IR.thisNode(), IR.string("b")).getQualifiedName());
     assertNull(
         IR.getprop(IR.call(IR.name("a")), IR.string("b")).getQualifiedName());
+  }
+
+  public void testJSDocInfoClone() {
+    Node original = IR.var(IR.name("varName"));
+    JSDocInfoBuilder builder = new JSDocInfoBuilder(false);
+    builder.recordType(new JSTypeExpression(IR.name("TypeName"), "blah"));
+    JSDocInfo info = builder.build();
+    original.getFirstChild().setJSDocInfo(info);
+
+    // By default the JSDocInfo and JSTypeExpression objects are not cloned
+    Node clone = original.cloneTree();
+    assertSame(original.getFirstChild().getJSDocInfo(), clone.getFirstChild().getJSDocInfo());
+    assertSame(
+        original.getFirstChild().getJSDocInfo().getType(),
+        clone.getFirstChild().getJSDocInfo().getType());
+    assertSame(
+        original.getFirstChild().getJSDocInfo().getType().getRoot(),
+        clone.getFirstChild().getJSDocInfo().getType().getRoot());
+
+    // If requested the JSDocInfo and JSTypeExpression objects are cloned.
+    // This is required because compiler classes are modifying the type expressions in place
+    clone = original.cloneTree(true);
+    assertNotSame(original.getFirstChild().getJSDocInfo(), clone.getFirstChild().getJSDocInfo());
+    assertNotSame(
+        original.getFirstChild().getJSDocInfo().getType(),
+        clone.getFirstChild().getJSDocInfo().getType());
+    assertNotSame(
+        original.getFirstChild().getJSDocInfo().getType().getRoot(),
+        clone.getFirstChild().getJSDocInfo().getType().getRoot());
+  }
+
+  public void testAddChildToFrontWithSingleNode() {
+    Node root = new Node(Token.SCRIPT);
+    Node nodeToAdd = new Node(Token.SCRIPT);
+
+    root.addChildToFront(nodeToAdd);
+
+    assertEquals(root, nodeToAdd.parent);
+    assertEquals(root.getFirstChild(), nodeToAdd);
+    assertEquals(root.getLastChild(), nodeToAdd);
+    assertEquals(nodeToAdd.previous, nodeToAdd);
+    assertNull(nodeToAdd.next);
+  }
+
+  public void testAddChildToFrontWithLargerTree() {
+    Node left = Node.newString("left");
+    Node m1 = Node.newString("m1");
+    Node m2 = Node.newString("m2");
+    Node right = Node.newString("right");
+    Node root = new Node(Token.SCRIPT, left, m1, m2, right);
+    Node nodeToAdd = new Node(Token.SCRIPT);
+
+    root.addChildToFront(nodeToAdd);
+
+    assertEquals(root, nodeToAdd.parent);
+    assertEquals(root.getFirstChild(), nodeToAdd);
+    assertEquals(root.getLastChild(), right);
+    assertEquals(nodeToAdd.previous, root.getLastChild());
+    assertEquals(left, nodeToAdd.next);
+    assertEquals(nodeToAdd, left.previous);
+  }
+
+  public void testDetach1() {
+    Node left = Node.newString("left");
+    Node mid = Node.newString("mid");
+    Node right = Node.newString("right");
+    Node root = new Node(Token.SCRIPT, left, mid, right);
+
+    assertEquals(root, mid.parent);
+    assertEquals(left, mid.previous);
+    assertEquals(right, mid.next);
+
+    mid.detach();
+
+    assertNull(mid.parent);
+    assertNull(mid.previous);
+    assertNull(mid.next);
+
+    assertEquals(left, right.getPrevious());
+    assertEquals(right, left.getNext());
   }
 
   private static Node getVarRef(String name) {

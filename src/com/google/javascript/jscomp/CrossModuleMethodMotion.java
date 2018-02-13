@@ -21,8 +21,6 @@ import com.google.javascript.jscomp.AnalyzePrototypeProperties.Property;
 import com.google.javascript.jscomp.AnalyzePrototypeProperties.Symbol;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-
-import java.io.Serializable;
 import java.util.Collection;
 import java.util.Iterator;
 
@@ -76,8 +74,9 @@ class CrossModuleMethodMotion implements CompilerPass {
     this.compiler = compiler;
     this.idGenerator = idGenerator;
     this.moduleGraph = compiler.getModuleGraph();
-    this.analyzer = new AnalyzePrototypeProperties(compiler, moduleGraph,
-        canModifyExterns, false);
+    this.analyzer =
+        new AnalyzePrototypeProperties(
+            compiler, moduleGraph, canModifyExterns, false /* anchorUnusedVars */, noStubFunctions);
     this.noStubFunctions = noStubFunctions;
   }
 
@@ -161,6 +160,16 @@ class CrossModuleMethodMotion implements CompilerPass {
           }
 
           Node valueParent = value.getParent();
+          /**
+           * The logic here moves methods from some starting script node to some other script node.
+           * Both scripts need to be marked as changed. Locally the removal point in the starting
+           * script node is called 'valueParent' and the insertion point in the destination script
+           * is sometimes called 'unstubParent' and sometimes 'destParent'. The change on
+           * 'valueParent' is being reported before the change occurs since the change is guaranteed
+           * to occur and since after the change the 'valueParent' node has sometimes already been
+           * detached.
+           */
+          compiler.reportChangeToEnclosingScope(valueParent);
           Node proto = prop.getPrototype();
           int stubId = idGenerator.newId();
 
@@ -169,7 +178,7 @@ class CrossModuleMethodMotion implements CompilerPass {
             Node stubCall = IR.call(
                 IR.name(STUB_METHOD_NAME),
                 IR.number(stubId))
-                .copyInformationFromForTree(value);
+                .useSourceInfoIfMissingFromForTree(value);
             stubCall.putBooleanProp(Node.FREE_CALL, true);
 
             // stub out the method in the original module
@@ -192,14 +201,14 @@ class CrossModuleMethodMotion implements CompilerPass {
                             proto.cloneTree(),
                             IR.string(nameInfo.name)),
                         unstubCall))
-                    .copyInformationFromForTree(value));
+                    .useSourceInfoIfMissingFromForTree(value));
 
-            compiler.reportCodeChange();
+            compiler.reportChangeToEnclosingScope(unstubParent);
           } else {
             Node assignmentParent = valueParent.getParent();
             valueParent.removeChild(value);
             // remove Foo.prototype.bar = value
-            assignmentParent.getParent().removeChild(assignmentParent);
+            assignmentParent.detach();
 
             Node destParent = compiler.getNodeForCodeInsertion(
                 deepestCommonModuleRef);
@@ -211,8 +220,8 @@ class CrossModuleMethodMotion implements CompilerPass {
                             proto.cloneTree(),
                             IR.string(nameInfo.name)),
                         value))
-                    .copyInformationFromForTree(value));
-            compiler.reportCodeChange();
+                    .useSourceInfoIfMissingFromForTree(value));
+            compiler.reportChangeToEnclosingScope(destParent);
           }
         }
       }
@@ -222,8 +231,10 @@ class CrossModuleMethodMotion implements CompilerPass {
         .hasGeneratedAnyIds()) {
       // Declare stub functions in the top-most module.
       Node declarations = compiler.parseSyntheticCode(STUB_DECLARATIONS);
-      compiler.getNodeForCodeInsertion(null).addChildrenToFront(
-          declarations.removeChildren());
+      NodeUtil.markNewScopesChanged(declarations, compiler);
+      Node firstScript = compiler.getNodeForCodeInsertion(null);
+      firstScript.addChildrenToFront(declarations.removeChildren());
+      compiler.reportChangeToEnclosingScope(firstScript);
     }
   }
 
@@ -243,29 +254,5 @@ class CrossModuleMethodMotion implements CompilerPass {
       }
     }
     return false;
-  }
-
-  static class IdGenerator implements Serializable {
-    private static final long serialVersionUID = 0L;
-
-    /**
-     * Ids for cross-module method stubbing, so that each method has
-     * a unique id.
-     */
-    private int currentId = 0;
-
-    /**
-     * Returns whether we've generated any new ids.
-     */
-    boolean hasGeneratedAnyIds() {
-      return currentId != 0;
-    }
-
-    /**
-     * Creates a new id for stubbing a method.
-     */
-    int newId() {
-      return currentId++;
-    }
   }
 }

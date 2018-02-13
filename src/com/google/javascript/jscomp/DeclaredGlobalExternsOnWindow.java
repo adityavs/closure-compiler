@@ -21,17 +21,15 @@ import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.JSDocInfoBuilder;
 import com.google.javascript.rhino.Node;
-
 import java.util.LinkedHashSet;
 import java.util.Set;
 
 /**
  * A compiler pass to normalize externs by declaring global names on
  * the "window" object, if it is declared in externs.
+ * The new declarations are added to the window instance, not to Window.prototype.
  */
-class DeclaredGlobalExternsOnWindow
-    extends NodeTraversal.AbstractShallowStatementCallback
-    implements CompilerPass {
+class DeclaredGlobalExternsOnWindow implements CompilerPass, NodeTraversal.Callback {
 
   private final AbstractCompiler compiler;
   private final Set<Node> nodes = new LinkedHashSet<>();
@@ -45,7 +43,7 @@ class DeclaredGlobalExternsOnWindow
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, externs, this);
+    NodeTraversal.traverseEs6(compiler, externs, this);
     addWindowProperties();
   }
 
@@ -53,26 +51,27 @@ class DeclaredGlobalExternsOnWindow
     if (!nodes.isEmpty() && windowInExterns) {
       for (Node node : nodes) {
         addExtern(node);
+        compiler.reportChangeToEnclosingScope(node);
       }
-      compiler.reportCodeChange();
     }
   }
 
-  private void addExtern(Node node) {
+  private static void addExtern(Node node) {
     String name = node.getString();
     JSDocInfo oldJSDocInfo = NodeUtil.getBestJSDocInfo(node);
 
-    // TODO(tbreisacher): Consider adding externs to 'this' instead of the
-    // Window prototype, for environments where Window is not in the externs.
-    Node getprop = NodeUtil.newQName(compiler, "Window.prototype." + name);
+    // TODO(tbreisacher): Consider adding externs to 'this' instead of 'window',
+    // for environments where the global object is not called 'window.'
+    Node window = IR.name("window");
+    Node string = IR.string(name);
+    Node getprop = IR.getprop(window, string);
     Node newNode = getprop;
 
     if (oldJSDocInfo != null) {
       JSDocInfoBuilder builder;
 
-      if (oldJSDocInfo.isConstructor() || oldJSDocInfo.isInterface()
-          || oldJSDocInfo.hasEnumParameterType()
-          || NodeUtil.isNamespaceDecl(node)) {
+      if (oldJSDocInfo.isConstructorOrInterface()
+          || oldJSDocInfo.hasEnumParameterType()) {
         Node nameNode = IR.name(name);
         newNode = IR.assign(getprop, nameNode);
 
@@ -90,29 +89,52 @@ class DeclaredGlobalExternsOnWindow
           builder.recordEnumParameterType(oldJSDocInfo.getEnumParameterType());
         }
       } else {
+        if (NodeUtil.isNamespaceDecl(node)) {
+          newNode = IR.assign(getprop, IR.name(name));
+        } else {
+          Node rhs = NodeUtil.getRValueOfLValue(node);
+          // Type-aliasing definition
+          if (oldJSDocInfo.hasConstAnnotation() && rhs != null && rhs.isQualifiedName()) {
+            newNode = IR.assign(getprop, rhs.cloneTree());
+          }
+        }
         builder = JSDocInfoBuilder.copyFrom(oldJSDocInfo);
       }
 
-      builder.recordSuppressions(ImmutableSet.of("duplicate"));
+      // TODO(blickly): Remove these suppressions when all externs declarations on window are gone.
+      builder.recordSuppressions(ImmutableSet.of("const", "duplicate"));
       JSDocInfo jsDocInfo = builder.build();
       newNode.setJSDocInfo(jsDocInfo);
     }
 
-    NodeUtil.setDebugInformation(newNode, node, name);
-    node.getParent().getParent().addChildToBack(IR.exprResult(newNode));
+    newNode.useSourceInfoFromForTree(node);
+    newNode.setOriginalName(name);
+    node.getGrandparent().addChildToBack(IR.exprResult(newNode));
+  }
+
+  @Override
+  public boolean shouldTraverse(NodeTraversal nodeTraversal, Node n, Node parent) {
+    if (parent != null
+        && !NodeUtil.isControlStructure(parent)
+        && !NodeUtil.isStatementBlock(parent)) {
+      return false;
+    }
+    if (n.isScript() && NodeUtil.isFromTypeSummary(n)) {
+      return false;
+    }
+    return true;
   }
 
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
     if (n.isFunction()) {
-      Node name = n.getFirstChild();
-      if (!windowInExterns && name.getString().equals("Window")) {
-        windowInExterns = true;
-        return;
-      }
-      nodes.add(name);
+      nodes.add(n.getFirstChild());
     } else if (n.isVar()) {
       for (Node c : n.children()) {
+        if (c.getString().equals("window")) {
+          windowInExterns = true;
+          continue;
+        }
         // Skip 'location' since there is an existing definition
         // for window.location which conflicts with the "var location" one.
         if (!c.getString().equals("location")) {

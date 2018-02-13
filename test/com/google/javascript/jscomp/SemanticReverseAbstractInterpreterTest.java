@@ -33,15 +33,15 @@ public final class SemanticReverseAbstractInterpreterTest
   private TypedScope functionScope;
 
   @Override
-  protected void setUp() {
+  protected void setUp() throws Exception {
     super.setUp();
 
     interpreter = new SemanticReverseAbstractInterpreter(registry);
   }
 
   public FlowScope newScope() {
-    TypedScope globalScope = TypedScope.createGlobalScope(new Node(Token.EMPTY));
-    functionScope = new TypedScope(globalScope, new Node(Token.EMPTY));
+    TypedScope globalScope = TypedScope.createGlobalScope(new Node(Token.ROOT));
+    functionScope = new TypedScope(globalScope, new Node(Token.FUNCTION));
     return LinkedFlowScope.createEntryLattice(functionScope);
   }
 
@@ -357,7 +357,7 @@ public final class SemanticReverseAbstractInterpreterTest
    */
   @SuppressWarnings("unchecked")
   public void testInequalitiesCondition1() {
-    for (int op : Arrays.asList(Token.LT, Token.GT, Token.LE, Token.GE)) {
+    for (Token op : Arrays.asList(Token.LT, Token.GT, Token.LE, Token.GE)) {
       FlowScope blind = newScope();
       testBinop(blind,
           op,
@@ -376,7 +376,7 @@ public final class SemanticReverseAbstractInterpreterTest
    */
   @SuppressWarnings("unchecked")
   public void testInequalitiesCondition2() {
-    for (int op : Arrays.asList(Token.LT, Token.GT, Token.LE, Token.GE)) {
+    for (Token op : Arrays.asList(Token.LT, Token.GT, Token.LE, Token.GE)) {
       FlowScope blind = newScope();
       testBinop(blind,
           op,
@@ -403,7 +403,7 @@ public final class SemanticReverseAbstractInterpreterTest
    */
   @SuppressWarnings("unchecked")
   public void testInequalitiesCondition3() {
-    for (int op : Arrays.asList(Token.LT, Token.GT, Token.LE, Token.GE)) {
+    for (Token op : Arrays.asList(Token.LT, Token.GT, Token.LE, Token.GE)) {
       FlowScope blind = newScope();
       testBinop(blind,
           op,
@@ -545,7 +545,7 @@ public final class SemanticReverseAbstractInterpreterTest
             new TypedName("s", STRING_OBJECT_FUNCTION_TYPE)));
   }
 
-  private void testBinop(FlowScope blind, int binop, Node left, Node right,
+  private void testBinop(FlowScope blind, Token binop, Node left, Node right,
       Collection<TypedName> trueOutcome,
       Collection<TypedName> falseOutcome) {
     Node condition = new Node(binop);

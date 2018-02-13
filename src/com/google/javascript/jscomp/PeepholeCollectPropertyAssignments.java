@@ -16,10 +16,10 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
 
 /**
  * A pass that looks for assignments to properties of an object or array
@@ -28,12 +28,13 @@ import com.google.javascript.rhino.Token;
  * E.g. {@code var a = [];a[0] = 0} is optimized to {@code var a = [0]} and
  * similarly for the object constructor.
  *
+ * @author msamuel@google.com (Mike Samuel)
  */
 final class PeepholeCollectPropertyAssignments extends AbstractPeepholeOptimization {
 
   @Override
   Node optimizeSubtree(Node subtree) {
-    if (!subtree.isScript() && !subtree.isBlock()) {
+    if (!subtree.isScript() && !subtree.isNormalBlock()) {
       return subtree;
     }
 
@@ -51,7 +52,7 @@ final class PeepholeCollectPropertyAssignments extends AbstractPeepholeOptimizat
         continue;
       }
 
-      Preconditions.checkState(child.hasOneChild());
+      checkState(child.hasOneChild());
       Node name = getName(child);
       if (!name.isName()) {
         // The assignment target is not a simple name.
@@ -75,7 +76,7 @@ final class PeepholeCollectPropertyAssignments extends AbstractPeepholeOptimizat
     }
 
     if (codeChanged) {
-      reportCodeChange();
+      compiler.reportChangeToEnclosingScope(subtree);
     }
     return subtree;
   }
@@ -84,14 +85,14 @@ final class PeepholeCollectPropertyAssignments extends AbstractPeepholeOptimizat
     if (n.isVar()) {
       return n.getFirstChild();
     } else if (NodeUtil.isExprAssign(n)) {
-      return n.getFirstChild().getFirstChild();
+      return n.getFirstFirstChild();
     }
     throw new IllegalStateException();
   }
 
   private static Node getValue(Node n) {
     if (n.isVar()) {
-      return n.getFirstChild().getFirstChild();
+      return n.getFirstFirstChild();
     } else if (NodeUtil.isExprAssign(n)) {
       return n.getFirstChild().getLastChild();
     }
@@ -128,7 +129,7 @@ final class PeepholeCollectPropertyAssignments extends AbstractPeepholeOptimizat
       return false;
     }
 
-    Node lhs = propertyCandidate.getFirstChild().getFirstChild();
+    Node lhs = propertyCandidate.getFirstFirstChild();
     // Must be an assignment to the recent variable...
     if (!name.equals(lhs.getFirstChild().getString())) {
       return false;
@@ -146,13 +147,13 @@ final class PeepholeCollectPropertyAssignments extends AbstractPeepholeOptimizat
       return false;
     }
 
-    switch (value.getType()) {
-      case Token.ARRAYLIT:
+    switch (value.getToken()) {
+      case ARRAYLIT:
         if (!collectArrayProperty(value, propertyCandidate)) {
           return false;
         }
         break;
-      case Token.OBJECTLIT:
+      case OBJECTLIT:
         if (!collectObjectProperty(value, propertyCandidate)) {
           return false;
         }
@@ -205,7 +206,7 @@ final class PeepholeCollectPropertyAssignments extends AbstractPeepholeOptimizat
         arrayLiteral.addChildToBack(emptyNode);
         ++maxIndexAssigned;
       }
-      arrayLiteral.addChildToBack(rhs.detachFromParent());
+      arrayLiteral.addChildToBack(rhs.detach());
     } else {
       // An out of order assignment.  Allow it if it's a hole.
       Node currentValue = arrayLiteral.getChildAtIndex(index);
@@ -213,17 +214,18 @@ final class PeepholeCollectPropertyAssignments extends AbstractPeepholeOptimizat
         // We've already collected a value for this index.
         return false;
       }
-      arrayLiteral.replaceChild(currentValue, rhs.detachFromParent());
+      arrayLiteral.replaceChild(currentValue, rhs.detach());
     }
 
-    propertyCandidate.detachFromParent();
+    propertyCandidate.detach();
     return true;
   }
 
   private static boolean collectObjectProperty(
       Node objectLiteral, Node propertyCandidate) {
     Node assignment = propertyCandidate.getFirstChild();
-    Node lhs = assignment.getFirstChild(), rhs = lhs.getNext();
+    Node lhs = assignment.getFirstChild();
+    Node rhs = lhs.getNext();
     Node obj = lhs.getFirstChild();
     Node property = obj.getNext();
 
@@ -241,17 +243,9 @@ final class PeepholeCollectPropertyAssignments extends AbstractPeepholeOptimizat
       propertyName = property.getString();
     }
 
-    Node newProperty = IR.stringKey(propertyName)
-        .copyInformationFrom(property);
-    // Preserve the quotedness of a property reference
-    if (lhs.isGetElem()) {
-      newProperty.setQuotedString();
-    }
-    Node newValue = rhs.detachFromParent();
-    newProperty.addChildToBack(newValue);
     // Check if the new property already exists in the object literal
     // Note: Duplicate keys are invalid in strict mode
-    boolean propertyExists = false;
+    Node existingProperty = null;
     for (Node currentProperty : objectLiteral.children()) {
       // Get the name of the current property
       String currentPropertyName = currentProperty.getString();
@@ -259,26 +253,34 @@ final class PeepholeCollectPropertyAssignments extends AbstractPeepholeOptimizat
       Node currentValue = currentProperty.getFirstChild();
       // Compare the current property name with the new property name
       if (currentPropertyName.equals(propertyName)) {
-        propertyExists = true;
+        existingProperty = currentProperty;
         // Check if the current value and the new value are side-effect
         boolean isCurrentValueSideEffect = NodeUtil.canBeSideEffected(currentValue);
-        boolean isNewValueSideEffect = NodeUtil.canBeSideEffected(newValue);
+        boolean isNewValueSideEffect = NodeUtil.canBeSideEffected(rhs);
         // If they are side-effect free then replace the current value with the new one
-        if (!isCurrentValueSideEffect && !isNewValueSideEffect) {
-          objectLiteral.removeChild(currentProperty);
-          objectLiteral.addChildToBack(newProperty);
-          propertyCandidate.detachFromParent();
-          return true;
+        if (isCurrentValueSideEffect || isNewValueSideEffect) {
+          return false;
         }
         // Break the loop if the property exists
         break;
       }
     }
-    // If the property does not already exist we can safely add it
-    if (!propertyExists) {
-      objectLiteral.addChildToBack(newProperty);
+
+    Node newProperty = IR.stringKey(propertyName)
+        .useSourceInfoIfMissingFrom(property);
+    // Preserve the quotedness of a property reference
+    if (lhs.isGetElem()) {
+      newProperty.setQuotedString();
     }
-    propertyCandidate.detachFromParent();
+    Node newValue = rhs.detach();
+    newProperty.addChildToBack(newValue);
+
+    if (existingProperty != null) {
+       objectLiteral.removeChild(existingProperty);
+    }
+    // If the property does not already exist we can safely add it
+    objectLiteral.addChildToBack(newProperty);
+    propertyCandidate.detach();
     return true;
   }
 

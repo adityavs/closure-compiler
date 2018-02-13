@@ -15,25 +15,21 @@
  */
 
 /**
- * @fileoverview Externs for v1_3 ngMock angular-mocks.js.
+ * @fileoverview Externs for v1_4 ngMock angular-mocks.js.
  * @externs
  *
  * TODO: Remaining Mocks:
  *     $browser
  *     $exceptionHandler
  *     $log
- *     $internal
  *     angular.mock.TzDate
- *     angular.mock.animate
  *     angular.mock.dump
- *     $TimeoutDecorator
  *     $RAFDecorator
  *     $AsyncCallbackDecorator
  *     $RootElementProvider
  *     $httpBackendDecorator
  *     $RootScopeDecorator
  *     angular.mock.module
- *     angular.mock.inject
  */
 
 angular.mock = {};
@@ -60,6 +56,10 @@ angular.mock.$httpBackend.RequestHandler = function() {};
 angular.mock.$httpBackend.RequestHandler.prototype.respond = function(
     statusOrDataOrFunction, opt_dataOrHeaders, opt_headersOrStatusText,
     opt_statusText) {};
+
+
+/** @return {!angular.mock.$httpBackend.RequestHandler} */
+angular.mock.$httpBackend.RequestHandler.prototype.passThrough = function() {};
 
 
 /**
@@ -225,3 +225,43 @@ angular.mock.$httpBackend.prototype.verifyNoOutstandingRequest = function() {};
 
 /** @return {void} */
 angular.mock.$httpBackend.prototype.resetExpectations = function() {};
+
+/** @constructor */
+angular.mock.$interval = function() {};
+
+/**
+ * @param {!angular.$q.Promise} promise
+ * @return {boolean}
+ */
+angular.mock.$interval.prototype.cancel = function(promise) {};
+
+/**
+ * @param {number=} opt_millis
+ * @return {number}
+ */
+angular.mock.$interval.prototype.flush = function(opt_millis) {};
+
+/** @constructor */
+angular.mock.$TimeoutDecorator = function() {};
+
+
+/** @param {number=} opt_delay */
+angular.mock.$TimeoutDecorator.prototype.flush = function(opt_delay) {};
+
+
+angular.mock.$TimeoutDecorator.prototype.verifyNoPendingTasks = function() {};
+
+
+/** @constructor */
+angular.mock.animate = function() {};
+
+
+angular.mock.animate.prototype.flush = function() {};
+
+
+/** @typedef {function((!Function|string), !Object, Object=): !Object} */
+angular.mock.$controller;
+
+
+/** @param {!Array|!Function} injectable */
+angular.mock.inject = function(injectable) {};

@@ -16,15 +16,14 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.Reference;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.ReferenceCollection;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.ReferenceMap;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.rhino.InputId;
 import com.google.javascript.rhino.Node;
-
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -77,7 +76,7 @@ class GlobalVarReferenceMap implements ReferenceMap {
    */
   private void resetGlobalVarReferences(
       Map<Var, ReferenceCollection> globalRefMap) {
-    refMap = new HashMap<>();
+    refMap = new LinkedHashMap<>();
     for (Entry<Var, ReferenceCollection> entry : globalRefMap.entrySet()) {
       Var var = entry.getKey();
       if (var.isGlobal()) {
@@ -105,7 +104,7 @@ class GlobalVarReferenceMap implements ReferenceMap {
     }
 
     InputId inputId = root.getInputId();
-    Preconditions.checkNotNull(inputId);
+    checkNotNull(inputId);
     // Note there are two assumptions here (i) the order of compiler inputs
     // has not changed and (ii) all references are in the order they appear
     // in AST (this is enforced in ReferenceCollectionCallback).
@@ -119,7 +118,7 @@ class GlobalVarReferenceMap implements ReferenceMap {
   }
 
   private void removeScriptReferences(InputId inputId) {
-    Preconditions.checkNotNull(inputId);
+    checkNotNull(inputId);
 
     if (!inputOrder.containsKey(inputId)) {
       return; // Input did not exist when last computed, so skip
@@ -163,7 +162,7 @@ class GlobalVarReferenceMap implements ReferenceMap {
    */
   private SourceRefRange findSourceRefRange(List<Reference> refList,
       InputId inputId) {
-    Preconditions.checkNotNull(inputId);
+    checkNotNull(inputId);
 
     // TODO(bashir): We can do binary search here, but since this is fast enough
     // right now, we just do a linear search for simplicity.
@@ -171,10 +170,10 @@ class GlobalVarReferenceMap implements ReferenceMap {
     int firstAfter = refList.size();
     int index = 0;
 
-    Preconditions.checkState(inputOrder.containsKey(inputId), inputId.getIdName());
+    checkState(inputOrder.containsKey(inputId), inputId.getIdName());
     int sourceInputOrder = inputOrder.get(inputId);
     for (Reference ref : refList) {
-      Preconditions.checkNotNull(ref.getInputId());
+      checkNotNull(ref.getInputId());
       int order = inputOrder.get(ref.getInputId());
       if (order < sourceInputOrder) {
         lastBefore = index;
@@ -217,7 +216,9 @@ class GlobalVarReferenceMap implements ReferenceMap {
   public void updateReferencesWithGlobalScope(Scope globalScope) {
     for (ReferenceCollection collection : refMap.values()) {
       List<Reference> newRefs = new ArrayList<>(collection.references.size());
-      for (Reference ref : collection.references) {
+      for (Reference ref : collection) {
+        // This is only ever called with compiler.getTopScope() in production, which is
+        // a TypedScope.  But References are only ever created with
         if (ref.getScope() != globalScope) {
           newRefs.add(ref.cloneWithNewScope(globalScope));
         } else {
@@ -247,7 +248,11 @@ class GlobalVarReferenceMap implements ReferenceMap {
     public void hotSwapScript(Node scriptRoot, Node originalRoot) {
       GlobalVarReferenceMap refMap = compiler.getGlobalVarReferences();
       if (refMap != null) {
-        refMap.updateReferencesWithGlobalScope(compiler.getTopScope());
+        // We don't have a suitable untyped scope to use, but the actual scope probably doesn't
+        // matter, so long as it's a global scope and doesn't persist references to things that
+        // need to be cleaned up.  So we just generate a new simple root scope.
+        refMap.updateReferencesWithGlobalScope(
+            Scope.createGlobalScope(compiler.getTopScope().getRootNode()));
       }
     }
 

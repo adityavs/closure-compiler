@@ -16,13 +16,12 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.javascript.jscomp.DefinitionsRemover.Definition;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
-
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
@@ -38,11 +37,6 @@ import java.util.Set;
  *
  */
 class MarkNoSideEffectCalls implements CompilerPass {
-  static final DiagnosticType INVALID_NO_SIDE_EFFECT_ANNOTATION =
-      DiagnosticType.error(
-          "JSC_INVALID_NO_SIDE_EFFECT_ANNOTATION",
-          "@nosideeffects may only appear in externs files.");
-
   private final AbstractCompiler compiler;
 
   // Left hand side expression associated with a function node that
@@ -56,18 +50,17 @@ class MarkNoSideEffectCalls implements CompilerPass {
 
   @Override
   public void process(Node externs, Node root) {
-    SimpleDefinitionFinder defFinder = new SimpleDefinitionFinder(compiler);
+    NameBasedDefinitionProvider defFinder = new NameBasedDefinitionProvider(compiler, false);
     defFinder.process(externs, root);
 
     // Gather the list of function nodes that have @nosideeffects annotations.
     // For use by SetNoSideEffectCallProperty.
-    NodeTraversal.traverse(
-        compiler, externs, new GatherNoSideEffectFunctions(true));
-    NodeTraversal.traverse(
-        compiler, root, new GatherNoSideEffectFunctions(false));
+    NodeTraversal.traverseEs6(
+        compiler, externs, new GatherNoSideEffectFunctions());
+    NodeTraversal.traverseEs6(
+        compiler, root, new GatherNoSideEffectFunctions());
 
-    NodeTraversal.traverse(compiler, root,
-                           new SetNoSideEffectCallProperty(defFinder));
+    NodeTraversal.traverseEs6(compiler, root, new SetNoSideEffectCallProperty(defFinder));
   }
 
   /**
@@ -80,17 +73,17 @@ class MarkNoSideEffectCalls implements CompilerPass {
       return true;
     }
 
-    switch (rhs.getType()) {
-      case Token.ASSIGN:
-      case Token.AND:
-      case Token.CALL:
-      case Token.GETPROP:
-      case Token.GETELEM:
-      case Token.FUNCTION:
-      case Token.HOOK:
-      case Token.NAME:
-      case Token.NEW:
-      case Token.OR:
+    switch (rhs.getToken()) {
+      case ASSIGN:
+      case AND:
+      case CALL:
+      case GETPROP:
+      case GETELEM:
+      case FUNCTION:
+      case HOOK:
+      case NAME:
+      case NEW:
+      case OR:
         return true;
       default:
         return false;
@@ -110,18 +103,8 @@ class MarkNoSideEffectCalls implements CompilerPass {
    * Gather function nodes that have @nosideeffects annotations.
    */
   private class GatherNoSideEffectFunctions extends AbstractPostOrderCallback {
-    private final boolean inExterns;
-
-    GatherNoSideEffectFunctions(boolean inExterns) {
-      this.inExterns = inExterns;
-    }
-
     @Override
     public void visit(NodeTraversal traversal, Node node, Node parent) {
-      if (!inExterns && hasNoSideEffectsAnnotation(node)) {
-        traversal.report(node, INVALID_NO_SIDE_EFFECT_ANNOTATION);
-      }
-
       if (node.isGetProp()) {
         if (parent.isExprResult() &&
             hasNoSideEffectsAnnotation(node)) {
@@ -164,20 +147,24 @@ class MarkNoSideEffectCalls implements CompilerPass {
    * refer to function names that are known to have no side effects.
    */
   private class SetNoSideEffectCallProperty extends AbstractPostOrderCallback {
-    private final SimpleDefinitionFinder defFinder;
+    private final NameBasedDefinitionProvider defFinder;
 
-    SetNoSideEffectCallProperty(SimpleDefinitionFinder defFinder) {
+    SetNoSideEffectCallProperty(NameBasedDefinitionProvider defFinder) {
       this.defFinder = defFinder;
     }
 
     @Override
     public void visit(NodeTraversal traversal, Node node, Node parent) {
-      if (!node.isCall() && !node.isNew()) {
+      if (!NodeUtil.isCallOrNew(node)) {
+        return;
+      }
+      Node nameNode = node.getFirstChild();
+      // This is the result of an anonymous function execution. function() {}();
+      if (!nameNode.isName() && !nameNode.isGetProp()) {
         return;
       }
 
-      Collection<Definition> definitions =
-          defFinder.getDefinitionsReferencedAt(node.getFirstChild());
+      Collection<Definition> definitions = defFinder.getDefinitionsReferencedAt(nameNode);
       if (definitions == null) {
         return;
       }
@@ -185,7 +172,7 @@ class MarkNoSideEffectCalls implements CompilerPass {
       boolean maybeFunction = false;
       for (Definition def : definitions) {
         Node lValue = def.getLValue();
-        Preconditions.checkNotNull(lValue);
+        checkNotNull(lValue);
         if (definitionTypeContainsFunctionType(def)) {
           maybeFunction = true;
           if (!noSideEffectFunctionNames.contains(lValue)) {
@@ -195,7 +182,10 @@ class MarkNoSideEffectCalls implements CompilerPass {
       }
 
       if (maybeFunction) {
-        node.setSideEffectFlags(Node.NO_SIDE_EFFECTS);
+        if (node.getSideEffectFlags() != Node.NO_SIDE_EFFECTS) {
+          node.setSideEffectFlags(Node.NO_SIDE_EFFECTS);
+          compiler.reportChangeToEnclosingScope(node);
+        }
       }
     }
   }

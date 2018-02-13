@@ -16,12 +16,9 @@
 
 package com.google.javascript.jscomp;
 
-import static com.google.javascript.jscomp.MarkNoSideEffectCalls.INVALID_NO_SIDE_EFFECT_ANNOTATION;
-
 import com.google.common.collect.ImmutableList;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.Node;
-
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -33,21 +30,21 @@ import java.util.List;
 public final class MarkNoSideEffectCallsTest extends CompilerTestCase {
   List<String> noSideEffectCalls = new ArrayList<>();
 
-  private static String kExterns =
-      "function externSef1(){}" +
-      "/**@nosideeffects*/function externNsef1(){}" +
-      "var externSef2 = function(){};" +
-      "/**@nosideeffects*/var externNsef2 = function(){};" +
-      "var externNsef3 = /**@nosideeffects*/function(){};" +
-      "var externObj;" +
-      "externObj.sef1 = function(){};" +
-      "/**@nosideeffects*/externObj.nsef1 = function(){};" +
-      "externObj.nsef2 = /**@nosideeffects*/function(){};" +
-      "externObj.sef2;" +
-      "/**@nosideeffects*/externObj.nsef3;";
+  private static final String EXTERNS =
+      "function externSef1(){}"
+          + "/**@nosideeffects*/function externNsef1(){}"
+          + "var externSef2 = function(){};"
+          + "/**@nosideeffects*/var externNsef2 = function(){};"
+          + "var externNsef3 = /**@nosideeffects*/function(){};"
+          + "var externObj;"
+          + "externObj.sef1 = function(){};"
+          + "/**@nosideeffects*/externObj.nsef1 = function(){};"
+          + "externObj.nsef2 = /**@nosideeffects*/function(){};"
+          + "externObj.sef2;"
+          + "/**@nosideeffects*/externObj.nsef3;";
 
   public MarkNoSideEffectCallsTest() {
-    super(kExterns);
+    super(EXTERNS);
   }
 
   @Override
@@ -226,30 +223,6 @@ public final class MarkNoSideEffectCallsTest extends CompilerTestCase {
                   ImmutableList.<String>of());
   }
 
-  public void testInvalidAnnotation1() throws Exception {
-    testError("/** @nosideeffects */ function foo() {}", INVALID_NO_SIDE_EFFECT_ANNOTATION);
-  }
-
-  public void testInvalidAnnotation2() throws Exception {
-    testError("var f = /** @nosideeffects */ function() {}", INVALID_NO_SIDE_EFFECT_ANNOTATION);
-  }
-
-  public void testInvalidAnnotation3() throws Exception {
-    testError("/** @nosideeffects */ var f = function() {}", INVALID_NO_SIDE_EFFECT_ANNOTATION);
-  }
-
-  public void testInvalidAnnotation4() throws Exception {
-    testError("var f = function() {};" +
-         "/** @nosideeffects */ f.x = function() {}",
-         INVALID_NO_SIDE_EFFECT_ANNOTATION);
-  }
-
-  public void testInvalidAnnotation5() throws Exception {
-    testError("var f = function() {};" +
-         "f.x = /** @nosideeffects */ function() {}",
-         INVALID_NO_SIDE_EFFECT_ANNOTATION);
-  }
-
   public void testCallNumber() throws Exception {
     testMarkCalls("", "var x = 1; x();",
                   ImmutableList.<String>of());
@@ -261,7 +234,7 @@ public final class MarkNoSideEffectCallsTest extends CompilerTestCase {
 
   void testMarkCalls(
       String extraExterns, String source, List<String> expected) {
-    testSame(kExterns + extraExterns, source, null);
+    testSame(EXTERNS + extraExterns, source);
     assertEquals(expected, noSideEffectCalls);
     noSideEffectCalls.clear();
   }
@@ -288,8 +261,8 @@ public final class MarkNoSideEffectCallsTest extends CompilerTestCase {
     @Override
     public void process(Node externs, Node root) {
       passUnderTest.process(externs, root);
-      NodeTraversal.traverse(compiler, externs, this);
-      NodeTraversal.traverse(compiler, root, this);
+      NodeTraversal.traverseEs6(compiler, externs, this);
+      NodeTraversal.traverseEs6(compiler, root, this);
     }
 
     @Override

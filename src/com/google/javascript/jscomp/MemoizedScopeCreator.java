@@ -1,5 +1,5 @@
 /*
- * Copyright 2009 The Closure Compiler Authors.
+ * Copyright 2017 The Closure Compiler Authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,18 +16,10 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
-import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.StaticSymbolTable;
+import static com.google.common.base.Preconditions.checkState;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.List;
+import com.google.javascript.rhino.Node;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -36,17 +28,13 @@ import java.util.Map;
  * This allows you to make multiple passes, without worrying about
  * the expense of generating Scope objects over and over again.
  *
- * <p>On the other hand, you also have to be more aware of what your passes
+ * On the other hand, you also have to be more aware of what your passes
  * are doing. Scopes are memoized stupidly, so if the underlying tree
  * changes, the scope may be out of sync.
- *
- * <p>Only used to memoize typed scope creators, not untyped ones.
- *
- * @author nicksantos@google.com (Nick Santos)
  */
-class MemoizedScopeCreator implements ScopeCreator, StaticSymbolTable<TypedVar, TypedVar> {
+class MemoizedScopeCreator implements ScopeCreator {
 
-  private final Map<Node, TypedScope> scopes = new LinkedHashMap<>();
+  private final Map<Node, AbstractScope<?, ?>> scopesByScopeRoot = new HashMap<>();
   private final ScopeCreator delegate;
 
   /**
@@ -57,60 +45,15 @@ class MemoizedScopeCreator implements ScopeCreator, StaticSymbolTable<TypedVar, 
   }
 
   @Override
-  public Iterable<TypedVar> getReferences(TypedVar var) {
-    return ImmutableList.of(var);
-  }
-
-  @Override
-  public TypedScope getScope(TypedVar var) {
-    return var.scope;
-  }
-
-  @Override
-  public Iterable<TypedVar> getAllSymbols() {
-    List<TypedVar> vars = new ArrayList<>();
-    for (TypedScope s : scopes.values()) {
-      Iterables.addAll(vars, s.getAllSymbols());
-    }
-    return vars;
-  }
-
-  @Override
-  @SuppressWarnings("unchecked")
-  // ScopeCreator#createScope has type: <T extends Scope> T createScope(...);
-  // TypedScope is the only subclass of Scope, so the suppression is safe.
-  public TypedScope createScope(Node n, Scope parent) {
-    Preconditions.checkArgument(parent == null || parent instanceof TypedScope);
-    TypedScope typedParent = (TypedScope) parent;
-    TypedScope scope = scopes.get(n);
+  public AbstractScope<?, ?> createScope(Node n, AbstractScope<?, ?> parent) {
+    AbstractScope<?, ?> scope = scopesByScopeRoot.get(n);
     if (scope == null) {
-      scope = (TypedScope) delegate.createScope(n, typedParent);
-      scopes.put(n, scope);
+      scope = delegate.createScope(n, parent);
+      scopesByScopeRoot.put(n, scope);
     } else {
-      Preconditions.checkState(typedParent == scope.getParent());
+      checkState(parent == scope.getParent());
     }
     return scope;
-  }
-
-  Collection<TypedScope> getAllMemoizedScopes() {
-    // Return scopes in reverse order of creation so that IIFEs will
-    // come before the global scope.
-    List<TypedScope> temp = new ArrayList<>(scopes.values());
-    Collections.reverse(temp);
-    return Collections.unmodifiableCollection(temp);
-  }
-
-  /**
-   * Removes all scopes with root nodes from a given script file.
-   *
-   * @param scriptName the name of the script file to remove nodes for.
-   */
-  void removeScopesForScript(String scriptName) {
-    for (Node scopeRoot : ImmutableSet.copyOf(scopes.keySet())) {
-      if (scriptName.equals(scopeRoot.getSourceFileName())) {
-        scopes.remove(scopeRoot);
-      }
-    }
   }
 
   @Override

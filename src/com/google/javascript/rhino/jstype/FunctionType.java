@@ -39,21 +39,28 @@
 
 package com.google.javascript.rhino.jstype;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.javascript.rhino.jstype.JSTypeNative.OBJECT_TYPE;
 import static com.google.javascript.rhino.jstype.JSTypeNative.U2U_CONSTRUCTOR_TYPE;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 import com.google.javascript.rhino.ErrorReporter;
 import com.google.javascript.rhino.FunctionTypeI;
 import com.google.javascript.rhino.Node;
+import com.google.javascript.rhino.ObjectTypeI;
 import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.TypeI;
-
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -63,7 +70,7 @@ import java.util.Set;
  * This derived type provides extended information about a function, including
  * its return type and argument types.<p>
  *
- * Note: the parameters list is the LP node that is the parent of the
+ * Note: the parameters list is the PARAM_LIST node that is the parent of the
  * actual NAME node containing the parsed argument list (annotated with
  * JSDOC_TYPE_PROP's for the compile-time type of each argument.
  */
@@ -123,6 +130,12 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
   private boolean isStructuralInterface;
 
   /**
+   * If true, the function type represents an abstract method or the constructor of an abstract
+   * class
+   */
+  private final boolean isAbstract;
+
+  /**
    * The interfaces directly implemented by this function (for constructors)
    * It is only relevant for constructors. May not be {@code null}.
    */
@@ -138,21 +151,26 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
    * The types which are subtypes of this function. It is only relevant for
    * constructors and may be {@code null}.
    */
-  private List<FunctionType> subTypes;
+  private List<FunctionTypeI> subTypes;
 
   /** Creates an instance for a function that might be a constructor. */
-  FunctionType(JSTypeRegistry registry, String name, Node source,
-               ArrowType arrowType, JSType typeOfThis,
-               TemplateTypeMap templateTypeMap,
-               boolean isConstructor, boolean nativeType) {
+  FunctionType(
+      JSTypeRegistry registry,
+      String name,
+      Node source,
+      ArrowType arrowType,
+      JSType typeOfThis,
+      TemplateTypeMap templateTypeMap,
+      boolean isConstructor,
+      boolean nativeType,
+      boolean isAbstract) {
     super(registry, name,
         registry.getNativeObjectType(JSTypeNative.FUNCTION_INSTANCE_TYPE),
         nativeType, templateTypeMap);
     setPrettyPrint(true);
 
-    Preconditions.checkArgument(source == null ||
-        Token.FUNCTION == source.getType());
-    Preconditions.checkNotNull(arrowType);
+    checkArgument(source == null || Token.FUNCTION == source.getToken());
+    checkNotNull(arrowType);
     this.source = source;
     if (isConstructor) {
       this.kind = Kind.CONSTRUCTOR;
@@ -167,6 +185,7 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     }
     this.call = arrowType;
     this.isStructuralInterface = false;
+    this.isAbstract = isAbstract;
   }
 
   /** Creates an instance for a function that is an interface. */
@@ -177,14 +196,14 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
         false, typeParameters);
     setPrettyPrint(true);
 
-    Preconditions.checkArgument(source == null ||
-        Token.FUNCTION == source.getType());
-    Preconditions.checkArgument(name != null);
+    checkArgument(source == null || Token.FUNCTION == source.getToken());
+    checkArgument(name != null);
     this.source = source;
     this.call = new ArrowType(registry, new Node(Token.PARAM_LIST), null);
     this.kind = Kind.INTERFACE;
     this.typeOfThis = new InstanceObjectType(registry, this);
     this.isStructuralInterface = false;
+    this.isAbstract = false;
   }
 
   /** Creates an instance for a function that is an interface. */
@@ -222,7 +241,7 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
    * explicitly annotated.
    */
   public boolean makesStructs() {
-    if (!isConstructor()) {
+    if (!hasInstanceType()) {
       return false;
     }
     if (propAccess == PropAccess.STRUCT) {
@@ -295,13 +314,23 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     }
   }
 
-  /** Gets an LP node that contains all params. May be null. */
+  @Override
+  public Iterable<TypeI> getParameterTypes() {
+    List<TypeI> types = new ArrayList<>();
+    for (Node n : getParameters()) {
+      types.add(n.getJSType());
+    }
+    return types;
+  }
+
+  /** Gets a PARAM_LIST node that contains all params. May be null. */
   public Node getParametersNode() {
     return call.parameters;
   }
 
   /** Gets the minimum number of arguments that this function requires. */
-  public int getMinArguments() {
+  @Override
+  public int getMinArity() {
     // NOTE(nicksantos): There are some native functions that have optional
     // parameters before required parameters. This algorithm finds the position
     // of the last required parameter.
@@ -320,7 +349,8 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
    * Gets the maximum number of arguments that this function requires,
    * or Integer.MAX_VALUE if this is a variable argument function.
    */
-  public int getMaxArguments() {
+  @Override
+  public int getMaxArity() {
     Node params = getParametersNode();
     if (params != null) {
       Node lastParam = params.getLastChild();
@@ -332,6 +362,7 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     return Integer.MAX_VALUE;
   }
 
+  @Override
   public JSType getReturnType() {
     return call.returnType;
   }
@@ -365,11 +396,16 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     if (prototypeSlot == null) {
       return super.getOwnPropertyNames();
     } else {
-      Set<String> names = new HashSet<>();
+      ImmutableSet.Builder<String> names = ImmutableSet.builder();
       names.add("prototype");
       names.addAll(super.getOwnPropertyNames());
-      return names;
+      return names.build();
     }
+  }
+
+  @Override
+  public ObjectType getPrototypeProperty() {
+    return getPrototype();
   }
 
   /**
@@ -430,6 +466,10 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     if (baseType.hasReferenceName() ||
         isNativeObjectType() ||
         baseType.isFunctionPrototypeType()) {
+      if (prototypeSlot != null && hasInstanceType() && baseType.equals(getInstanceType())) {
+        // Bail out for cases like Foo.prototype = new Foo();
+        return;
+      }
       baseType = new PrototypeObjectType(
           registry, getReferenceName() + ".prototype", baseType);
     }
@@ -508,7 +548,7 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
    * @return true if implemented
    */
   public boolean explicitlyImplOrExtInterface(FunctionType interfaceType) {
-    Preconditions.checkArgument(interfaceType.isInterface());
+    checkArgument(interfaceType.isInterface());
     for (ObjectType implementedInterface : getAllImplementedInterfaces()) {
       FunctionType ctor = implementedInterface.getConstructor();
       if (ctor != null && ctor.checkEquivalenceHelper(
@@ -561,6 +601,17 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     }
   }
 
+  @Override
+  public Collection<ObjectTypeI> getAncestorInterfaces() {
+    Set<ObjectTypeI> result = new HashSet<>();
+    if (isConstructor()) {
+      result.addAll((Collection<? extends ObjectTypeI>) getImplementedInterfaces());
+    } else {
+      result.addAll((Collection<? extends ObjectTypeI>) getExtendedInterfaces());
+    }
+    return result;
+  }
+
   /** Returns interfaces implemented directly by a class or its superclass. */
   public Iterable<ObjectType> getImplementedInterfaces() {
     FunctionType superCtor =
@@ -591,24 +642,9 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
       }
       this.implementedInterfaces = ImmutableList.copyOf(implementedInterfaces);
     } else {
-      throw new UnsupportedOperationException();
+      throw new UnsupportedOperationException(
+          "An interface cannot implement other inferfaces");
     }
-  }
-
-  /**
-   * Returns all extended interfaces declared by an interfaces or its super-
-   * interfaces. If this is called before all types are resolved, it may return
-   * an incomplete set.
-   */
-  public Iterable<ObjectType> getAllExtendedInterfaces() {
-    // Store them in a linked hash set, so that the compile job is
-    // deterministic.
-    Set<ObjectType> extendedInterfaces = new LinkedHashSet<>();
-
-    for (ObjectType interfaceType : getExtendedInterfaces()) {
-      addRelatedExtendedInterfaces(interfaceType, extendedInterfaces);
-    }
-    return extendedInterfaces;
   }
 
   private void addRelatedExtendedInterfaces(ObjectType instance,
@@ -635,8 +671,7 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     return extendedInterfaces.size();
   }
 
-  public void setExtendedInterfaces(List<ObjectType> extendedInterfaces)
-    throws UnsupportedOperationException {
+  public void setExtendedInterfaces(List<ObjectType> extendedInterfaces) {
     if (isInterface()) {
       this.extendedInterfaces = ImmutableList.copyOf(extendedInterfaces);
       for (ObjectType extendedInterface : this.extendedInterfaces) {
@@ -798,7 +833,7 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     // If there are unknown parameters or return types making things
     // ambiguous, then sup(A, B) is always the top function type, and
     // inf(A, B) is always the bottom function type.
-    Preconditions.checkNotNull(that);
+    checkNotNull(that);
 
     if (isEquivalentTo(that)) {
       return this;
@@ -859,7 +894,7 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
   private FunctionType tryMergeFunctionPiecewise(
       FunctionType other, boolean leastSuper) {
     Node newParamsNode = null;
-    if (call.hasEqualParameters(other.call, EquivalenceMethod.IDENTITY)) {
+    if (call.hasEqualParameters(other.call, EquivalenceMethod.IDENTITY, EqCache.create())) {
       newParamsNode = call.parameters;
     } else {
       // If the parameters are not equal, don't try to merge them.
@@ -885,18 +920,24 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
         call.returnTypeInferred || other.call.returnTypeInferred;
 
     return new FunctionType(
-        registry, null, null,
-        new ArrowType(
-            registry, newParamsNode, newReturnType, newReturnTypeInferred),
-        newTypeOfThis, null, false, false);
+        registry,
+        null,
+        null,
+        new ArrowType(registry, newParamsNode, newReturnType, newReturnTypeInferred),
+        newTypeOfThis,
+        null,
+        false,
+        false,
+        false);
   }
 
   /**
    * Given a constructor or an interface type, get its superclass constructor
    * or {@code null} if none exists.
    */
+  @Override
   public FunctionType getSuperClassConstructor() {
-    Preconditions.checkArgument(isConstructor() || isInterface());
+    checkArgument(isConstructor() || isInterface());
     ObjectType maybeSuperInstanceType = getPrototype().getImplicitPrototype();
     if (maybeSuperInstanceType == null) {
       return null;
@@ -905,35 +946,17 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
   }
 
   /**
-   * Given an interface and a property, finds the top-most super interface
-   * that has the property defined (including this interface).
-   */
-  public static ObjectType getTopDefiningInterface(ObjectType type,
-      String propertyName) {
-    ObjectType foundType = null;
-    if (type.hasProperty(propertyName)) {
-      foundType = type;
-    }
-    for (ObjectType interfaceType : type.getCtorExtendedInterfaces()) {
-      if (interfaceType.hasProperty(propertyName)) {
-        foundType = getTopDefiningInterface(interfaceType, propertyName);
-      }
-    }
-    return foundType;
-  }
-
-  /**
    * Given a constructor or an interface type and a property, finds the
    * top-most superclass that has the property defined (including this
    * constructor).
    */
   public ObjectType getTopMostDefiningType(String propertyName) {
-    Preconditions.checkState(isConstructor() || isInterface());
-    Preconditions.checkArgument(getInstanceType().hasProperty(propertyName));
+    checkState(isConstructor() || isInterface());
+    checkArgument(getInstanceType().hasProperty(propertyName));
     FunctionType ctor = this;
 
     if (isInterface()) {
-      return getTopDefiningInterface(getInstanceType(), propertyName);
+      return getInstanceType().getTopDefiningInterface(propertyName);
     }
 
     ObjectType topInstanceType = null;
@@ -951,35 +974,46 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
    * have signatures, two interfaces are equal if their names match.
    */
   boolean checkFunctionEquivalenceHelper(
-      FunctionType that, EquivalenceMethod eqMethod) {
-    if (isConstructor()) {
-      if (that.isConstructor()) {
-        return this == that;
-      }
+      FunctionType that, EquivalenceMethod eqMethod, EqCache eqCache) {
+    if (this == that) {
+      return true;
+    }
+    if (kind != that.kind) {
       return false;
     }
-    if (isInterface()) {
-      if (that.isInterface()) {
+    switch (kind) {
+      case CONSTRUCTOR:
+        return false;  // constructors use identity semantics, which we already checked for above.
+      case INTERFACE:
         return getReferenceName().equals(that.getReferenceName());
-      }
-      return false;
+      case ORDINARY:
+        return typeOfThis.checkEquivalenceHelper(that.typeOfThis, eqMethod, eqCache)
+            && call.checkArrowEquivalenceHelper(that.call, eqMethod, eqCache);
+      default:
+        throw new AssertionError();
     }
-    if (that.isInterface()) {
-      return false;
-    }
-
-    return typeOfThis.checkEquivalenceHelper(that.typeOfThis, eqMethod) &&
-        call.checkArrowEquivalenceHelper(that.call, eqMethod);
   }
 
   @Override
   public int hashCode() {
-    return isInterface() ? getReferenceName().hashCode() : call.hashCode();
+    int hc = kind.hashCode();
+    switch (kind) {
+      case CONSTRUCTOR:
+        return 31 * hc + System.identityHashCode(this);  // constructors use identity semantics
+      case INTERFACE:
+        return 31 * hc + getReferenceName().hashCode();
+      case ORDINARY:
+        hc =  31 * hc + typeOfThis.hashCode();
+        hc =  31 * hc + call.hashCode();
+        return hc;
+      default:
+        throw new AssertionError();
+    }
   }
 
   public boolean hasEqualCallType(FunctionType otherType) {
     return this.call.checkArrowEquivalenceHelper(
-        otherType.call, EquivalenceMethod.IDENTITY);
+        otherType.call, EquivalenceMethod.IDENTITY, EqCache.create());
   }
 
   /**
@@ -989,79 +1023,77 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
    * {@code this:T} if the function expects a known type for {@code this}.
    */
   @Override
-  String toStringHelper(boolean forAnnotations) {
+  StringBuilder appendTo(StringBuilder sb, boolean forAnnotations) {
     if (!isPrettyPrint() ||
         this == registry.getNativeType(JSTypeNative.FUNCTION_INSTANCE_TYPE)) {
-      return "Function";
+      return sb.append(forAnnotations ? "!Function" : "Function");
     }
 
     setPrettyPrint(false);
 
-    StringBuilder b = new StringBuilder(32);
-    b.append("function (");
+    sb.append("function(");
     int paramNum = call.parameters.getChildCount();
     boolean hasKnownTypeOfThis = !(typeOfThis instanceof UnknownType);
     if (hasKnownTypeOfThis) {
       if (isConstructor()) {
-        b.append("new:");
+        sb.append("new:");
       } else {
-        b.append("this:");
+        sb.append("this:");
       }
-      b.append(typeOfThis.toStringHelper(forAnnotations));
+      typeOfThis.appendTo(sb, forAnnotations);
     }
     if (paramNum > 0) {
       if (hasKnownTypeOfThis) {
-        b.append(", ");
+        sb.append(", ");
       }
       Node p = call.parameters.getFirstChild();
-      appendArgString(b, p, forAnnotations);
+      appendArgString(sb, p, forAnnotations);
 
       p = p.getNext();
       while (p != null) {
-        b.append(", ");
-        appendArgString(b, p, forAnnotations);
+        sb.append(", ");
+        appendArgString(sb, p, forAnnotations);
         p = p.getNext();
       }
     }
-    b.append("): ");
-    b.append(call.returnType.toStringHelper(forAnnotations));
+    sb.append("): ");
+    call.returnType.appendAsNonNull(sb, forAnnotations);
 
     setPrettyPrint(true);
-    return b.toString();
+    return sb;
   }
 
-  private void appendArgString(
-      StringBuilder b, Node p, boolean forAnnotations) {
+  private void appendArgString(StringBuilder sb, Node p, boolean forAnnotations) {
     if (p.isVarArgs()) {
-      appendVarArgsString(b, p.getJSType(), forAnnotations);
+      appendVarArgsString(sb, p.getJSType(), forAnnotations);
     } else if (p.isOptionalArg()) {
-      appendOptionalArgString(b, p.getJSType(), forAnnotations);
+      appendOptionalArgString(sb, p.getJSType(), forAnnotations);
     } else {
-      b.append(p.getJSType().toStringHelper(forAnnotations));
+      p.getJSType().appendAsNonNull(sb, forAnnotations);
     }
   }
 
   /** Gets the string representation of a var args param. */
-  private void appendVarArgsString(StringBuilder builder, JSType paramType,
-      boolean forAnnotations) {
+  private void appendVarArgsString(
+      StringBuilder sb, JSType paramType, boolean forAnnotations) {
     if (paramType.isUnionType()) {
       // Remove the optionality from the var arg.
       paramType = paramType.toMaybeUnionType().getRestrictedUnion(
           registry.getNativeType(JSTypeNative.VOID_TYPE));
     }
-    builder.append("...").append(
-        paramType.toStringHelper(forAnnotations));
+    sb.append("...");
+    paramType.appendAsNonNull(sb, forAnnotations);
   }
 
   /** Gets the string representation of an optional param. */
   private void appendOptionalArgString(
-      StringBuilder builder, JSType paramType, boolean forAnnotations) {
+      StringBuilder sb, JSType paramType, boolean forAnnotations) {
     if (paramType.isUnionType()) {
       // Remove the optionality from the var arg.
       paramType = paramType.toMaybeUnionType().getRestrictedUnion(
           registry.getNativeType(JSTypeNative.VOID_TYPE));
     }
-    builder.append(paramType.toStringHelper(forAnnotations)).append("=");
+    paramType.appendAsNonNull(sb, forAnnotations).append("=");
   }
 
   /**
@@ -1071,13 +1103,13 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
    */
   @Override
   public boolean isSubtype(JSType that) {
-    return isSubtype(that, ImplCache.create());
+    return isSubtype(that, ImplCache.create(), SubtypingMode.NORMAL);
   }
 
   @Override
   protected boolean isSubtype(JSType that,
-      ImplCache implicitImplCache) {
-    if (JSType.isSubtypeHelper(this, that, implicitImplCache)) {
+      ImplCache implicitImplCache, SubtypingMode subtypingMode) {
+    if (JSType.isSubtypeHelper(this, that, implicitImplCache, subtypingMode)) {
       return true;
     }
 
@@ -1093,14 +1125,14 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
       }
 
       return treatThisTypesAsCovariant(other, implicitImplCache)
-          && this.call.isSubtype(other.call, implicitImplCache);
+          && this.call.isSubtype(other.call, implicitImplCache, subtypingMode);
     }
 
     return getNativeType(JSTypeNative.FUNCTION_PROTOTYPE)
-        .isSubtype(that, implicitImplCache);
+        .isSubtype(that, implicitImplCache, subtypingMode);
   }
 
-  protected boolean treatThisTypesAsCovariant(FunctionType other,
+  private boolean treatThisTypesAsCovariant(FunctionType other,
       ImplCache implicitImplCache) {
     // If functionA is a subtype of functionB, then their "this" types
     // should be contravariant. However, this causes problems because
@@ -1119,8 +1151,8 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
 
       // If one of the 'this' types is covariant of the other,
       // then we'll treat them as covariant (see comment above).
-      other.typeOfThis.isSubtype(this.typeOfThis, implicitImplCache) ||
-      this.typeOfThis.isSubtype(other.typeOfThis, implicitImplCache);
+      other.typeOfThis.isSubtype(this.typeOfThis, implicitImplCache, SubtypingMode.NORMAL)
+      || this.typeOfThis.isSubtype(other.typeOfThis, implicitImplCache, SubtypingMode.NORMAL);
     return treatThisTypesAsCovariant;
   }
 
@@ -1140,7 +1172,7 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
    */
   @Override
   public ObjectType getInstanceType() {
-    Preconditions.checkState(hasInstanceType());
+    Preconditions.checkState(hasInstanceType(), "Expected a constructor; got %s", this);
     return typeOfThis.toObjectType();
   }
 
@@ -1155,6 +1187,7 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
   /**
    * Returns whether this function type has an instance type.
    */
+  @Override
   public boolean hasInstanceType() {
     return isConstructor() || isInterface();
   }
@@ -1195,6 +1228,12 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     this.source = source;
   }
 
+  void addSubTypeIfNotPresent(FunctionType subType) {
+    if (subTypes == null || !subTypes.contains(subType)) {
+      addSubType(subType);
+    }
+  }
+
   /** Adds a type to the list of subtypes for this type. */
   private void addSubType(FunctionType subType) {
     if (subTypes == null) {
@@ -1208,8 +1247,8 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     super.clearCachedValues();
 
     if (subTypes != null) {
-      for (FunctionType subType : subTypes) {
-        subType.clearCachedValues();
+      for (FunctionTypeI subType : subTypes) {
+        ((FunctionType) subType).clearCachedValues();
       }
     }
 
@@ -1224,14 +1263,11 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     }
   }
 
-  /**
-   * Returns a list of types that are subtypes of this type. This is only valid
-   * for constructor functions, and may be null. This allows a downward
-   * traversal of the subtype graph.
-   */
   @Override
-  public List<FunctionType> getSubTypes() {
-    return subTypes;
+  public Iterable<FunctionTypeI> getDirectSubTypes() {
+    return Iterables.concat(
+        subTypes != null ? subTypes : ImmutableList.<FunctionTypeI>of(),
+        this.registry.getDirectImplementors(this));
   }
 
   @Override
@@ -1280,8 +1316,9 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
 
     if (subTypes != null) {
       for (int i = 0; i < subTypes.size(); i++) {
+        FunctionType subType = (FunctionType) subTypes.get(i);
         subTypes.set(
-            i, JSType.toMaybeFunctionType(subTypes.get(i).resolve(t, scope)));
+            i, JSType.toMaybeFunctionType(subType.resolve(t, scope)));
       }
     }
 
@@ -1348,16 +1385,6 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     }
   }
 
-  /** Create a new constructor with the parameters and return type stripped. */
-  public FunctionType forgetParameterAndReturnTypes() {
-    FunctionType result = new FunctionType(
-        registry, getReferenceName(), source,
-        registry.createArrowType(null, null), getInstanceType(),
-        null, true, false);
-    result.setPrototypeBasedOn(getInstanceType());
-    return result;
-  }
-
   @Override
   public boolean hasAnyTemplateTypesInternal() {
     return getTemplateTypeMap().numUnfilledTemplateKeys() > 0
@@ -1381,9 +1408,6 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
 
   @Override
   public boolean hasProperties() {
-    if (prototypeSlot != null) {
-      return true;
-    }
     return !super.getOwnPropertyNames().isEmpty();
   }
 
@@ -1393,12 +1417,17 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
    * @param flag indicates whether or not it should support SMI
    */
   public void setImplicitMatch(boolean flag) {
-    Preconditions.checkState(isInterface());
+    checkState(isInterface());
     isStructuralInterface = flag;
   }
 
+  @Override
   public boolean isStructuralInterface() {
     return isInterface() && isStructuralInterface;
+  }
+
+  public boolean isAbstract() {
+    return isAbstract;
   }
 
   /**
@@ -1407,13 +1436,16 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
    */
   @Override
   public Map<String, JSType> getPropertyTypeMap() {
-    Map<String, JSType> propTypeMap = new HashMap<String, JSType>();
-    updatePropertyTypeMap(this, propTypeMap);
+    Map<String, JSType> propTypeMap = new LinkedHashMap<>();
+    updatePropertyTypeMap(this, propTypeMap, new HashSet<FunctionType>());
     return propTypeMap;
   }
 
+  // cache is added to prevent infinite recursion when retrieving
+  // the super type: see testInterfaceExtendsLoop in TypeCheckTest.java
   private static void updatePropertyTypeMap(
-      FunctionType type, Map<String, JSType> propTypeMap) {
+      FunctionType type, Map<String, JSType> propTypeMap,
+      HashSet<FunctionType> cache) {
     if (type == null) { return; }
     // retrieve all property types on the prototype of this class
     ObjectType prototype = type.getPrototype();
@@ -1430,8 +1462,131 @@ public class FunctionType extends PrototypeObjectType implements FunctionTypeI {
     Iterable<ObjectType> iterable = type.getExtendedInterfaces();
     if (iterable != null) {
       for (ObjectType interfaceType : iterable) {
-        updatePropertyTypeMap(interfaceType.getConstructor(), propTypeMap);
+        FunctionType superConstructor = interfaceType.getConstructor();
+        if (superConstructor == null
+            || cache.contains(superConstructor)) { continue; }
+        cache.add(superConstructor);
+        updatePropertyTypeMap(superConstructor, propTypeMap, cache);
+        cache.remove(superConstructor);
       }
+    }
+  }
+
+  /**
+   * check if there is a loop in the type extends chain
+   * @return an array of all functions in the loop chain if
+   * a loop exists, otherwise returns null
+   */
+  public List<FunctionType> checkExtendsLoop() {
+    return checkExtendsLoop(new HashSet<FunctionType>(),
+        new ArrayList<FunctionType>());
+  }
+
+  public List<FunctionType> checkExtendsLoop(HashSet<FunctionType> cache,
+      List<FunctionType> path) {
+    Iterable<ObjectType> iterable = this.getExtendedInterfaces();
+    if (iterable != null) {
+      for (ObjectType interfaceType : iterable) {
+        FunctionType superConstructor = interfaceType.getConstructor();
+        if (superConstructor == null) { continue; }
+        if (cache.contains(superConstructor)) {
+          // after detecting a loop, prune and return the path, e.g.,:
+          // A -> B -> C -> D -> C, will be pruned into:
+          // c -> D -> C
+          path.add(superConstructor);
+          while (path.get(0) != superConstructor) {
+            path.remove(0);
+          }
+          return path;
+        }
+        cache.add(superConstructor);
+        path.add(superConstructor);
+        List<FunctionType> result =
+            superConstructor.checkExtendsLoop(cache, path);
+        if (result != null) {
+          return result;
+        }
+        cache.remove(superConstructor);
+        path.remove(path.size() - 1);
+      }
+    }
+    return null;
+  }
+
+  @Override
+  public boolean acceptsArguments(List<? extends TypeI> argumentTypes) {
+    // NOTE(aravindpg): This code is essentially lifted from TypeCheck::visitParameterList,
+    // but what small differences there are make it very painful to refactor out the shared code.
+    Iterator<? extends TypeI> arguments = argumentTypes.iterator();
+    Iterator<Node> parameters = this.getParameters().iterator();
+    Node parameter = null;
+    TypeI argument = null;
+    while (arguments.hasNext()
+        && (parameters.hasNext() || parameter != null && parameter.isVarArgs())) {
+      // If there are no parameters left in the list, then the while loop
+      // above implies that this must be a var_args function.
+      if (parameters.hasNext()) {
+        parameter = parameters.next();
+      }
+      argument = arguments.next();
+
+      if (!argument.isSubtypeOf(parameter.getTypeI())) {
+        return false;
+      }
+    }
+
+    int numArgs = argumentTypes.size();
+    return this.getMinArity() <= numArgs && numArgs <= this.getMaxArity();
+  }
+
+  @Override
+  public Builder toBuilder() {
+    return new FunctionBuilderImpl();
+  }
+
+  /**
+   * Private implementation used by toBuilder.  Note: we do not preserve any
+   * properties that may have been defined on the original function.
+   */
+  private class FunctionBuilderImpl implements Builder {
+    ArrowType arrow = FunctionType.this.call;
+
+    @Override
+    public Builder withUnknownReturnType() {
+      arrow = new ArrowType(registry, arrow.parameters, null);
+      return this;
+    }
+
+    @Override
+    public Builder withReturnType(TypeI type) {
+      checkArgument(type instanceof JSType);
+      arrow = new ArrowType(registry, arrow.parameters, (JSType) type);
+      return this;
+    }
+
+    @Override
+    public Builder withNoParameters() {
+      arrow = new ArrowType(registry, null, arrow.returnType, arrow.returnTypeInferred);
+      return this;
+    }
+
+    @Override
+    public FunctionTypeI build() {
+      FunctionType result =
+          new FunctionType(
+              registry,
+              getReferenceName(),
+              source,
+              arrow,
+              typeOfThis,
+              templateTypeMap,
+              isConstructor(),
+              isNativeObjectType(),
+              isAbstract);
+      if (isConstructor()) {
+        result.setPrototypeBasedOn(getInstanceType());
+      }
+      return result;
     }
   }
 }

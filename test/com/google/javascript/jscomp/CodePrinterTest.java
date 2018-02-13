@@ -16,17 +16,58 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.truth.Truth.assertThat;
+
 import com.google.common.base.Joiner;
+import com.google.common.collect.ImmutableList;
 import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
+import com.google.javascript.jscomp.TypeICompilerTestCase.TypeInferenceMode;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
 import java.util.ArrayList;
 import java.util.List;
 
 
 public final class CodePrinterTest extends CodePrinterTestBase {
+  private static final Joiner LINE_JOINER = Joiner.on('\n');
+
+  public void testExponentiationOperator() {
+    languageMode = LanguageMode.ECMASCRIPT_2016;
+    assertPrintSame("x**y");
+    // Exponentiation is right associative
+    assertPrint("x**(y**z)", "x**y**z");
+    assertPrintSame("(x**y)**z");
+    // parens are kept because ExponentiationExpression cannot expand to
+    //     UnaryExpression ** ExponentiationExpression
+    assertPrintSame("(-x)**y");
+    // parens are kept because unary operators are higher precedence than '**'
+    assertPrintSame("-(x**y)");
+    // parens are not needed for a unary operator on the right operand
+    assertPrint("x**(-y)", "x**-y");
+    // NOTE: "-x**y" is a syntax error tested in ParserTest
+
+    // ** has a higher precedence than /
+    assertPrint("x/(y**z)", "x/y**z");
+    assertPrintSame("(x/y)**z");
+  }
+
+  public void testExponentiationAssignmentOperator() {
+    languageMode = LanguageMode.ECMASCRIPT_2016;
+    assertPrintSame("x**=y");
+  }
+
+  public void testObjectLiteralWithSpread() {
+    languageMode = LanguageMode.ECMASCRIPT_NEXT;
+    assertPrintSame("({...{}})");
+    assertPrintSame("({...x})");
+    assertPrintSame("({...x,a:1})");
+    assertPrintSame("({a:1,...x})");
+    assertPrintSame("({a:1,...x,b:1})");
+    assertPrintSame("({...x,...y})");
+    assertPrintSame("({...x,...f()})");
+    assertPrintSame("({...{...{}}})");
+  }
 
   public void testPrint() {
     assertPrint("10 + a + b", "10+a+b");
@@ -44,11 +85,9 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     // Safari: needs ';' at the end of a throw statement
     assertPrint("function foo(){throw 'error';}",
         "function foo(){throw\"error\";}");
-    // Safari 3 needs a "{" around a single function
-    assertPrint("if (true) function foo(){return}",
-        "if(true){function foo(){return}}");
 
-    assertPrint("var x = 10; { var y = 20; }", "var x=10;var y=20");
+    // The code printer does not eliminate unnecessary blocks.
+    assertPrint("var x = 10; { var y = 20; }", "var x=10;{var y=20}");
 
     assertPrint("while (x-- > 0);", "while(x-- >0);");
     assertPrint("x-- >> 1", "x-- >>1");
@@ -103,6 +142,13 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     // this case should be fixed
     assertPrint("new A.B('w').a()", "(new A.B(\"w\")).a()");
 
+    // calling new on the result of a call
+    assertPrintSame("new (a())");
+    assertPrint("new (a())()", "new (a())");
+    assertPrintSame("new (a.b())");
+    assertPrint("new (a.b())()", "new (a.b())");
+
+
     // Operators: make sure we don't convert binary + and unary + into ++
     assertPrint("x + +y", "x+ +y");
     assertPrint("x - (-y)", "x- -y");
@@ -113,6 +159,8 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     // Label
     assertPrint("foo:for(;;){break foo;}", "foo:for(;;)break foo");
     assertPrint("foo:while(1){continue foo;}", "foo:while(1)continue foo");
+    assertPrintSame("foo:;");
+    assertPrint("foo: {}", "foo:;");
 
     // Object literals.
     assertPrint("({})", "({})");
@@ -225,17 +273,83 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     assertPrint("({}) , 1 , 2", "({}),1,2");
     assertPrint("({}) , {} , {}", "({}),{},{}");
 
+    assertPrintSame("var a=(b=c,d)");
+    assertPrintSame("var a=(b[c]=d,e)");
+    assertPrintSame("var a=(b[c]=d,e[f]=g,h)");
+
+    assertPrint("var a = /** @type {?} */ (b=c,d)", "var a=(b=c,d)");
+    assertPrint("var a = /** @type {?} */ (b[c]=d,e)", "var a=(b[c]=d,e)");
+    assertPrint("var a = /** @type {?} */ (b[c]=d,e[f]=g,h)", "var a=(b[c]=d,e[f]=g,h)");
+
     // EMPTY nodes
     assertPrint("if (x){}", "if(x);");
     assertPrint("if(x);", "if(x);");
     assertPrint("if(x)if(y);", "if(x)if(y);");
     assertPrint("if(x){if(y);}", "if(x)if(y);");
     assertPrint("if(x){if(y){};;;}", "if(x)if(y);");
+  }
+
+  public void testPrintNewVoid() {
+    // Odd looking but valid. This, of course, will cause a runtime exception but
+    // should not cause a parse error as "new void 0" would.
+    assertPrintSame("new (void 0)");
+  }
+
+  public void testPrintComma1() {
+    Node node = IR.var(
+        IR.name("a"),
+            IR.comma(
+                IR.comma(
+                    IR.name("b"),
+                    IR.name("c")),
+                IR.name("d")));
+    assertPrintNode("var a=(b,c,d)", node);
+  }
+
+  public void testPrintComma2() {
+    Node node = IR.var(
+        IR.name("a"),
+            IR.comma(
+                IR.name("b"),
+                IR.comma(
+                    IR.name("c"),
+                    IR.name("d"))));
+    assertPrintNode("var a=(b,c,d)", node);
+  }
+
+  public void testPrintCast1() {
+    assertPrint("var x = /** @type {number} */ (0);", "var x=0");
+    assertPrettyPrintSame("var x = /** @type {number} */ (0);\n");
+  }
+
+  public void testPrintCast2() {
+    assertPrint("var x = (2+3) * 4;", "var x=(2+3)*4");
+    assertPrint("var x = /** @type {number} */ (2+3) * 4;", "var x=(2+3)*4");
+    assertPrettyPrintSame("var x = (/** @type {number} */ (2 + 3)) * 4;\n");
+  }
+
+  public void testPrintCast3() {
+    assertPrint("var x = (2*3) + 4;", "var x=2*3+4");
+    assertPrint("var x = /** @type {number} */ (2*3) + 4;", "var x=2*3+4");
+    assertPrettyPrintSame("var x = /** @type {number} */ (2 * 3) + 4;\n");
+  }
+
+  public void testLetConstInIf() {
+    languageMode = LanguageMode.ECMASCRIPT_NEXT;
+    assertPrint("if (true) { let x; };", "if(true){let x}");
+    assertPrint("if (true) { const x = 0; };", "if(true){const x=0}");
+  }
+
+  public void testPrintBlockScopedFunctions() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    // Safari 3 needs a "{" around a single function
+    assertPrint("if (true) function foo(){return}",
+        "if(true){function foo(){return}}");
     assertPrint("if(x){;;function y(){};;}", "if(x){function y(){}}");
   }
 
   public void testPrintArrayPatternVar() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("var []=[]");
     assertPrintSame("var [a]=[1]");
     assertPrintSame("var [a,b]=[1,2]");
@@ -248,7 +362,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testPrintArrayPatternLet() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("let []=[]");
     assertPrintSame("let [a]=[1]");
     assertPrintSame("let [a,b]=[1,2]");
@@ -261,7 +375,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testPrintArrayPatternConst() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("const []=[]");
     assertPrintSame("const [a]=[1]");
     assertPrintSame("const [a,b]=[1,2]");
@@ -274,7 +388,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testPrintArrayPatternAssign() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("[]=[]");
     assertPrintSame("[a]=[1]");
     assertPrintSame("[a,b]=[1,2]");
@@ -287,14 +401,14 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testPrintArrayPatternWithInitializer() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("[x=1]=[]");
     assertPrintSame("[a,,c=2,,e]=[1,2,3,4,5]");
     assertPrintSame("[a=1,b=2,c=3]=foo()");
   }
 
   public void testPrintNestedArrayPattern() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("var [a,[b,c],d]=[1,[2,3],4]");
     assertPrintSame("var [[[[a]]]]=[[[[1]]]]");
 
@@ -302,57 +416,77 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     assertPrintSame("[[[[a]]]]=[[[[1]]]]");
   }
 
+  public void testPrettyPrintArrayPattern() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrettyPrint("let [a,b,c]=foo();", "let [a, b, c] = foo();\n");
+  }
+
   public void testPrintObjectPatternVar() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("var {a}=foo()");
     assertPrintSame("var {a,b}=foo()");
     assertPrintSame("var {a:a,b:b}=foo()");
   }
 
   public void testPrintObjectPatternLet() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("let {a}=foo()");
     assertPrintSame("let {a,b}=foo()");
     assertPrintSame("let {a:a,b:b}=foo()");
   }
 
   public void testPrintObjectPatternConst() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("const {a}=foo()");
     assertPrintSame("const {a,b}=foo()");
     assertPrintSame("const {a:a,b:b}=foo()");
   }
 
   public void testPrintObjectPatternAssign() {
-    languageMode = LanguageMode.ECMASCRIPT6;
-    assertPrintSame("({a})=foo()");
-    assertPrintSame("({a,b})=foo()");
-    assertPrintSame("({a:a,b:b})=foo()");
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrintSame("({a}=foo())");
+    assertPrintSame("({a,b}=foo())");
+    assertPrintSame("({a:a,b:b}=foo())");
   }
 
   public void testPrintNestedObjectPattern() {
-    languageMode = LanguageMode.ECMASCRIPT6;
-    assertPrintSame("({a:{b,c}})=foo()");
-    assertPrintSame("({a:{b:{c:{d}}}})=foo()");
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrintSame("({a:{b,c}}=foo())");
+    assertPrintSame("({a:{b:{c:{d}}}}=foo())");
   }
 
   public void testPrintObjectPatternInitializer() {
-    languageMode = LanguageMode.ECMASCRIPT6;
-    assertPrintSame("({a=1})=foo()");
-    assertPrintSame("({a:{b=2}})=foo()");
-    assertPrintSame("({a:b=2})=foo()");
-    assertPrintSame("({a,b:{c=2}})=foo()");
-    assertPrintSame("({a:{b=2},c})=foo()");
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrintSame("({a=1}=foo())");
+    assertPrintSame("({a:{b=2}}=foo())");
+    assertPrintSame("({a:b=2}=foo())");
+    assertPrintSame("({a,b:{c=2}}=foo())");
+    assertPrintSame("({a:{b=2},c}=foo())");
+  }
+
+  public void testPrintObjectPatternWithRest() {
+    languageMode = LanguageMode.ECMASCRIPT_NEXT;
+    assertPrintSame("const {a,...rest}=foo()");
+    assertPrintSame("var {a,...rest}=foo()");
+    assertPrintSame("let {a,...rest}=foo()");
+    assertPrintSame("({a,...rest}=foo())");
+    assertPrintSame("({a=2,...rest}=foo())");
+    assertPrintSame("({a:b=2,...rest}=foo())");
+  }
+
+  public void testPrettyPrintObjectPattern() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrettyPrint("const {a,b,c}=foo();", "const {a, b, c} = foo();\n");
   }
 
   public void testPrintMixedDestructuring() {
-    languageMode = LanguageMode.ECMASCRIPT6;
-    assertPrintSame("({a:[b,c]})=foo()");
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrintSame("({a:[b,c]}=foo())");
     assertPrintSame("[a,{b,c}]=foo()");
   }
 
   public void testPrintDestructuringInParamList() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("function f([a]){}");
     assertPrintSame("function f([a,b]){}");
     assertPrintSame("function f([a,b]=c()){}");
@@ -363,8 +497,14 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     assertPrintSame("function f({a,b:[c,d]}){}");
   }
 
+  public void testPrintDestructuringInRestParam() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrintSame("function f(...[a,b]){}");
+    assertPrintSame("function f(...{length:num_params}){}");
+  }
+
   public void testDestructuringForInLoops() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
 
     assertPrintSame("for({a}in b)c");
     assertPrintSame("for(var {a}in b)c");
@@ -383,7 +523,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testDestructuringForOfLoops1() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
 
     assertPrintSame("for({a}of b)c");
     assertPrintSame("for(var {a}of b)c");
@@ -402,7 +542,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testDestructuringForOfLoops2() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
 
     // The destructuring 'var' statement is a child of the for-of loop, but
     // not the first child.
@@ -519,14 +659,23 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testForOf() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
 
     assertPrintSame("for(a of b)c");
     assertPrintSame("for(var a of b)c");
   }
 
+  // In pretty-print mode, make sure there is a space before and after the 'of' in a for/of loop.
+  public void testForOfPretty() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+
+    assertPrettyPrintSame("for ([x, y] of b) {\n  c;\n}\n");
+    assertPrettyPrintSame("for (x of [[1, 2]]) {\n  c;\n}\n");
+    assertPrettyPrintSame("for ([x, y] of [[1, 2]]) {\n  c;\n}\n");
+  }
+
   public void testLetFor() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
 
     assertPrintSame("for(let a=0;a<5;a++)b");
     assertPrintSame("for(let a in b)c");
@@ -534,7 +683,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testConstFor() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
 
     assertPrintSame("for(const a=5;b<a;b++)c");
     assertPrintSame("for(const a in b)c");
@@ -619,7 +768,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
           void setOptions(CompilerOptions options) {
             options.setPrettyPrint(false);
             options.setLineBreak(true);
-            options.setLineLengthThreshold(CodePrinter.DEFAULT_LINE_LENGTH_THRESHOLD);
+            options.setLineLengthThreshold(CompilerOptions.DEFAULT_LINE_LENGTH_THRESHOLD);
           }
         })));
   }
@@ -713,10 +862,11 @@ public final class CodePrinterTest extends CodePrinterTestBase {
         "if (1) {\n" +
         "  alert();\n" +
         "}\n");
-    assertPrettyPrint("for (;;) alert();",
-        "for (;;) {\n" +
-        "  alert();\n" +
-        "}\n");
+    assertPrettyPrint(
+        "for (;;) alert();",
+        "for (;;) {\n"
+        + "  alert();\n"
+        + "}\n");
 
     assertPrettyPrint("while (1) alert();",
         "while (1) {\n" +
@@ -738,17 +888,24 @@ public final class CodePrinterTest extends CodePrinterTestBase {
 
     // Do we put for bodies in blocks?
     assertPrettyPrint("for(;;) { alert();}",
-        "for (;;) {\n" +
-         "  alert();\n" +
-         "}\n");
+        "for (;;) {\n"
+        + "  alert();\n"
+        + "}\n");
     assertPrettyPrint("for(;;) {}",
-        "for (;;) {\n" +
-        "}\n");
-    assertPrettyPrint("for(;;) { alert(); alert(); }",
-        "for (;;) {\n" +
-        "  alert();\n" +
-        "  alert();\n" +
-        "}\n");
+        "for (;;) {\n"
+        + "}\n");
+    assertPrettyPrint(
+        "for(;;) { alert(); alert(); }",
+        "for (;;) {\n"
+        + "  alert();\n"
+        + "  alert();\n"
+        + "}\n");
+    assertPrettyPrint(
+        "for(var x=0;x<10;x++) { alert(); alert(); }",
+        "for (var x = 0; x < 10; x++) {\n"
+        + "  alert();\n"
+        + "  alert();\n"
+        + "}\n");
 
     // How about do loops?
     assertPrettyPrint("do { alert(); } while(true);",
@@ -761,13 +918,16 @@ public final class CodePrinterTest extends CodePrinterTestBase {
         "myLabel: {\n" +
         "  alert();\n" +
         "}\n");
+    assertPrettyPrint("myLabel: {}", "myLabel: {\n}\n");
+    assertPrettyPrint("myLabel: ;", "myLabel: ;\n");
 
     // Don't move the label on a loop, because then break {label} and
     // continue {label} won't work.
-    assertPrettyPrint("myLabel: for(;;) continue myLabel;",
-        "myLabel: for (;;) {\n" +
-        "  continue myLabel;\n" +
-        "}\n");
+    assertPrettyPrint(
+        "myLabel: for(;;) continue myLabel;",
+        "myLabel: for (;;) {\n"
+        + "  continue myLabel;\n"
+        + "}\n");
 
     assertPrettyPrint("var a;", "var a;\n");
     assertPrettyPrint("i--", "i--;\n");
@@ -785,7 +945,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     assertPrettyPrint("function foo() { return \"foo\"; }",
         "function foo() {\n  return \"foo\";\n}\n");
     assertPrettyPrint("throw \"foo\";",
-        "throw \"foo\";");
+        "throw \"foo\";\n");
 
     // Test that loops properly have spaces inserted.
     assertPrettyPrint("do{ alert(); } while(true);",
@@ -811,12 +971,12 @@ public final class CodePrinterTest extends CodePrinterTestBase {
 
     assertPrettyPrint(
         "if(true) f(); for(;;) g();",
-        "if (true) {\n" +
-        "  f();\n" +
-        "}\n" +
-        "for (;;) {\n" +
-        "  g();\n" +
-        "}\n");
+        "if (true) {\n"
+        + "  f();\n"
+        + "}\n"
+        + "for (;;) {\n"
+        + "  g();\n"
+        + "}\n");
   }
 
   public void testPrettyPrinter3() {
@@ -889,12 +1049,12 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testPrettyPrinter_arrow() throws Exception {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrettyPrint("(a)=>123;", "(a) => 123;\n");
   }
 
   public void testPrettyPrinter_defaultValue() throws Exception {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrettyPrint("(a=1)=>123;", "(a = 1) => 123;\n");
   }
 
@@ -914,7 +1074,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
 
   // For https://github.com/google/closure-compiler/issues/782
   public void testPrettyPrinter_spaceBeforeUnaryOperators() throws Exception {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
 
     assertPrettyPrint("var f = function() { return !b; };",
         "var f = function() {\n" +
@@ -942,130 +1102,238 @@ public final class CodePrinterTest extends CodePrinterTestBase {
             "};\n");
   }
 
+  public void testPrettyPrinter_varLetConst() throws Exception {
+    assertPrettyPrint("var x=0;", "var x = 0;\n");
+
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+
+    assertPrettyPrint("const x=0;", "const x = 0;\n");
+    assertPrettyPrint("let x=0;", "let x = 0;\n");
+  }
+
+  public void testPrettyPrinter_number() throws Exception {
+    assertPrettyPrintSame("var x = 10;\n");
+    assertPrettyPrintSame("var x = 1.;\n");
+    assertPrettyPrint("var x = 0xFE;", "var x = 254;\n");
+    assertPrettyPrintSame("var x = 1" + String.format("%0100d", 0) + ";\n"); // a googol
+    assertPrettyPrintSame("f(10000);\n");
+    assertPrettyPrintSame("var x = -10000;\n");
+    assertPrettyPrintSame("var x = y - -10000;\n");
+    assertPrettyPrintSame("f(-10000);\n");
+    assertPrettyPrintSame("x < 2592000;\n");
+    assertPrettyPrintSame("x < 1000.000;\n");
+    assertPrettyPrintSame("x < 1000.912;\n");
+    assertPrettyPrintSame("var x = 1E20;\n");
+    assertPrettyPrintSame("var x = 1E1;\n");
+    assertPrettyPrintSame("var x = void 0;\n");
+    assertPrettyPrintSame("foo(-0);\n");
+    assertPrettyPrint("var x = 4-1000;", "var x = 4 - 1000;\n");
+  }
+
   public void testTypeAnnotations() {
     assertTypeAnnotations(
         "/** @constructor */ function Foo(){}",
-        "/**\n * @constructor\n */\n"
-        + "function Foo() {\n}\n");
+        "/**\n * @constructor\n */\nfunction Foo() {\n}\n");
+  }
+
+  public void testNonNullTypes() {
+    assertTypeAnnotations(
+        LINE_JOINER.join(
+            "/** @constructor */",
+            "function Foo() {}",
+            "/** @return {!Foo} */",
+            "Foo.prototype.f = function() { return new Foo; };"),
+        LINE_JOINER.join(
+            "/**",
+            " * @constructor",
+            " */",
+            "function Foo() {\n}",
+            "/**",
+            " * @return {!Foo}",
+            " */",
+            "Foo.prototype.f = function() {",
+            "  return new Foo;",
+            "};\n"));
   }
 
   public void testTypeAnnotationsTypeDef() {
     // TODO(johnlenz): It would be nice if there were some way to preserve
     // typedefs but currently they are resolved into the basic types in the
     // type registry.
+    // NOTE(sdh): OTI and NTI have slightly different behaviors here:
+    // OTI does not correctly remove null, while NTI handles this correctly.
     assertTypeAnnotations(
-        "/** @typedef {Array<number>} */ goog.java.Long;\n"
-        + "/** @param {!goog.java.Long} a*/\n"
-        + "function f(a){};\n",
-        "goog.java.Long;\n"
-        + "/**\n"
-        + " * @param {(Array<number>|null)} a\n"
-        + " * @return {undefined}\n"
-        + " */\n"
-        + "function f(a) {\n}\n");
+        LINE_JOINER.join(
+            "/** @const */ var goog = {};",
+            "/** @const */ goog.java = {};",
+            "/** @typedef {Array<number>} */ goog.java.Long;",
+            "/** @param {!goog.java.Long} a*/",
+            "function f(a){};"),
+        LINE_JOINER.join(
+            "/** @const */ var goog = {};",
+            "/** @const */ goog.java = {};",
+            "goog.java.Long;",
+            "/**",
+            " * @param {(Array<number>|null)} a",
+            " * @return {undefined}",
+            " */",
+            "function f(a) {\n}\n"),
+        LINE_JOINER.join(
+            "/** @const */ var goog = {};",
+            "/** @const */ goog.java = {};",
+            "goog.java.Long;",
+            "/**",
+            " * @param {!Array<number>} a",
+            " * @return {undefined}",
+            " */",
+            "function f(a) {\n}\n"));
   }
 
   public void testTypeAnnotationsAssign() {
-    assertTypeAnnotations("/** @constructor */ var Foo = function(){}",
-        "/**\n * @constructor\n */\n"
-        + "var Foo = function() {\n};\n");
+    assertTypeAnnotations(
+        "/** @constructor */ var Foo = function(){}",
+        LINE_JOINER.join(
+            "/**\n * @constructor\n */",
+            "var Foo = function() {\n};\n"));
   }
 
   public void testTypeAnnotationsNamespace() {
-    assertTypeAnnotations("var a = {};"
-        + "/** @constructor */ a.Foo = function(){}",
-        "var a = {};\n"
-        + "/**\n * @constructor\n */\n"
-        + "a.Foo = function() {\n};\n");
+    assertTypeAnnotations(
+        LINE_JOINER.join(
+            "var a = {};",
+            "/** @constructor */ a.Foo = function(){}"),
+        LINE_JOINER.join(
+            "var a = {};",
+            "/**\n * @constructor\n */",
+            "a.Foo = function() {\n};\n"));
   }
 
   public void testTypeAnnotationsMemberSubclass() {
-    assertTypeAnnotations("var a = {};"
-        + "/** @constructor */ a.Foo = function(){};"
-        + "/** @constructor \n @extends {a.Foo} */ a.Bar = function(){}",
-        "var a = {};\n"
-        + "/**\n * @constructor\n */\n"
-        + "a.Foo = function() {\n};\n"
-        + "/**\n * @extends {a.Foo}\n"
-        + " * @constructor\n */\n"
-        + "a.Bar = function() {\n};\n");
+    assertTypeAnnotations(
+        LINE_JOINER.join(
+            "/** @const */ var a = {};",
+            "/** @constructor */ a.Foo = function(){};",
+            "/** @constructor \n @extends {a.Foo} */ a.Bar = function(){}"),
+        LINE_JOINER.join(
+            "/** @const */ var a = {};",
+            "/**\n * @constructor\n */",
+            "a.Foo = function() {\n};",
+            "/**\n * @extends {a.Foo}",
+            " * @constructor\n */",
+            "a.Bar = function() {\n};\n"));
   }
 
   public void testTypeAnnotationsInterface() {
-    assertTypeAnnotations("var a = {};"
-        + "/** @interface */ a.Foo = function(){};"
-        + "/** @interface \n @extends {a.Foo} */ a.Bar = function(){}",
-        "var a = {};\n"
-        + "/**\n * @interface\n */\n"
-        + "a.Foo = function() {\n};\n"
-        + "/**\n * @extends {a.Foo}\n"
-        + " * @interface\n */\n"
-        + "a.Bar = function() {\n};\n");
+    assertTypeAnnotations(
+        LINE_JOINER.join(
+            "/** @const */ var a = {};",
+            "/** @interface */ a.Foo = function(){};",
+            "/** @interface \n @extends {a.Foo} */ a.Bar = function(){}"),
+        LINE_JOINER.join(
+            "/** @const */ var a = {};",
+            "/**\n * @interface\n */",
+            "a.Foo = function() {\n};",
+            "/**\n * @extends {a.Foo}",
+            " * @interface\n */",
+            "a.Bar = function() {\n};\n"));
   }
 
   public void testTypeAnnotationsMultipleInterface() {
-    assertTypeAnnotations("var a = {};"
-        + "/** @interface */ a.Foo1 = function(){};"
-        + "/** @interface */ a.Foo2 = function(){};"
-        + "/** @interface \n @extends {a.Foo1} \n @extends {a.Foo2} */"
-        + "a.Bar = function(){}",
-        "var a = {};\n"
-        + "/**\n * @interface\n */\n"
-        + "a.Foo1 = function() {\n};\n"
-        + "/**\n * @interface\n */\n"
-        + "a.Foo2 = function() {\n};\n"
-        + "/**\n * @extends {a.Foo1}\n"
-        + " * @extends {a.Foo2}\n"
-        + " * @interface\n */\n"
-        + "a.Bar = function() {\n};\n");
+    assertTypeAnnotations(
+        LINE_JOINER.join(
+            "/** @const */ var a = {};",
+            "/** @interface */ a.Foo1 = function(){};",
+            "/** @interface */ a.Foo2 = function(){};",
+            "/** @interface \n @extends {a.Foo1} \n @extends {a.Foo2} */",
+            "a.Bar = function(){}"),
+        LINE_JOINER.join(
+            "/** @const */ var a = {};",
+            "/**\n * @interface\n */",
+            "a.Foo1 = function() {\n};",
+            "/**\n * @interface\n */",
+            "a.Foo2 = function() {\n};",
+            "/**\n * @extends {a.Foo1}",
+            " * @extends {a.Foo2}",
+            " * @interface\n */",
+            "a.Bar = function() {\n};\n"));
   }
 
   public void testTypeAnnotationsMember() {
-    assertTypeAnnotations("var a = {};"
-        + "/** @constructor */ a.Foo = function(){}"
-        + "/** @param {string} foo\n"
-        + "  * @return {number} */\n"
-        + "a.Foo.prototype.foo = function(foo) { return 3; };"
-        + "/** @type {string|undefined} */"
-        + "a.Foo.prototype.bar = '';",
-        "var a = {};\n"
-        + "/**\n * @constructor\n */\n"
-        + "a.Foo = function() {\n};\n"
-        + "/**\n"
-        + " * @param {string} foo\n"
-        + " * @return {number}\n"
-        + " */\n"
-        + "a.Foo.prototype.foo = function(foo) {\n  return 3;\n};\n"
-        + "/** @type {string} */\n"
-        + "a.Foo.prototype.bar = \"\";\n");
+    assertTypeAnnotations(
+        LINE_JOINER.join(
+            "var a = {};",
+            "/** @constructor */ a.Foo = function(){}",
+            "/** @param {string} foo",
+            "  * @return {number} */",
+            "a.Foo.prototype.foo = function(foo) { return 3; };",
+            "/** @type {!Array|undefined} */",
+            "a.Foo.prototype.bar = [];"),
+        LINE_JOINER.join(
+            "var a = {};",
+            "/**\n * @constructor\n */",
+            "a.Foo = function() {\n};",
+            "/**",
+            " * @param {string} foo",
+            " * @return {number}",
+            " */",
+            "a.Foo.prototype.foo = function(foo) {\n  return 3;\n};",
+            "/** @type {!Array} */",
+            "a.Foo.prototype.bar = [];\n"),
+        LINE_JOINER.join(
+            "var a = {};",
+            "/**\n * @constructor\n */",
+            "a.Foo = function() {\n};",
+            "/**",
+            " * @param {string} foo",
+            " * @return {number}",
+            " */",
+            "a.Foo.prototype.foo = function(foo) {\n  return 3;\n};",
+            "/** @type {!Array<?>} */",
+            "a.Foo.prototype.bar = [];\n"));
+  }
+
+  public void testTypeAnnotationsMemberStub() {
+    // TODO(blickly): Investigate why the method's type isn't preserved.
+    assertTypeAnnotations(
+        LINE_JOINER.join(
+            "/** @interface */ function I(){};",
+            "/** @return {undefined} @param {number} x */ I.prototype.method;"),
+        "/**\n * @interface\n */\nfunction I() {\n}\nI.prototype.method;\n");
   }
 
   public void testTypeAnnotationsImplements() {
-    assertTypeAnnotations("var a = {};"
-        + "/** @constructor */ a.Foo = function(){};\n"
-        + "/** @interface */ a.I = function(){};\n"
-        + "/** @interface */ a.I2 = function(){};\n"
-        + "/** @constructor \n @extends {a.Foo}\n"
-        + " * @implements {a.I} \n @implements {a.I2}\n"
-        + "*/ a.Bar = function(){}",
-        "var a = {};\n"
-        + "/**\n * @constructor\n */\n"
-        + "a.Foo = function() {\n};\n"
-        + "/**\n * @interface\n */\n"
-        + "a.I = function() {\n};\n"
-        + "/**\n * @interface\n */\n"
-        + "a.I2 = function() {\n};\n"
-        + "/**\n * @extends {a.Foo}\n"
-        + " * @implements {a.I}\n"
-        + " * @implements {a.I2}\n * @constructor\n */\n"
-        + "a.Bar = function() {\n};\n");
+    assertTypeAnnotations(
+        LINE_JOINER.join(
+            "/** @const */ var a = {};",
+            "/** @constructor */ a.Foo = function(){};",
+            "/** @interface */ a.I = function(){};",
+            "/** @record */ a.I2 = function(){};",
+            "/** @record @extends {a.I2} */ a.I3 = function(){};",
+            "/** @constructor \n @extends {a.Foo}",
+            " * @implements {a.I} \n @implements {a.I2}",
+            " */ a.Bar = function(){}"),
+        LINE_JOINER.join(
+            "/** @const */ var a = {};",
+            "/**\n * @constructor\n */",
+            "a.Foo = function() {\n};",
+            "/**\n * @interface\n */",
+            "a.I = function() {\n};",
+            "/**\n * @record\n */",
+            "a.I2 = function() {\n};",
+            "/**\n * @extends {a.I2}",
+            " * @record\n */",
+            "a.I3 = function() {\n};",
+            "/**\n * @extends {a.Foo}",
+            " * @implements {a.I}",
+            " * @implements {a.I2}",
+            " * @constructor\n */",
+            "a.Bar = function() {\n};\n"));
   }
 
   public void testU2UFunctionTypeAnnotation1() {
     assertTypeAnnotations(
         "/** @type {!Function} */ var x = function() {}",
-        "/** @type {!Function} */\n" +
-        "var x = function() {\n};\n");
+        "/** @type {!Function} */\nvar x = function() {\n};\n");
   }
 
   public void testU2UFunctionTypeAnnotation2() {
@@ -1073,58 +1341,77 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     // correct, we should export the type of the LHS.
     assertTypeAnnotations(
         "/** @type {Function} */ var x = function() {}",
-        "/** @type {!Function} */\n" +
-        "var x = function() {\n};\n");
+        "/** @type {!Function} */\nvar x = function() {\n};\n");
   }
 
   public void testEmitUnknownParamTypesAsAllType() {
+    // x is unused, so NTI infers that x can be omitted.
     assertTypeAnnotations(
         "var a = function(x) {}",
-        "/**\n" +
-        " * @param {?} x\n" +
-        " * @return {undefined}\n" +
-        " */\n" +
-        "var a = function(x) {\n};\n");
+        LINE_JOINER.join(
+            "/**",
+            " * @param {?} x",
+            " * @return {undefined}",
+            " */",
+            "var a = function(x) {\n};\n"),
+        LINE_JOINER.join(
+            "/**",
+            " * @param {?=} x",
+            " * @return {undefined}",
+            " */",
+            "var a = function(x) {\n};\n"));
   }
 
   public void testOptionalTypesAnnotation() {
     assertTypeAnnotations(
-        "/**\n" +
-        " * @param {string=} x \n" +
-        " */\n" +
-        "var a = function(x) {}",
-        "/**\n" +
-        " * @param {string=} x\n" +
-        " * @return {undefined}\n" +
-        " */\n" +
-        "var a = function(x) {\n};\n");
+        "/** @param {string=} x */ var a = function(x) {}",
+        LINE_JOINER.join(
+            "/**",
+            " * @param {string=} x",
+            " * @return {undefined}",
+            " */",
+            "var a = function(x) {\n};\n"));
+  }
+
+  public void testOptionalTypesAnnotation2() {
+    assertTypeAnnotations(
+        "/** @param {undefined=} x */ var a = function(x) {}",
+        LINE_JOINER.join(
+            "/**",
+            " * @param {undefined=} x",
+            " * @return {undefined}",
+            " */",
+            "var a = function(x) {\n};\n"));
   }
 
   public void testVariableArgumentsTypesAnnotation() {
     assertTypeAnnotations(
-        "/**\n" +
-        " * @param {...string} x \n" +
-        " */\n" +
-        "var a = function(x) {}",
-        "/**\n" +
-        " * @param {...string} x\n" +
-        " * @return {undefined}\n" +
-        " */\n" +
-        "var a = function(x) {\n};\n");
+        "/** @param {...string} x */ var a = function(x) {}",
+        LINE_JOINER.join(
+            "/**",
+            " * @param {...string} x",
+            " * @return {undefined}",
+            " */",
+            "var a = function(x) {\n};\n"));
   }
 
   public void testTempConstructor() {
     assertTypeAnnotations(
-        "var x = function() {\n/**\n * @constructor\n */\nfunction t1() {}\n" +
-        " /**\n * @constructor\n */\nfunction t2() {}\n" +
-        " t1.prototype = t2.prototype}",
-        "/**\n * @return {undefined}\n */\nvar x = function() {\n" +
-        "  /**\n * @constructor\n */\n" +
-        "function t1() {\n  }\n" +
-        "  /**\n * @constructor\n */\n" +
-        "function t2() {\n  }\n" +
-        "  t1.prototype = t2.prototype;\n};\n"
-    );
+        LINE_JOINER.join(
+            "var x = function() {",
+            "  /** @constructor */ function t1() {}",
+            "  /** @constructor */ function t2() {}",
+            "  t1.prototype = t2.prototype",
+            "}"),
+        LINE_JOINER.join(
+            "/**\n * @return {undefined}\n */",
+            "var x = function() {",
+            "  /**\n * @constructor\n */",
+            "function t1() {\n  }",
+            "  /**\n * @constructor\n */",
+            "function t2() {\n  }",
+            "  t1.prototype = t2.prototype;",
+            "};\n"));
   }
 
   public void testEnumAnnotation1() {
@@ -1135,12 +1422,131 @@ public final class CodePrinterTest extends CodePrinterTestBase {
 
   public void testEnumAnnotation2() {
     assertTypeAnnotations(
-        "var goog = goog || {};" +
-        "/** @enum {string} */ goog.Enum = {FOO: 'x', BAR: 'y'};" +
-        "/** @const */ goog.Enum2 = goog.x ? {} : goog.Enum;",
-        "var goog = goog || {};\n" +
-        "/** @enum {string} */\ngoog.Enum = {FOO:\"x\", BAR:\"y\"};\n" +
-        "/** @type {(Object|{})} */\ngoog.Enum2 = goog.x ? {} : goog.Enum;\n");
+        LINE_JOINER.join(
+            "/** @const */ var goog = goog || {};",
+            "/** @enum {string} */ goog.Enum = {FOO: 'x', BAR: 'y'};",
+            "/** @const */ goog.Enum2 = goog.x ? {} : goog.Enum;"),
+        LINE_JOINER.join(
+            "/** @const */ var goog = goog || {};",
+            "/** @enum {string} */\ngoog.Enum = {FOO:\"x\", BAR:\"y\"};",
+            "/** @type {(!Object|{})} */\ngoog.Enum2 = goog.x ? {} : goog.Enum;\n"),
+        LINE_JOINER.join(
+            "/** @const */ var goog = goog || {};",
+            "/** @enum {string} */\ngoog.Enum = {FOO:\"x\", BAR:\"y\"};",
+            "/** @type {{BAR: goog.Enum=, FOO: goog.Enum=}} */",
+            "goog.Enum2 = goog.x ? {} : goog.Enum;",
+            ""));
+  }
+
+  public void testEnumAnnotation3() {
+    assertTypeAnnotations(
+        "/** @enum {!Object} */ var Enum = {FOO: {}};",
+        "/** @enum {!Object} */\nvar Enum = {FOO:{}};\n");
+  }
+
+  public void testEnumAnnotation4() {
+    assertTypeAnnotations(
+        LINE_JOINER.join(
+            "/** @enum {number} */ var E = {A:1, B:2};",
+            "function f(/** !E */ x) { return x; }"),
+        LINE_JOINER.join(
+            "/** @enum {number} */",
+            "var E = {A:1, B:2};",
+            "/**",
+            " * @param {number} x",
+            " * @return {?}",
+            " */",
+            "function f(x) {",
+            "  return x;",
+            "}",
+            ""),
+        LINE_JOINER.join(
+            "/** @enum {number} */",
+            "var E = {A:1, B:2};",
+            "/**",
+            " * @param {E} x",
+            " * @return {E}",
+            " */",
+            "function f(x) {",
+            "  return x;",
+            "}",
+            ""));
+  }
+
+  public void testClosureLibraryTypeAnnotationExamples() {
+    assertTypeAnnotations(
+        LINE_JOINER.join(
+            "/** @const */ var goog = goog || {};",
+            "/** @param {Object} obj */goog.removeUid = function(obj) {};",
+            "/** @param {Object} obj The object to remove the field from. */",
+            "goog.removeHashCode = goog.removeUid;"),
+        LINE_JOINER.join(
+            "/** @const */ var goog = goog || {};",
+            "/**",
+            " * @param {(Object|null)} obj",
+            " * @return {undefined}",
+            " */",
+            "goog.removeUid = function(obj) {",
+            "};",
+            "/**",
+            " * @param {(Object|null)} p0",
+            " * @return {undefined}",
+            " */",
+            "goog.removeHashCode = goog.removeUid;\n"));
+  }
+
+  public void testFunctionTypeAnnotation() {
+    assertTypeAnnotations(
+        "/**\n * @param {{foo:number}} arg\n */\nfunction f(arg) {}",
+        "/**\n * @param {{foo: number}} arg\n * @return {undefined}\n */\nfunction f(arg) {\n}\n");
+    assertTypeAnnotations(
+        "/**\n * @param {number} arg\n */\nfunction f(arg) {}",
+        "/**\n * @param {number} arg\n * @return {undefined}\n */\nfunction f(arg) {\n}\n");
+    assertTypeAnnotations(
+        "/**\n * @param {!Array<string>} arg\n */\nfunction f(arg) {}",
+        "/**\n * @param {!Array<string>} arg\n * @return {undefined}\n */\nfunction f(arg) {\n}\n");
+  }
+
+  public void testFunctionWithThisTypeAnnotation() {
+    assertTypeAnnotations(
+        "/**\n * @this {{foo:number}}\n */\nfunction foo() {}",
+        "/**\n * @return {undefined}\n * @this {{foo: number}}\n */\nfunction foo() {\n}\n");
+    assertTypeAnnotations(
+        "/**\n * @this {!Array<string>}\n */\nfunction foo() {}",
+        "/**\n * @return {undefined}\n * @this {!Array<string>}\n */\nfunction foo() {\n}\n");
+  }
+
+  public void testReturnWithTypeAnnotation() {
+    preserveTypeAnnotations = true;
+    assertPrettyPrint(
+        "function f() { return (/** @return {number} */ function() { return 42; }); }",
+        LINE_JOINER.join(
+            "function f() {",
+            "  return (/**",
+            " @return {number}",
+            " */",
+            "function() {",
+            "    return 42;",
+            "  });",
+            "}",
+            ""));
+  }
+
+  public void testDeprecatedAnnotationIncludesNewline() {
+    String js =
+        LINE_JOINER.join(
+            "/**",
+            " @type {number}",
+            " @deprecated See {@link replacementClass} for more details.",
+            " */",
+            "var x;",
+            "");
+
+    assertPrettyPrint(js, js);
+  }
+
+  private void assertPrettyPrintSame(String js) {
+    assertPrettyPrint(js, js);
   }
 
   private void assertPrettyPrint(String js, String expected) {
@@ -1156,22 +1562,45 @@ public final class CodePrinterTest extends CodePrinterTestBase {
           @Override
           void setOptions(CompilerOptions options) {
             options.setPrettyPrint(true);
+            options.setPreserveTypeAnnotations(true);
             options.setLineBreak(false);
-            options.setLineLengthThreshold(CodePrinter.DEFAULT_LINE_LENGTH_THRESHOLD);
+            options.setLineLengthThreshold(CompilerOptions.DEFAULT_LINE_LENGTH_THRESHOLD);
             optionBuilder.setOptions(options);
           }
         })));
   }
 
   private void assertTypeAnnotations(String js, String expected) {
-    assertEquals(expected,
-        new CodePrinter.Builder(parse(js, true))
+    assertTypeAnnotations(js, expected, expected);
+  }
+
+  private void assertTypeAnnotations(String js, String expectedOti, String expectedNti) {
+    assertEquals(
+        "OTI",
+        expectedOti,
+        new CodePrinter.Builder(parse(js, TypeInferenceMode.OTI_ONLY))
             .setCompilerOptions(newCompilerOptions(new CompilerOptionBuilder() {
               @Override
               void setOptions(CompilerOptions options) {
                 options.setPrettyPrint(true);
                 options.setLineBreak(false);
-                options.setLineLengthThreshold(CodePrinter.DEFAULT_LINE_LENGTH_THRESHOLD);
+                options.setLineLengthThreshold(CompilerOptions.DEFAULT_LINE_LENGTH_THRESHOLD);
+              }
+            }))
+            .setOutputTypes(true)
+            .setTypeRegistry(lastCompiler.getTypeIRegistry())
+            .build());
+
+    assertEquals(
+        "NTI",
+        expectedNti,
+        new CodePrinter.Builder(parse(js, TypeInferenceMode.NTI_ONLY))
+            .setCompilerOptions(newCompilerOptions(new CompilerOptionBuilder() {
+              @Override
+              void setOptions(CompilerOptions options) {
+                options.setPrettyPrint(true);
+                options.setLineBreak(false);
+                options.setLineLengthThreshold(CompilerOptions.DEFAULT_LINE_LENGTH_THRESHOLD);
               }
             }))
             .setOutputTypes(true)
@@ -1345,6 +1774,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
 
   public void testFunctionSafariCompatibility() {
     // Functions within IFs cause syntax errors on Safari.
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrint("function f(){if(e1){function goo(){return true}}else foo()}",
         "function f(){if(e1){function goo(){return true}}else foo()}");
 
@@ -1356,9 +1786,6 @@ public final class CodePrinterTest extends CodePrinterTestBase {
 
     assertPrint("if(e1)function goo(){return true}",
         "if(e1){function goo(){return true}}");
-
-    assertPrint("if(e1)A:function goo(){return true}",
-        "if(e1){A:function goo(){return true}}");
   }
 
   public void testExponents() {
@@ -1397,7 +1824,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     //   http://www.ecma-international.org/ecma-262/5.1/#sec-8.5
     assertPrint("9223372036854775808", "0x7fffffffffffffff");
     assertPrint("0x8000000000000000", "0x7fffffffffffffff");
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrint(
         "0b1000000000000000000000000000000000000000000000000000000000000000",
         "0x7fffffffffffffff");
@@ -1423,7 +1850,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   public void testIndirectEval() {
     Node n = parse("eval('1');");
     assertPrintNode("eval(\"1\")", n);
-    n.getFirstChild().getFirstChild().getFirstChild().putBooleanProp(
+    n.getFirstFirstChild().getFirstChild().putBooleanProp(
         Node.DIRECT_EVAL, false);
     assertPrintNode("(0,eval)(\"1\")", n);
   }
@@ -1436,7 +1863,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   public void testFreeCall2() {
     Node n = parse("foo(a);");
     assertPrintNode("foo(a)", n);
-    Node call =  n.getFirstChild().getFirstChild();
+    Node call = n.getFirstFirstChild();
     assertTrue(call.isCall());
     call.putBooleanProp(Node.FREE_CALL, true);
     assertPrintNode("foo(a)", n);
@@ -1445,7 +1872,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   public void testFreeCall3() {
     Node n = parse("x.foo(a);");
     assertPrintNode("x.foo(a)", n);
-    Node call =  n.getFirstChild().getFirstChild();
+    Node call = n.getFirstFirstChild();
     assertTrue(call.isCall());
     call.putBooleanProp(Node.FREE_CALL, true);
     assertPrintNode("(0,x.foo)(a)", n);
@@ -1474,7 +1901,6 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     assertPrint("var x={'1':1}", "var x={1:1}");
     assertPrint("var x={'1.0':1}", "var x={\"1.0\":1}");
     assertPrint("var x={1.5:1}", "var x={\"1.5\":1}");
-
   }
 
   public void testObjectLit3() {
@@ -1498,7 +1924,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testExtendedObjectLit() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("var a={b}");
     assertPrintSame("var a={b,c}");
     assertPrintSame("var a={b,c:d,e}");
@@ -1506,7 +1932,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testComputedProperties() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
 
     assertPrintSame("var a={[b]:c}");
     assertPrintSame("var a={[b+3]:c}");
@@ -1521,7 +1947,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testComputedPropertiesClassMethods() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
 
     assertPrintSame("class C{[m](){}}");
 
@@ -1558,11 +1984,10 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     languageMode = LanguageMode.ECMASCRIPT3;
 
     Node getter = Node.newString(Token.GETTER_DEF, "f");
-    getter.addChildToBack(IR.function(IR.name(""), IR.paramList(), IR.block()));
+    getter.addChildToBack(NodeUtil.emptyFunction());
     assertPrintNode("({get f(){}})",
         IR.exprResult(IR.objectlit(getter)));
   }
-
 
   public void testSetter() {
     assertPrint("var x = {}", "var x={}");
@@ -1592,8 +2017,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     languageMode = LanguageMode.ECMASCRIPT3;
 
     Node getter = Node.newString(Token.SETTER_DEF, "f");
-    getter.addChildToBack(IR.function(
-        IR.name(""), IR.paramList(IR.name("a")), IR.block()));
+    getter.addChildToBack(IR.function(IR.name(""), IR.paramList(IR.name("a")), IR.block()));
     assertPrintNode("({set f(a){}})",
         IR.exprResult(IR.objectlit(getter)));
   }
@@ -1605,8 +2029,8 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     assertPrint("var x = - (2);", "var x=-2");
   }
 
-  public void testStrict() {
-    String result = new CodePrinter.Builder(parse("var x", true))
+  private CodePrinter.Builder defaultBuilder(Node jsRoot) {
+    return new CodePrinter.Builder(jsRoot)
         .setCompilerOptions(newCompilerOptions(new CompilerOptionBuilder() {
           @Override
           void setOptions(CompilerOptions options) {
@@ -1616,10 +2040,57 @@ public final class CodePrinterTest extends CodePrinterTestBase {
           }
         }))
         .setOutputTypes(false)
-        .setTypeRegistry(lastCompiler.getTypeIRegistry())
-        .setTagAsStrict(true)
-        .build();
+        .setTypeRegistry(lastCompiler.getTypeIRegistry());
+  }
+
+  public void testStrict() {
+    String result =
+        defaultBuilder(parse("var x", TypeInferenceMode.OTI_ONLY)).setTagAsStrict(true).build();
     assertEquals("'use strict';var x", result);
+
+    result =
+        defaultBuilder(parse("var x", TypeInferenceMode.NTI_ONLY)).setTagAsStrict(true).build();
+    assertEquals("'use strict';var x", result);
+  }
+
+  public void testStrictPretty() {
+    String result =
+        defaultBuilder(parse("var x", TypeInferenceMode.OTI_ONLY))
+            .setTagAsStrict(true)
+            .setPrettyPrint(true)
+            .build();
+    assertThat(result).isEqualTo("'use strict';\nvar x;\n");
+
+    result =
+        defaultBuilder(parse("var x", TypeInferenceMode.NTI_ONLY))
+            .setTagAsStrict(true)
+            .setPrettyPrint(true)
+            .build();
+    assertThat(result).isEqualTo("'use strict';\nvar x;\n");
+  }
+
+  public void testExterns() {
+    String result =
+        defaultBuilder(parse("var x", TypeInferenceMode.OTI_ONLY)).setTagAsExterns(true).build();
+    assertEquals("/** @externs */\nvar x", result);
+
+    result =
+        defaultBuilder(parse("var x", TypeInferenceMode.NTI_ONLY)).setTagAsExterns(true).build();
+    assertEquals("/** @externs */\nvar x", result);
+  }
+
+  public void testIjs() {
+    String result =
+        defaultBuilder(parse("var x", TypeInferenceMode.OTI_ONLY))
+            .setTagAsTypeSummary(true)
+            .build();
+    assertEquals("/** @fileoverview @typeSummary */\nvar x", result);
+
+    result =
+        defaultBuilder(parse("var x", TypeInferenceMode.NTI_ONLY))
+            .setTagAsTypeSummary(true)
+            .build();
+    assertEquals("/** @fileoverview @typeSummary */\nvar x", result);
   }
 
   public void testArrayLiteral() {
@@ -1700,7 +2171,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   // Separate from testNumericKeys() so we can set allowWarnings.
   public void testOctalNumericKey() {
     allowWarnings = true;
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT5;
 
     assertPrint("var x = {010: 1};", "var x={8:1}");
   }
@@ -1825,6 +2296,31 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     assertPrintSame("var x=/\\u2029/");
   }
 
+  public void testRegexp_escape() {
+    assertPrintSame("/\\bword\\b/");
+    assertPrintSame("/Java\\BScript/");
+    assertPrintSame("/\\ca/");
+    assertPrintSame("/\\cb/");
+    assertPrintSame("/\\cc/");
+    assertPrintSame("/\\cA/");
+    assertPrintSame("/\\cB/");
+    assertPrintSame("/\\cC/");
+    assertPrintSame("/\\d/");
+    assertPrintSame("/\\D/");
+    assertPrintSame("/\\0/");
+    assertPrintSame("/\\\\/");
+    assertPrintSame("/(.)\\1/");
+  }
+
+  public void testRegexp_unnecessaryEscape() {
+    assertPrint("/\\a/", "/a/");
+    assertPrint("/\\e/", "/e/");
+    assertPrint("/\\g/", "/g/");
+    assertPrint("/\\h/", "/h/");
+    assertPrint("/\\i/", "/i/");
+    assertPrint("/\\¡/", "/\\u00a1/");
+  }
+
   public void testKeywordProperties1() {
     languageMode = LanguageMode.ECMASCRIPT5;
     assertPrintSame("x.foo=2");
@@ -1863,41 +2359,54 @@ public final class CodePrinterTest extends CodePrinterTestBase {
 
   public void testPreserveTypeAnnotations() {
     preserveTypeAnnotations = true;
-    assertPrintSame("/**@type {foo} */var bar");
-    assertPrintSame(
-        "function/** void */f(/** string */s,/** number */n){}");
+    assertPrintSame("/** @type {foo} */ var bar");
+    assertPrintSame("function/** void */ f(/** string */ s,/** number */ n){}");
 
     preserveTypeAnnotations = false;
-    assertPrint("/** @type {foo} */var bar;", "var bar");
+    assertPrint("/** @type {foo} */ var bar;", "var bar");
+  }
+
+  public void testPreserveTypeAnnotations2() {
+    preserveTypeAnnotations = true;
+
+    assertPrintSame("/** @const */ var ns={}");
+
+    assertPrintSame(
+        LINE_JOINER.join(
+            "/**",
+            " @const",
+            " @suppress {const,duplicate}",
+            " */",
+            "var ns={}"));
   }
 
   public void testDefaultParameters() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("function f(a=0){}");
     assertPrintSame("function f(a,b=0){}");
   }
 
   public void testRestParameters() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("function f(...args){}");
     assertPrintSame("function f(first,...rest){}");
   }
 
   public void testDefaultParametersWithRestParameters() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("function f(first=0,...args){}");
     assertPrintSame("function f(first,second=0,...rest){}");
   }
 
   public void testSpreadExpression() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("f(...args)");
     assertPrintSame("f(...arrayOfArrays[0])");
     assertPrintSame("f(...[1,2,3])");
   }
 
   public void testClass() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("class C{}");
     assertPrintSame("(class C{})");
     assertPrintSame("class C extends D{}");
@@ -1906,8 +2415,20 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     assertPrintSame("var x=class C{}");
   }
 
+  public void testClassComputedProperties() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+
+    assertPrintSame("class C{[x](){}}");
+    assertPrintSame("class C{get [x](){}}");
+    assertPrintSame("class C{set [x](val){}}");
+
+    assertPrintSame("class C{static [x](){}}");
+    assertPrintSame("class C{static get [x](){}}");
+    assertPrintSame("class C{static set [x](val){}}");
+  }
+
   public void testClassPretty() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrettyPrint(
         "class C{}",
         "class C {\n}\n");
@@ -1925,15 +2446,22 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testSuper() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("class C extends foo(){}");
     assertPrintSame("class C extends m.foo(){}");
     assertPrintSame("class C extends D{member(){super.foo()}}");
   }
 
-  public void testGeneratorYield1() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+  public void testNewTarget() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrintSame("function f(){new.target}");
+    assertPrint("function f() {\nnew\n.\ntarget;\n}", "function f(){new.target}");
+  }
+
+  public void testGeneratorYield() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("function*f(){yield 1}");
+    assertPrintSame("function*f(){yield}");
     assertPrintSame("function*f(){yield 1?0:2}");
     assertPrintSame("function*f(){yield 1,0}");
     assertPrintSame("function*f(){1,yield 0}");
@@ -1942,14 +2470,33 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     assertPrintSame("function*f(){(yield 1)+(yield 1)}");
   }
 
+  public void testGeneratorYieldPretty() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrettyPrint(
+        "function *f() {yield 1}",
+        LINE_JOINER.join(
+            "function* f() {",
+            "  yield 1;",
+            "}",
+            ""));
+
+    assertPrettyPrint(
+        "function *f() {yield}",
+        LINE_JOINER.join(
+            "function* f() {",
+            "  yield;",
+            "}",
+            ""));
+  }
+
   public void testMemberGeneratorYield1() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("class C{*member(){(yield 1)+(yield 1)}}");
     assertPrintSame("var obj={*member(){(yield 1)+(yield 1)}}");
   }
 
   public void testArrowFunction() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("()=>1");
     assertPrint("(()=>1)", "()=>1");
     assertPrintSame("()=>{}");
@@ -1960,10 +2507,166 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     assertPrintSame("()=>(a,b)");
     assertPrint("(()=>a),b", "()=>a,b");
     assertPrint("()=>(a=b)", "()=>a=b");
+    assertPrintSame("[1,2].forEach((x)=>y)");
+    assertPrintSame("()=>({a:1})");
+    assertPrintSame("()=>{return 1}");
+  }
+
+  public void testAsyncFunction() {
+    languageMode = LanguageMode.ECMASCRIPT_NEXT;
+    assertPrintSame("async function f(){}");
+    assertPrintSame("let f=async function f(){}");
+    assertPrintSame("let f=async function(){}");
+    // implicit semicolon prevents async being treated as a keyword
+    assertPrint("async\nfunction f(){}", "async;function f(){}");
+    assertPrint("let f=async\nfunction f(){}", "let f=async;function f(){}");
+  }
+
+  public void testAsyncArrowFunction() {
+    languageMode = LanguageMode.ECMASCRIPT_NEXT;
+    assertPrintSame("async()=>1");
+    // implicit semicolon prevents async being treated as a keyword
+    assertPrint("f=async\n()=>1", "f=async;()=>1");
+  }
+
+  public void testAsyncMethod() {
+    languageMode = LanguageMode.ECMASCRIPT_NEXT;
+    assertPrintSame("o={async m(){}}");
+    assertPrintSame("o={async[a+b](){}}");
+    assertPrintSame("class C{async m(){}}");
+    assertPrintSame("class C{async[a+b](){}}");
+    assertPrintSame("class C{static async m(){}}");
+    assertPrintSame("class C{static async[a+b](){}}");
+  }
+
+  public void testAwaitExpression() {
+    languageMode = LanguageMode.ECMASCRIPT_NEXT;
+    assertPrintSame("async function f(promise){return await promise}");
+    assertPrintSame("pwait=async function(promise){return await promise}");
+    assertPrintSame("class C{async pwait(promise){await promise}}");
+    assertPrintSame("o={async pwait(promise){await promise}}");
+    assertPrintSame("pwait=async(promise)=>await promise");
+  }
+
+  /**
+   * Regression test for b/28633247 - necessary parens dropped around arrow functions.
+   */
+  public void testParensAroundArrow() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+
+    // Parens required for non-assignment binary operator
+    assertPrintSame("x||((_)=>true)");
+    // Parens required for unary operator
+    assertPrintSame("void((e)=>e*5)");
+    // Parens not required for comma operator
+    assertPrint("((_) => true), ((_) => false)", "(_)=>true,(_)=>false");
+    // Parens not required for right side of assignment operator
+    // NOTE: An arrow function on the left side would be a parse error.
+    assertPrint("x = ((_) => _ + 1)", "x=(_)=>_+1");
+    // Parens required for template tag
+    assertPrintSame("((_)=>\"\")`template`");
+    // Parens required to reference a property
+    assertPrintSame("((a,b,c)=>a+b+c).length");
+    assertPrintSame("((a,b,c)=>a+b+c)[\"length\"]");
+    // Parens not required when evaluating property name.
+    // (It doesn't make much sense to do it, though.)
+    assertPrint("x[((_)=>0)]", "x[(_)=>0]");
+    // Parens required to call the arrow function immediately
+    assertPrintSame("((x)=>x*5)(10)");
+    // Parens not required for function call arguments
+    assertPrint("x(((_) => true), ((_) => false))", "x((_)=>true,(_)=>false)");
+    // Parens required for first operand to a conditional, but not the rest.
+    assertPrintSame("((x)=>1)?a:b");
+    assertPrint("x?((x)=>0):((x)=>1)", "x?(x)=>0:(x)=>1");
+  }
+
+  public void testParensAroundArrowReturnValue() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrintSame("()=>({})");
+    assertPrintSame("()=>({a:1})");
+    assertPrintSame("()=>({a:1,b:2})");
+    assertPrint("()=>/** @type {Object} */({})", "()=>({})");
+    assertPrint("()=>/** @type {Object} */({a:1})", "()=>({a:1})");
+    assertPrint("()=>/** @type {Object} */({a:1,b:2})", "()=>({a:1,b:2})");
+    assertPrint("()=>/** @type {number} */(3)", "()=>3");
+
+    assertPrintSame("()=>(1,2)");
+    assertPrintSame("()=>({},2)");
+    assertPrintSame("()=>(1,{})");
+    assertPrint("()=>/** @type {?} */(1,2)", "()=>(1,2)");
+    assertPrint("()=>/** @type {?} */({},2)", "()=>({},2)");
+    assertPrint("()=>/** @type {?} */(1,{})", "()=>(1,{})");
+  }
+
+  public void testPrettyArrowFunction() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrettyPrint("if (x) {var f = ()=>{alert(1); alert(2)}}",
+        LINE_JOINER.join(
+            "if (x) {",
+            "  var f = () => {",
+            "    alert(1);",
+            "    alert(2);",
+            "  };",
+            "}",
+            ""));
+  }
+
+  public void testPrettyPrint_switch() throws Exception {
+    assertPrettyPrint("switch(something){case 0:alert(0);break;case 1:alert(1);break}",
+        LINE_JOINER.join(
+            "switch(something) {",
+            "  case 0:",
+            "    alert(0);",
+            "    break;",
+            "  case 1:",
+            "    alert(1);",
+            "    break;",
+            "}",
+            ""));
+  }
+
+  public void testBlocksInCaseArePreserved() throws Exception {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    String js = LINE_JOINER.join(
+        "switch(something) {",
+        "  case 0:",
+        "    {",
+        "      const x = 1;",
+        "      break;",
+        "    }",
+        "  case 1:",
+        "    break;",
+        "  case 2:",
+        "    console.log(`case 2!`);",
+        "    {",
+        "      const x = 2;",
+        "      break;",
+        "    }",
+        "}",
+        "");
+    assertPrettyPrint(js, js);
+  }
+
+  public void testBlocksArePreserved() throws Exception {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    String js = LINE_JOINER.join(
+        "console.log(0);",
+        "{",
+        "  let x = 1;",
+        "  console.log(x);",
+        "}",
+        "console.log(x);",
+        "");
+    assertPrettyPrint(js, js);
+  }
+
+  public void testBlocksNotPreserved() {
+    assertPrint("if (x) {};", "if(x);");
+    assertPrint("while (x) {};", "while(x);");
   }
 
   public void testDeclarations() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("let x");
     assertPrintSame("let x,y");
     assertPrintSame("let x=1");
@@ -1984,7 +2687,7 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testImports() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     assertPrintSame("import x from\"foo\"");
     assertPrintSame("import\"foo\"");
     assertPrintSame("import x,{a as b}from\"foo\"");
@@ -1996,13 +2699,15 @@ public final class CodePrinterTest extends CodePrinterTestBase {
   }
 
   public void testExports() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_2015;
     // export declarations
     assertPrintSame("export var x=1");
+    assertPrintSame("export var x;export var y");
     assertPrintSame("export let x=1");
     assertPrintSame("export const x=1");
     assertPrintSame("export function f(){}");
     assertPrintSame("export class f{}");
+    assertPrintSame("export class f{}export class b{}");
 
     // export all from
     assertPrint("export * from 'a.b.c'", "export*from\"a.b.c\"");
@@ -2021,13 +2726,16 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     // export default
     assertPrintSame("export default x");
     assertPrintSame("export default 1");
+    assertPrintSame("export default class Foo{}export function f(){}");
+    assertPrintSame("export function f(){}export default class Foo{}");
   }
 
   public void testTemplateLiteral() {
-    languageMode = LanguageMode.ECMASCRIPT6;
+    languageMode = LanguageMode.ECMASCRIPT_NEXT;
     assertPrintSame("`hello`");
-    assertPrint("`hel\rlo`", "`hel\nlo`");
-    assertPrint("`hel\r\nlo`", "`hel\nlo`");
+    assertPrintSame("`\\\\bhello`");
+    assertPrint("`hel\rlo`", "`hel\\nlo`");
+    assertPrint("`hel\r\nlo`", "`hel\\nlo`");
     assertPrint("`hello`\n'world'", "`hello`;\"world\"");
     assertPrint("`hello`\n`world`", "`hello``world`");
     assertPrint("var x=`TestA`\n`TemplateB`", "var x=`TestA``TemplateB`");
@@ -2040,5 +2748,186 @@ public final class CodePrinterTest extends CodePrinterTestBase {
     assertPrintSame("(function(){})()`${(function(){})()}`");
     assertPrintSame("url`hello`");
     assertPrintSame("url(`hello`)");
+    assertPrint("`\\u{2026}`", "`\\u2026`");
+    assertPrint("`start\\u{2026}end`", "`start\\u2026end`");
+    assertPrint("`\\u{1f42a}`", "`\\ud83d\\udc2a`");
+    assertPrint("`start\\u{1f42a}end`", "`start\\ud83d\\udc2aend`");
+    assertPrintSame("`\\u2026`");
+    assertPrintSame("`start\\u2026end`");
+    assertPrintSame("`\"`");
+    assertPrintSame("`'`");
+    assertPrintSame("`\\``");
+  }
+
+  public void testEs6GoogModule() {
+    String code = ""
+        + "goog.module('foo.bar');\n"
+        + "const STR = '3';\n"
+        + "function fn() {\n"
+        + "  alert(STR);\n"
+        + "}\n"
+        + "exports.fn = fn;\n";
+    String expectedCode = ""
+        + "goog.module('foo.bar');\n"
+        + "void 0;\n"
+        + "var module$exports$foo$bar = {};\n"
+        + "const STR = '3';\n"
+        + "module$exports$foo$bar.fn = function fn() {\n"
+        + "  alert(STR);\n"
+        + "};\n";
+
+    CompilerOptions compilerOptions = new CompilerOptions();
+    compilerOptions.setClosurePass(true);
+    compilerOptions.setPreserveDetailedSourceInfo(true);
+    compilerOptions.setChecksOnly(true);
+    compilerOptions.setContinueAfterErrors(true);
+    Compiler compiler = new Compiler();
+    compiler.disableThreads();
+    checkWithOriginalName(code, expectedCode, compilerOptions);
+  }
+
+  public void testEs6ArrowFunctionSetsOriginalNameForThis() {
+    String code = "(x)=>{this.foo[0](3);}";
+    String expectedCode = ""
+        + "var $jscomp$this = this;\n" // TODO(tomnguyen): Avoid printing this line.
+        + "(function(x) {\n"  // TODO(tomnguyen): This should print as an => function.
+        + "  this.foo[0](3);\n"
+        + "});\n";
+    CompilerOptions compilerOptions = new CompilerOptions();
+    compilerOptions.skipAllCompilerPasses();
+    compilerOptions.setLanguageIn(LanguageMode.ECMASCRIPT_2015);
+    compilerOptions.setLanguageOut(LanguageMode.ECMASCRIPT5);
+    checkWithOriginalName(code, expectedCode, compilerOptions);
+  }
+
+  public void testEs6ArrowFunctionSetsOriginalNameForArguments() {
+    // With original names in output set, the end result is not correct code, but the "this" is
+    // not rewritten.
+    String code = "(x)=>{arguments[0]();}";
+    String expectedCode = ""
+        + "var $jscomp$arguments = arguments;\n"
+        + "(function(x) {\n"
+        + "  arguments[0]();\n"
+        + "});\n";
+    CompilerOptions compilerOptions = new CompilerOptions();
+    compilerOptions.skipAllCompilerPasses();
+    compilerOptions.setLanguageIn(LanguageMode.ECMASCRIPT_2015);
+    compilerOptions.setLanguageOut(LanguageMode.ECMASCRIPT5);
+    checkWithOriginalName(code, expectedCode, compilerOptions);
+  }
+
+  public void testEs6NewTargetBare() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrintSame("class C{constructor(){new.target.prototype}}");
+  }
+
+  public void testEs6NewTargetPrototype() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrintSame(
+        "class C{constructor(){var callable=Object.setPrototypeOf(obj,new.target.prototype)}}");
+  }
+
+  public void testEs6NewTargetConditional() {
+    languageMode = LanguageMode.ECMASCRIPT_2015;
+    assertPrint(
+        LINE_JOINER.join(
+            "function f() {",
+            "  if (!new.target) throw 'Must be called with new!';",
+            "}"),
+        "function f(){if(!new.target)throw\"Must be called with new!\";}");
+  }
+
+  public void testGoogScope() {
+    // TODO(mknichel): Function declarations need to be rewritten to match the original source
+    // instead of being assigned to a local variable with duplicate JS Doc.
+    String code = ""
+        + "goog.provide('foo.bar');\n"
+        + "goog.require('baz.qux.Quux');\n"
+        + "goog.require('foo.ScopedType');\n"
+        + "\n"
+        + "goog.scope(function() {\n"
+        + "var Quux = baz.qux.Quux;\n"
+        + "var ScopedType = foo.ScopedType;\n"
+        + "\n"
+        + "var STR = '3';\n"
+        + "/** @param {ScopedType} obj */\n"
+        + "function fn(obj) {\n"
+        + "  alert(STR);\n"
+        + "  alert(Quux.someProperty);\n"
+        + "}\n"
+        + "}); // goog.scope\n";
+    String expectedCode = ""
+        + "/** @const */ var $jscomp = $jscomp || {};\n"
+        + "/** @const */ $jscomp.scope = {};\n"
+        + "/** @const */ var foo = {};\n"
+        + "/** @const */ foo.bar = {};\n"
+        + "goog.provide('foo.bar');\n"
+        + "goog.require('baz.qux.Quux');\n"
+        + "goog.require('foo.ScopedType');\n"
+        + "/**\n"
+        + " @param {ScopedType} obj\n"
+        + " */\n"
+        + "var fn = /**\n"
+        + " @param {ScopedType} obj\n"
+        + " */\n"
+        + "function(obj) {\n"
+        + "  alert(STR);\n"
+        + "  alert(Quux.someProperty);\n"
+        + "};\n"
+        + "var STR = '3';\n";
+
+    CompilerOptions compilerOptions = new CompilerOptions();
+    compilerOptions.setClosurePass(true);
+    compilerOptions.setPreserveDetailedSourceInfo(true);
+    compilerOptions.setChecksOnly(true);
+    compilerOptions.setCheckTypes(true);
+    compilerOptions.setContinueAfterErrors(true);
+    compilerOptions.setPreserveClosurePrimitives(true);
+    Compiler compiler = new Compiler();
+    compiler.disableThreads();
+    compiler.compile(
+        ImmutableList.<SourceFile>of(), // Externs
+        ImmutableList.of(SourceFile.fromCode("test", code)),
+        compilerOptions);
+    Node node = compiler.getRoot().getLastChild().getFirstChild();
+
+    CompilerOptions codePrinterOptions = new CompilerOptions();
+    codePrinterOptions.setPreferSingleQuotes(true);
+    codePrinterOptions.setLineLengthThreshold(80);
+    codePrinterOptions.setPreserveTypeAnnotations(true);
+    codePrinterOptions.setUseOriginalNamesInOutput(true);
+    assertEquals(expectedCode, new CodePrinter.Builder(node)
+        .setCompilerOptions(codePrinterOptions)
+        .setPrettyPrint(true)
+        .setLineBreak(true)
+        .build());
+  }
+
+  private void checkWithOriginalName(
+      String code, String expectedCode, CompilerOptions compilerOptions) {
+    compilerOptions.setCheckSymbols(true);
+    compilerOptions.setCheckTypes(true);
+    compilerOptions.setPreserveDetailedSourceInfo(true);
+    compilerOptions.setPreserveClosurePrimitives(true);
+    compilerOptions.setClosurePass(true);
+    Compiler compiler = new Compiler();
+    compiler.disableThreads();
+    compiler.compile(
+        ImmutableList.<SourceFile>of(), // Externs
+        ImmutableList.of(SourceFile.fromCode("test", code)),
+        compilerOptions);
+    Node node = compiler.getRoot().getLastChild().getFirstChild();
+
+    CompilerOptions codePrinterOptions = new CompilerOptions();
+    codePrinterOptions.setPreferSingleQuotes(true);
+    codePrinterOptions.setLineLengthThreshold(80);
+    codePrinterOptions.setUseOriginalNamesInOutput(true);
+    assertEquals(
+        expectedCode,
+        new CodePrinter.Builder(node)
+            .setCompilerOptions(codePrinterOptions)
+            .setPrettyPrint(true)
+            .setLineBreak(true)
+            .build());
   }
 }

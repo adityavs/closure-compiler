@@ -16,9 +16,11 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.MoreObjects.toStringHelper;
+
 import java.io.Serializable;
 import java.util.Collection;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Set;
 
 /**
@@ -41,7 +43,7 @@ public final class DependencyOptions implements Serializable {
   private boolean sortDependencies = false;
   private boolean pruneDependencies = false;
   private boolean dropMoochers = false;
-  private final Set<String> entryPoints = new HashSet<>();
+  private final Set<ModuleIdentifier> entryPoints = new LinkedHashSet<>();
 
   /**
    * Enables or disables dependency sorting mode.
@@ -83,7 +85,7 @@ public final class DependencyOptions implements Serializable {
    * manage dependencies on them.
    *
    * If true, we drop these files when we prune dependencies.
-   * If false, we always keep these files an anything they depend on.
+   * If false, we always keep these files and anything they depend on.
    * The default is false.
    *
    * Notice that this option only makes sense if dependency pruning is on,
@@ -110,7 +112,7 @@ public final class DependencyOptions implements Serializable {
    *
    * @return this for easy chaining.
    */
-  public DependencyOptions setEntryPoints(Collection<String> symbols) {
+  public DependencyOptions setEntryPoints(Collection<ModuleIdentifier> symbols) {
     entryPoints.clear();
     entryPoints.addAll(symbols);
     return this;
@@ -133,7 +135,17 @@ public final class DependencyOptions implements Serializable {
     return pruneDependencies && dropMoochers;
   }
 
-  Collection<String> getEntryPoints() {
+  Collection<ModuleIdentifier> getEntryPoints() {
     return entryPoints;
+  }
+
+  @Override
+  public String toString() {
+    return toStringHelper(this)
+        .add("sortDependencies", sortDependencies)
+        .add("pruneDependencies", pruneDependencies)
+        .add("dropMoochers", dropMoochers)
+        .add("entryPoints", entryPoints)
+        .toString();
   }
 }

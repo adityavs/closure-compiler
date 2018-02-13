@@ -22,10 +22,6 @@ import com.google.javascript.jscomp.graph.DiGraph.DiGraphNode;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-import com.google.protobuf.TextFormat;
-
-import java.io.IOException;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -58,7 +54,6 @@ class InstrumentFunctions implements CompilerPass {
 
   private final AbstractCompiler compiler;
   private final FunctionNames functionNames;
-  private final String templateFilename;
   private final String appNameStr;
   private final String initCodeSource;
   private final String definedFunctionName;
@@ -72,38 +67,16 @@ class InstrumentFunctions implements CompilerPass {
    *
    * @param compiler          The JSCompiler
    * @param functionNames     Assigned function identifiers.
-   * @param templateFilename  Template filename; for use during error
-   *                          reporting only.
+   * @param template          Instrumentation template; for use during error reporting only.
    * @param appNameStr        String to pass to appNameSetter.
-   * @param readable          Instrumentation template protobuf text.
    */
   InstrumentFunctions(AbstractCompiler compiler,
                       FunctionNames functionNames,
-                      String templateFilename,
-                      String appNameStr,
-                      Readable readable) {
+                      Instrumentation template,
+                      String appNameStr) {
     this.compiler = compiler;
     this.functionNames = functionNames;
-    this.templateFilename = templateFilename;
     this.appNameStr = appNameStr;
-
-    Instrumentation.Builder builder = Instrumentation.newBuilder();
-    try {
-      TextFormat.merge(readable, builder);
-    } catch (IOException e) {
-      compiler.report(JSError.make(RhinoErrorReporter.PARSE_ERROR,
-          "Error reading instrumentation template protobuf at " +
-          templateFilename));
-      this.initCodeSource = "";
-      this.definedFunctionName = "";
-      this.reportFunctionName = "";
-      this.reportFunctionExitName = "";
-      this.appNameSetter = "";
-      this.declarationsToRemove = new ArrayList<>();
-      return;
-    }
-
-    Instrumentation template = builder.build();
 
     StringBuilder initCodeSourceBuilder = new StringBuilder();
     for (String line : template.getInitList()) {
@@ -125,17 +98,18 @@ class InstrumentFunctions implements CompilerPass {
     Node initCode = null;
     if (!initCodeSource.isEmpty()) {
       Node initCodeRoot = compiler.parseSyntheticCode(
-          templateFilename + ":init", initCodeSource);
+          "template:init", initCodeSource);
       if (initCodeRoot != null && initCodeRoot.getFirstChild() != null) {
+        NodeUtil.markNewScopesChanged(initCodeRoot, compiler);
         initCode = initCodeRoot.removeChildren();
       } else {
         return;  // parse failure
       }
     }
 
-    NodeTraversal.traverse(compiler, root,
+    NodeTraversal.traverseEs6(compiler, root,
                            new RemoveCallback(declarationsToRemove));
-    NodeTraversal.traverse(compiler, root, new InstrumentCallback());
+    NodeTraversal.traverseEs6(compiler, root, new InstrumentCallback());
 
     if (!appNameSetter.isEmpty()) {
       Node call = IR.call(
@@ -145,14 +119,14 @@ class InstrumentFunctions implements CompilerPass {
       Node expr = IR.exprResult(call);
 
       Node addingRoot = compiler.getNodeForCodeInsertion(null);
-      addingRoot.addChildrenToFront(expr);
-      compiler.reportCodeChange();
+      addingRoot.addChildToFront(expr.useSourceInfoIfMissingFromForTree(addingRoot));
+      compiler.reportChangeToEnclosingScope(addingRoot);
     }
 
     if (initCode != null) {
       Node addingRoot = compiler.getNodeForCodeInsertion(null);
       addingRoot.addChildrenToFront(initCode);
-      compiler.reportCodeChange();
+      compiler.reportChangeToEnclosingScope(addingRoot);
     }
   }
 
@@ -171,10 +145,10 @@ class InstrumentFunctions implements CompilerPass {
 
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
-      if (NodeUtil.isVarDeclaration(n) && removable.contains(n.getString())) {
+      if (NodeUtil.isNameDeclaration(parent) && n.isName() && removable.contains(n.getString())) {
         parent.removeChild(n);
         if (!parent.hasChildren()) {
-          parent.getParent().removeChild(parent);
+          parent.detach();
         }
       }
     }
@@ -201,22 +175,26 @@ class InstrumentFunctions implements CompilerPass {
    * Output:
    * function f() {
    *   if (pred) {
-   *     return onExitFn(0, a);
+   *     return onExitFn(0, a, "f");
    *   }
-   *   onExitFn(0);
+   *   onExitFn(0, undefined, "f");
    * }
    *
    **/
   private class InstrumentReturns implements NodeTraversal.Callback {
     private final int functionId;
+    private final String functionName;
+
     /**
      * @param functionId Function identifier computed by FunctionNames;
      *     used as first argument to {@code reportFunctionExitName}
-     *     {@code reportFunctionExitName} must be a 2 argument function that
+     *     {@code reportFunctionExitName} must be a 3 argument function that
      *     returns it's second argument.
+     * @param functionName Function name.
      */
-    InstrumentReturns(int functionId) {
+    InstrumentReturns(int functionId, String functionName) {
       this.functionId = functionId;
+      this.functionName = functionName;
     }
 
     /**
@@ -224,13 +202,13 @@ class InstrumentFunctions implements CompilerPass {
      */
     void process(Node function) {
       Node body = function.getLastChild();
-      NodeTraversal.traverse(compiler, body, this);
+      NodeTraversal.traverseEs6(compiler, body, this);
 
       if (!allPathsReturn(function)) {
-        Node call = newReportFunctionExitNode();
-        Node expr = IR.exprResult(call);
+        Node call = newReportFunctionExitNode(function, null);
+        Node expr = IR.exprResult(call).useSourceInfoIfMissingFromForTree(function);
         body.addChildToBack(expr);
-        compiler.reportCodeChange();
+        compiler.reportChangeToEnclosingScope(body);
       }
     }
 
@@ -245,20 +223,20 @@ class InstrumentFunctions implements CompilerPass {
         return;
       }
 
-      Node call = newReportFunctionExitNode();
       Node returnRhs = n.removeFirstChild();
-      if (returnRhs != null) {
-        call.addChildToBack(returnRhs);
-      }
+      Node call = newReportFunctionExitNode(n, returnRhs);
       n.addChildToFront(call);
-      compiler.reportCodeChange();
+      t.reportCodeChange();
     }
 
-    private Node newReportFunctionExitNode() {
+    private Node newReportFunctionExitNode(Node infoNode, Node returnRhs) {
       Node call = IR.call(
           IR.name(reportFunctionExitName),
-          IR.number(functionId));
+          IR.number(functionId),
+          (returnRhs != null) ? returnRhs : IR.name("undefined"),
+          IR.string(functionName));
       call.putBooleanProp(Node.FREE_CALL, true);
+      call.useSourceInfoFromForTree(infoNode);
       return call;
     }
 
@@ -297,26 +275,33 @@ class InstrumentFunctions implements CompilerPass {
         return;
       }
 
+      String name = functionNames.getFunctionName(n);
+
       if (!reportFunctionName.isEmpty()) {
         Node body = n.getLastChild();
         Node call = IR.call(
             IR.name(reportFunctionName),
-            IR.number(id));
+            IR.number(id),
+            IR.string(name),
+            IR.name("arguments"));
         call.putBooleanProp(Node.FREE_CALL, true);
         Node expr = IR.exprResult(call);
+        expr.useSourceInfoFromForTree(n);
         body.addChildToFront(expr);
-        compiler.reportCodeChange();
+        t.reportCodeChange();
       }
 
       if (!reportFunctionExitName.isEmpty()) {
-        (new InstrumentReturns(id)).process(n);
+        (new InstrumentReturns(id, name)).process(n);
       }
 
       if (!definedFunctionName.isEmpty()) {
         Node call = IR.call(
             IR.name(definedFunctionName),
-            IR.number(id));
+            IR.number(id),
+            IR.string(name));
         call.putBooleanProp(Node.FREE_CALL, true);
+        call.useSourceInfoFromForTree(n);
         Node expr = NodeUtil.newExpr(call);
 
         Node addingRoot = null;
@@ -327,7 +312,7 @@ class InstrumentFunctions implements CompilerPass {
         } else {
           Node beforeChild = n;
           for (Node ancestor : n.getAncestors()) {
-            int type = ancestor.getType();
+            Token type = ancestor.getToken();
             if (type == Token.BLOCK || type == Token.SCRIPT) {
               addingRoot = ancestor;
               break;
@@ -336,7 +321,7 @@ class InstrumentFunctions implements CompilerPass {
           }
           addingRoot.addChildBefore(expr, beforeChild);
         }
-        compiler.reportCodeChange();
+        compiler.reportChangeToEnclosingScope(addingRoot);
       }
     }
   }

@@ -16,16 +16,15 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 import com.google.javascript.jscomp.NodeTraversal.AbstractShallowCallback;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.Reference;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.ReferenceCollection;
 import com.google.javascript.jscomp.VariableVisibilityAnalysis.VariableVisibility;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -69,7 +68,7 @@ import java.util.Set;
     }
   };
 
-  private AbstractCompiler compiler;
+  private final AbstractCompiler compiler;
 
   /** The location abstraction used to calculate the effects of code */
   private LocationAbstraction locationAbstraction;
@@ -153,8 +152,8 @@ import java.util.Set;
   public boolean safeToMoveBefore(Node source,
       AbstractMotionEnvironment environment,
       Node destination) {
-    Preconditions.checkNotNull(locationAbstraction);
-    Preconditions.checkArgument(!nodeHasAncestor(destination, source));
+    checkNotNull(locationAbstraction);
+    checkArgument(!nodeHasAncestor(destination, source));
 
     // It is always safe to move pure code.
     if (isPure(source)) {
@@ -292,16 +291,17 @@ import java.util.Set;
         // a CFG-based analysis rather than just looking at the AST.
         //
         // TODO(dcc): have nodesHaveSameControlFlow() use a CFG
-        Predicate<Node> isEarlyExitPredicate = new Predicate<Node>() {
-          @Override
-          public boolean apply(Node input) {
-            int nodeType = input.getType();
+        Predicate<Node> isEarlyExitPredicate =
+            new Predicate<Node>() {
+              @Override
+              public boolean apply(Node input) {
+                Token nodeType = input.getToken();
 
-            return nodeType == Token.RETURN
-                || nodeType == Token.BREAK
-                || nodeType == Token.CONTINUE;
-          }
-        };
+                return nodeType == Token.RETURN
+                    || nodeType == Token.BREAK
+                    || nodeType == Token.CONTINUE;
+              }
+            };
 
         return !NodeUtil.has(node2DeepestControlDependentBlock,
             isEarlyExitPredicate, NOT_FUNCTION_PREDICATE);
@@ -335,20 +335,21 @@ import java.util.Set;
 
     int indexOfChildInParent = siblings.indexOf(child);
 
-    switch (parent.getType()) {
-      case Token.IF:
-      case Token.HOOK:
+    switch (parent.getToken()) {
+      case IF:
+      case HOOK:
         return (indexOfChildInParent == 1 || indexOfChildInParent == 2);
-      case Token.FOR:
+      case FOR:
+      case FOR_IN:
         // Only initializer is not control dependent
         return indexOfChildInParent != 0;
-      case Token.SWITCH:
+      case SWITCH:
         return indexOfChildInParent > 0;
-      case Token.WHILE:
-      case Token.DO:
-      case Token.AND:
-      case Token.OR:
-      case Token.FUNCTION:
+      case WHILE:
+      case DO:
+      case AND:
+      case OR:
+      case FUNCTION:
         return true;
 
       default:
@@ -510,8 +511,8 @@ import java.util.Set;
    */
   private static class LocationSummary {
 
-    private EffectLocation modSet;
-    private EffectLocation refSet;
+    private final EffectLocation modSet;
+    private final EffectLocation refSet;
 
     public LocationSummary(EffectLocation modSet, EffectLocation refSet) {
       this.modSet = modSet;
@@ -580,19 +581,7 @@ import java.util.Set;
      */
     abstract LocationSummary calculateLocationSummary(Node node);
 
-    /**
-     * Returns an abstraction-specific EffectLocation representing
-     * no location.
-     *
-     * <p>The bottom location joined with any location should return
-     * that location.
-     */
-    abstract EffectLocation getBottomLocation();
-
-    /**
-     * Calculates the abstraction-specific side effects
-     * for the node.
-     */
+    /** Calculates the abstraction-specific side effects for the node. */
     public LocationSummary calculateLocationSummary(Set<Node> nodes) {
       EffectLocation modAccumulator = getBottomLocation();
       EffectLocation refAccumulator = getBottomLocation();
@@ -606,6 +595,13 @@ import java.util.Set;
 
       return new LocationSummary(modAccumulator, refAccumulator);
     }
+
+    /**
+     * Returns an abstraction-specific EffectLocation representing no location.
+     *
+     * <p>The bottom location joined with any location should return that location.
+     */
+    abstract EffectLocation getBottomLocation();
   }
   /**
    * A very imprecise location abstraction in which there are only two abstract
@@ -773,7 +769,7 @@ import java.util.Set;
     private Set<Node> findStorageLocationReferences(Node root) {
       final Set<Node> references = new HashSet<>();
 
-      NodeTraversal.traverse(compiler, root, new AbstractShallowCallback() {
+      NodeTraversal.traverseEs6(compiler, root, new AbstractShallowCallback() {
         @Override
         public void visit(NodeTraversal t, Node n, Node parent) {
           if (NodeUtil.isGet(n)
@@ -790,7 +786,7 @@ import java.util.Set;
      * Calculates the effect mask for a variable reference.
      */
     private int effectMaskForVariableReference(Node variableReference) {
-      Preconditions.checkArgument(variableReference.isName());
+      checkArgument(variableReference.isName());
 
       int effectMask = VISIBILITY_LOCATION_NONE;
 
@@ -846,7 +842,7 @@ import java.util.Set;
      * Return true if the storage node is an r-value.
      */
     private static boolean storageNodeIsRValue(Node node) {
-      Preconditions.checkArgument(isStorageNode(node));
+      checkArgument(isStorageNode(node));
 
       // We consider all names to be r-values unless
       // LHS of Token.ASSIGN
@@ -875,7 +871,7 @@ import java.util.Set;
      * Return true if the storage node is an l-value.
      */
     private static boolean storageNodeIsLValue(Node node) {
-      Preconditions.checkArgument(isStorageNode(node));
+      checkArgument(isStorageNode(node));
       return NodeUtil.isLValue(node);
     }
 
@@ -899,8 +895,7 @@ import java.util.Set;
 
       @Override
       public boolean intersectsLocation(EffectLocation otherLocation) {
-        Preconditions.checkArgument(otherLocation instanceof
-            VisibilityBasedEffectLocation);
+        checkArgument(otherLocation instanceof VisibilityBasedEffectLocation);
 
         int otherMask =
             ((VisibilityBasedEffectLocation) otherLocation).visibilityMask;
@@ -915,8 +910,7 @@ import java.util.Set;
 
       @Override
       public EffectLocation join(EffectLocation otherLocation) {
-        Preconditions.checkArgument(otherLocation instanceof
-            VisibilityBasedEffectLocation);
+        checkArgument(otherLocation instanceof VisibilityBasedEffectLocation);
 
         int otherMask =
             ((VisibilityBasedEffectLocation) otherLocation).visibilityMask;
@@ -934,7 +928,7 @@ import java.util.Set;
    */
   private static class VariableUseDeclarationMap {
 
-    private AbstractCompiler compiler;
+    private final AbstractCompiler compiler;
 
     // Maps a using name to its declaring name
     private Map<Node, Node> referencesByNameNode;
@@ -954,10 +948,11 @@ import java.util.Set;
       referencesByNameNode = new HashMap<>();
 
       ReferenceCollectingCallback callback =
-        new ReferenceCollectingCallback(compiler,
-            ReferenceCollectingCallback.DO_NOTHING_BEHAVIOR);
-
-      NodeTraversal.traverse(compiler, root, callback);
+          new ReferenceCollectingCallback(
+              compiler,
+              ReferenceCollectingCallback.DO_NOTHING_BEHAVIOR,
+              new Es6SyntacticScopeCreator(compiler));
+      callback.process(root);
 
       for (Var variable : callback.getAllSymbols()) {
         ReferenceCollection referenceCollection =
@@ -978,7 +973,7 @@ import java.util.Set;
      * or {@code null} otherwise.
      */
     public Node findDeclaringNameNodeForUse(Node usingNameNode) {
-      Preconditions.checkArgument(usingNameNode.isName());
+      checkArgument(usingNameNode.isName());
 
       return referencesByNameNode.get(usingNameNode);
     }

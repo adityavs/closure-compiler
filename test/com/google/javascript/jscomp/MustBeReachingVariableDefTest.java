@@ -16,6 +16,9 @@
 
 package com.google.javascript.jscomp;
 
+import com.google.common.collect.ImmutableList;
+import com.google.javascript.jscomp.AbstractCompiler.LifeCycleStage;
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.Node;
 import junit.framework.TestCase;
@@ -41,6 +44,11 @@ public final class MustBeReachingVariableDefTest extends TestCase {
     assertNotMatch("D:var x; U:x; x=1");
     assertNotMatch("D:var x; U:x; x=1; x");
     assertMatch("D: var x = 1; var y = 2; y; U:x");
+
+    assertMatch("D:let x=1; U: x");
+    assertMatch("let x; D:x=1; U: x");
+
+    assertMatch("D: const x = 1; U: x");
   }
 
   public void testIf() {
@@ -168,18 +176,29 @@ public final class MustBeReachingVariableDefTest extends TestCase {
    */
   private void computeDefUse(String src) {
     Compiler compiler = new Compiler();
+    compiler.setLifeCycleStage(LifeCycleStage.NORMALIZED);
+    CompilerOptions options = new CompilerOptions();
+    options.setCodingConvention(new GoogleCodingConvention());
+    compiler.init(ImmutableList.<SourceFile>of(), ImmutableList.<SourceFile>of(), options);
+    compiler.getOptions().setLanguageIn(LanguageMode.ECMASCRIPT_2017);
+    compiler.getOptions().setLanguageOut(LanguageMode.ECMASCRIPT_2017);
+    Es6SyntacticScopeCreator scopeCreator = new Es6SyntacticScopeCreator(compiler);
     src = "function _FUNCTION(param1, param2){" + src + "}";
-    Node root = compiler.parseTestCode(src).getFirstChild();
+    Node script = compiler.parseTestCode(src);
+    Node root = script.getFirstChild();
+    Node functionBlock = root.getLastChild();
     assertEquals(0, compiler.getErrorCount());
-    Scope scope = SyntacticScopeCreator.makeUntyped(compiler).createScope(root, null);
+    Scope globalScope = scopeCreator.createScope(script, null);
+    Scope functionScope = scopeCreator.createScope(root, globalScope);
+    Scope funcBlockScope = scopeCreator.createScope(functionBlock, functionScope);
     ControlFlowAnalysis cfa = new ControlFlowAnalysis(compiler, false, true);
     cfa.process(null, root);
     ControlFlowGraph<Node> cfg = cfa.getCfg();
-    defUse = new MustBeReachingVariableDef(cfg, scope, compiler);
+    defUse = new MustBeReachingVariableDef(cfg, funcBlockScope, compiler, scopeCreator);
     defUse.analyze();
     def = null;
     use = null;
-    new NodeTraversal(compiler,new LabelFinder()).traverse(root);
+    NodeTraversal.traverseEs6(compiler, root, new LabelFinder());
     assertNotNull("Code should have an instruction labeled D", def);
     assertNotNull("Code should have an instruction labeled U", use);
   }

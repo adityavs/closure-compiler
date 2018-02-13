@@ -16,6 +16,8 @@
 
 package com.google.javascript.jscomp;
 
+import com.google.javascript.jscomp.parsing.parser.util.format.SimpleFormat;
+
 import java.io.PrintStream;
 
 /**
@@ -66,11 +68,11 @@ public class PrintStreamErrorManager extends BasicErrorManager {
         (summaryDetailLevel >= 1 && getErrorCount() + getWarningCount() > 0) ||
         (summaryDetailLevel >= 2 && getTypedPercent() > 0.0)) {
       if (getTypedPercent() > 0.0) {
-        stream.format("%d error(s), %d warning(s), %.1f%% typed%n",
-            getErrorCount(), getWarningCount(), getTypedPercent());
+        stream.print(SimpleFormat.format("%d error(s), %d warning(s), %.1f%% typed%n",
+            getErrorCount(), getWarningCount(), getTypedPercent()));
       } else {
-        stream.format("%d error(s), %d warning(s)%n", getErrorCount(),
-            getWarningCount());
+        stream.print(SimpleFormat.format("%d error(s), %d warning(s)%n", getErrorCount(),
+            getWarningCount()));
       }
     }
   }

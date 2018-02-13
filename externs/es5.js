@@ -16,7 +16,7 @@
 
 /**
  * @fileoverview Definitions for ECMAScript 5.
- * @see http://www.ecma-international.org/publications/files/drafts/tc39-2009-025.pdf
+ * @see https://es5.github.io/
  * @externs
  */
 
@@ -66,18 +66,18 @@ String.prototype.trimRight = function() {};
  * A object property descriptor used by Object.create, Object.defineProperty,
  * Object.defineProperties, Object.getOwnPropertyDescriptor.
  *
- * Note: not a real constructor.
- * @constructor
+ * @record
+ * @template THIS
  */
 function ObjectPropertyDescriptor() {}
 
-/** @type {*} */
+/** @type {(*|undefined)} */
 ObjectPropertyDescriptor.prototype.value;
 
-/** @type {(function():?)|undefined} */
+/** @type {(function(this: THIS):?)|undefined} */
 ObjectPropertyDescriptor.prototype.get;
 
-/** @type {(function(?):void)|undefined} */
+/** @type {(function(this: THIS, ?):void)|undefined} */
 ObjectPropertyDescriptor.prototype.set;
 
 /** @type {boolean|undefined} */
@@ -91,8 +91,8 @@ ObjectPropertyDescriptor.prototype.configurable;
 
 
 /**
- * @param {Object} proto
- * @param {Object=} opt_properties  A map of ObjectPropertyDescriptors.
+ * @param {?Object} proto
+ * @param {?Object=} opt_properties  A map of ObjectPropertyDescriptors.
  * @return {!Object}
  * @nosideeffects
  * @see https://developer.mozilla.org/en/JavaScript/Reference/Global_Objects/Object/create
@@ -120,10 +120,11 @@ Object.defineProperties = function(obj, props) {};
 
 
 /**
- * @param {!Object} obj
+ * @param {T} obj
  * @param {string} prop
- * @return {!ObjectPropertyDescriptor|undefined}
+ * @return {!ObjectPropertyDescriptor<T>|undefined}
  * @nosideeffects
+ * @template T
  * @see https://developer.mozilla.org/en/JavaScript/Reference/Global_Objects/Object/getOwnPropertyDescriptor
  */
 Object.getOwnPropertyDescriptor = function(obj, prop) {};
@@ -131,7 +132,7 @@ Object.getOwnPropertyDescriptor = function(obj, prop) {};
 
 /**
  * @param {!Object} obj
- * @return {!Array.<string>}
+ * @return {!Array<string>}
  * @nosideeffects
  * @see https://developer.mozilla.org/en/JavaScript/Reference/Global_Objects/Object/keys
  */
@@ -140,7 +141,7 @@ Object.keys = function(obj) {};
 
 /**
  * @param {!Object} obj
- * @return {!Array.<string>}
+ * @return {!Array<string>}
  * @nosideeffects
  * @see https://developer.mozilla.org/en/JavaScript/Reference/Global_Objects/Object/getOwnPropertyNames
  */
@@ -211,10 +212,10 @@ Object.isFrozen = function(obj) {};
 
 
 /**
- * As per ECMAScript 5, 15.12.3.
  * @param {string=} opt_key The JSON key for this object.
  * @return {*} The serializable representation of this object. Note that this
  *     need not be a string. See http://goo.gl/PEUvs.
+ * @see https://es5.github.io/#x15.12.3
  */
 Object.prototype.toJSON = function(opt_key) {};
 
@@ -243,21 +244,19 @@ function JSONType() {}
 
 /**
  * @param {string} jsonStr The string to parse.
- * @param {(function(string, *) : *)=} opt_reviver
+ * @param {(function(this:?, string, *) : *)=} opt_reviver
  * @return {*} The JSON object.
  * @throws {Error}
- * @nosideeffects
  */
 JSONType.prototype.parse = function(jsonStr, opt_reviver) {};
 
 
 /**
  * @param {*} jsonObj Input object.
- * @param {(Array.<string>|(function(string, *) : *)|null)=} opt_replacer
+ * @param {(Array<string>|(function(this:?, string, *) : *)|null)=} opt_replacer
  * @param {(number|string)=} opt_space
  * @return {string} JSON string which represents jsonObj.
  * @throws {Error}
- * @nosideeffects
  */
 JSONType.prototype.stringify = function(jsonObj, opt_replacer, opt_space) {};
 

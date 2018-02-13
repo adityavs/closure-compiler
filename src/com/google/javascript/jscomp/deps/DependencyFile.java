@@ -21,9 +21,7 @@ import static com.google.javascript.jscomp.deps.DefaultDependencyResolver.CLOSUR
 
 import com.google.javascript.jscomp.ErrorManager;
 import com.google.javascript.jscomp.LoggerErrorManager;
-
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,8 +41,7 @@ public final class DependencyFile implements SourceFile {
   private final SourceFile delegate;
 
   /** Logger for DependencyResolver. */
-  private static Logger logger =
-      Logger.getLogger(DependencyFile.class.getName());
+  private static final Logger logger = Logger.getLogger(DependencyFile.class.getName());
 
   /** Creates a new dependency file. */
   public DependencyFile(SourceFile delegate) {
@@ -52,17 +49,17 @@ public final class DependencyFile implements SourceFile {
   }
 
   @Override
-  public String getName() throws ServiceException {
+  public String getName() {
     return delegate.getName();
   }
 
   @Override
-  public String getContent() throws ServiceException {
+  public String getContent() {
     return delegate.getContent();
   }
 
   @Override
-  public boolean wasModified() throws ServiceException {
+  public boolean wasModified() {
     return delegate.wasModified();
   }
 
@@ -119,10 +116,9 @@ public final class DependencyFile implements SourceFile {
     provides.add(CLOSURE_BASE_PROVIDE);
 
     // Add implicit base.js entry.
-    dependencies.put(CLOSURE_BASE_PROVIDE,
-        new SimpleDependencyInfo(CLOSURE_BASE, CLOSURE_BASE,
-            provides,
-            Collections.<String>emptyList(), false));
+    dependencies.put(
+        CLOSURE_BASE_PROVIDE,
+        SimpleDependencyInfo.builder(CLOSURE_BASE, CLOSURE_BASE).setProvides(provides).build());
     errorManager.generateReport();
 
     logger.info("Dependencies loaded");

@@ -15,9 +15,10 @@
  */
 package com.google.javascript.jscomp;
 
+import com.google.javascript.jscomp.parsing.parser.FeatureSet;
+import com.google.javascript.jscomp.parsing.parser.FeatureSet.Feature;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-
 
 /**
  * Splits variable declarations that declare multiple variables into
@@ -25,7 +26,7 @@ import com.google.javascript.rhino.Node;
  * destructuring declaration. For example
  * <pre>
  *   var [a, b] = foo(), c = bar();}
- * <pre>
+ * </pre>
  * becomes
  * <pre>
  *   var [a, b] = foo();
@@ -40,35 +41,36 @@ import com.google.javascript.rhino.Node;
 public final class Es6SplitVariableDeclarations extends
     NodeTraversal.AbstractPostOrderCallback implements HotSwapCompilerPass {
   private final AbstractCompiler compiler;
+  private static final FeatureSet transpiledFeatures =
+      FeatureSet.BARE_MINIMUM.with(Feature.DESTRUCTURING);
+
   public Es6SplitVariableDeclarations(AbstractCompiler compiler) {
     this.compiler = compiler;
   }
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, externs, this);
-    NodeTraversal.traverse(compiler, root, this);
+    TranspilationPasses.processTranspile(compiler, root, transpiledFeatures, this);
   }
 
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
-    NodeTraversal.traverse(compiler, scriptRoot, this);
+    TranspilationPasses.hotSwapTranspile(compiler, scriptRoot, transpiledFeatures, this);
   }
 
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
     if (NodeUtil.isDestructuringDeclaration(n)) {
-      splitDeclaration(n, parent);
+      splitDeclaration(t, n, parent);
     }
   }
 
-  public void splitDeclaration(Node n, Node parent) {
+  public void splitDeclaration(NodeTraversal t, Node n, Node parent) {
     while (n.getFirstChild() != n.getLastChild()) {
-      Node child = n.getLastChild().detachFromParent();
-      Node newVar = IR.declaration(child, n.getType()).srcref(n);
+      Node child = n.getLastChild().detach();
+      Node newVar = IR.declaration(child, n.getToken()).srcref(n);
       parent.addChildAfter(newVar, n);
-      compiler.reportCodeChange();
+      t.reportCodeChange();
     }
   }
 }
-

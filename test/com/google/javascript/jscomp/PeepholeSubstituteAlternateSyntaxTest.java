@@ -29,34 +29,33 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
   // Needed for testFoldLiteralObjectConstructors(),
   // testFoldLiteralArrayConstructors() and testFoldRegExp...()
   private static final String FOLD_CONSTANTS_TEST_EXTERNS =
+      "var window = {};\n" +
       "var Object = function f(){};\n" +
       "var RegExp = function f(a){};\n" +
-      "var Array = function f(a){};\n";
+      "var Array = function f(a){};\n" +
+      "window.foo = null;\n";
 
-  private boolean late = true;
-
-  // TODO(user): Remove this when we no longer need to do string comparison.
-  private PeepholeSubstituteAlternateSyntaxTest(boolean compareAsTree) {
-    super(FOLD_CONSTANTS_TEST_EXTERNS, compareAsTree);
-  }
+  private boolean late;
+  private boolean retraverseOnChange;
 
   public PeepholeSubstituteAlternateSyntaxTest() {
     super(FOLD_CONSTANTS_TEST_EXTERNS);
   }
 
   @Override
-  public void setUp() throws Exception {
-    late = true;
+  protected void setUp() throws Exception {
     super.setUp();
-    enableLineNumberCheck(true);
+    late = true;
+    retraverseOnChange = false;
     disableNormalize();
   }
 
   @Override
-  public CompilerPass getProcessor(final Compiler compiler) {
-    PeepholeOptimizationsPass peepholePass = new PeepholeOptimizationsPass(
-        compiler, new PeepholeSubstituteAlternateSyntax(late));
-    peepholePass.setRetraverseOnChange(false);
+  protected CompilerPass getProcessor(final Compiler compiler) {
+    PeepholeOptimizationsPass peepholePass =
+        new PeepholeOptimizationsPass(
+            compiler, getName(), new PeepholeSubstituteAlternateSyntax(late));
+    peepholePass.setRetraverseOnChange(retraverseOnChange);
     return peepholePass;
   }
 
@@ -71,25 +70,6 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
 
   private void fold(String js, String expected) {
     test(js, expected);
-  }
-
-  void assertResultString(String js, String expected) {
-    assertResultString(js, expected, false);
-  }
-
-  // TODO(user): This is same as fold() except it uses string comparison. Any
-  // test that needs tell us where a folding is constructing an invalid AST.
-  void assertResultString(String js, String expected, boolean normalize) {
-    PeepholeSubstituteAlternateSyntaxTest scTest
-        = new PeepholeSubstituteAlternateSyntaxTest(false);
-
-    if (normalize) {
-      scTest.enableNormalize();
-    } else {
-      scTest.disableNormalize();
-    }
-
-    scTest.test(js, expected);
   }
 
   public void testFoldRegExpConstructor() {
@@ -151,9 +131,8 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
   }
 
   public void testFoldRegExpConstructorStringCompare() {
-    // Might have something to do with the internal representation of \n and how
-    // it is used in node comparison.
-    assertResultString("x=new RegExp(\"\\n\", \"i\")", "x=/\\n/i", true);
+    enableNormalize();
+    test("x = new RegExp(\"\\n\", \"i\")", "x = /\\n/i");
   }
 
   public void testContainsUnicodeEscape() throws Exception {
@@ -192,6 +171,27 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
          "(function f(){function Object(){this.x=4};return new Object();})();");
   }
 
+  public void testFoldLiteralObjectConstructors_onWindow() {
+    enableNormalize();
+
+    // Can fold when normalized
+    fold("x = new window.Object", "x = ({})");
+    fold("x = new window.Object()", "x = ({})");
+    fold("x = window.Object()", "x = ({})");
+
+    disableNormalize();
+    // Cannot fold above when not normalized
+    foldSame("x = new window.Object");
+    foldSame("x = new window.Object()");
+    foldSame("x = window.Object()");
+
+    enableNormalize();
+
+    // Can fold, the window namespace ensures it's not a conflict with the local Object.
+    fold("x = (function f(){function Object(){this.x=4};return new window.Object;})();",
+        "x = (function f(){function Object(){this.x=4};return {};})();");
+  }
+
   public void testFoldLiteralArrayConstructors() {
     enableNormalize();
 
@@ -208,11 +208,11 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
 
     // One argument - cannot be fold when normalized
     fold("x = new Array(7)", "x = Array(7)");
-    fold("x = Array(7)", "x = Array(7)");
+    foldSame("x = Array(7)");
     fold("x = new Array(y)", "x = Array(y)");
-    fold("x = Array(y)", "x = Array(y)");
+    foldSame("x = Array(y)");
     fold("x = new Array(foo())", "x = Array(foo())");
-    fold("x = Array(foo())", "x = Array(foo())");
+    foldSame("x = Array(foo())");
 
     // More than one argument - can be fold when normalized
     fold("x = new Array(1, 2, 3, 4)", "x = [1, 2, 3, 4]");
@@ -253,6 +253,32 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
         "Object(), Array(\"abc\", Object(), Array(Array())))");
     foldSame("x = new Array(" +
         "Object(), Array(\"abc\", Object(), Array(Array())))");
+  }
+
+  public void testRemoveWindowRefs() {
+    enableNormalize();
+    fold("x = window.Object", "x = Object");
+    fold("x = window.Object.keys", "x = Object.keys");
+    fold("if (window.Object) {}", "if (Object) {}");
+    fold("x = window.Object", "x = Object");
+    fold("x = window.Array", "x = Array");
+    fold("x = window.Error", "x = Error");
+    fold("x = window.RegExp", "x = RegExp");
+    fold("x = window.Math", "x = Math");
+
+    // Not currently handled by the pass but should be folded in the future.
+    foldSame("x = window.String");
+
+    // Don't fold properties on the window.
+    foldSame("x = window.foo");
+
+    disableNormalize();
+    foldSame("x = window.Object");
+    foldSame("x = window.Object.keys");
+
+    enableNormalize();
+    foldSame("var x = "
+        + "(function f(){var window = {Object: function() {}};return new window.Object;})();");
   }
 
   public void testFoldStandardConstructors() {
@@ -305,7 +331,7 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
   public void testUndefined() {
     foldSame("var x = undefined");
     foldSame("function f(f) {var undefined=2;var x = undefined;}");
-    this.enableNormalize();
+    enableNormalize();
     fold("var x = undefined", "var x=void 0");
     foldSame(
         "var undefined = 1;" +
@@ -314,7 +340,10 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
     foldSame("try {} catch(undefined) {}");
     foldSame("for (undefined in {}) {}");
     foldSame("undefined++;");
-    fold("undefined += undefined;", "undefined += void 0;");
+    disableNormalize();
+    foldSame("undefined += undefined;");
+    enableNormalize();
+    fold("undefined += undefined;", "undefined = void 0 + void 0;");
   }
 
   public void testSplitCommaExpressions() {
@@ -329,7 +358,7 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
 
     fold("(x=2), foo()", "x=2; foo()");
     fold("foo(), boo();", "foo(); boo()");
-    fold("(a(), b()), (c(), d());", "a(); b(); (c(), d());");
+    fold("(a(), b()), (c(), d());", "a(), b(); c(), d()");
     fold("a(); b(); (c(), d());", "a(); b(); c(); d();");
     fold("foo(), true", "foo();true");
     foldSame("foo();true");
@@ -353,7 +382,7 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
 
   public void testComma3() {
     late = false;
-    test("1, a(), b()", "1; a(); b()");
+    test("1, a(), b()", "1, a(); b()");
     late = true;
     foldSame("1, a(), b()");
   }
@@ -367,7 +396,7 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
 
   public void testComma5() {
     late = false;
-    test("a(), b(), 1", "a();b();1");
+    test("a(), b(), 1", "a(), b(); 1");
     late = true;
     foldSame("a(), b(), 1");
   }
@@ -392,6 +421,17 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
 
     // all possible delimiters used, leave it alone
     testSame("var x=[',', ' ', ';', '{', '}']");
+  }
+
+  public void testTemplateStringToString() {
+    test("`abcde`", "'abcde'");
+    test("`ab cd ef`", "'ab cd ef'");
+    testSame("`hello ${name}`");
+    testSame("tag `hello ${name}`");
+    testSame("tag `hello`");
+    test("`hello ${'foo'}`", "'hello foo'");
+    test("`${2} bananas`", "'2 bananas'");
+    test("`This is ${true}`", "'This is true'");
   }
 
   public void testBindToCall1() {
@@ -456,14 +496,47 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
     // correct code is in fact generated.
     // The FREE call wrapping should be moved out of the code generator
     // and into a denormalizing pass.
-    new StringCompareTestCase().testBindToCall3();
+    disableCompareAsTree();
+    retraverseOnChange = true;
+    late = false;
+
+    test("(goog.bind(f.m))()", "(0,f.m)()");
+    test("(goog.bind(f.m,a))()", "f.m.call(a)");
+
+    test("(goog.bind(f.m))(a)", "(0,f.m)(a)");
+    test("(goog.bind(f.m,a))(b)", "f.m.call(a,b)");
+
+    test("(goog.partial(f.m))()", "(0,f.m)()");
+    test("(goog.partial(f.m,a))()", "(0,f.m)(a)");
+
+    test("(goog.partial(f.m))(a)", "(0,f.m)(a)");
+    test("(goog.partial(f.m,a))(b)", "(0,f.m)(a,b)");
+
+    // Without using type information we don't know "f" is a function.
+    testSame("f.m.bind()()");
+    testSame("f.m.bind(a)()");
+    testSame("f.m.bind()(a)");
+    testSame("f.m.bind(a)(b)");
+
+    // Don't rewrite if the bind isn't the immediate call target
+    testSame("goog.bind(f.m).call(g)");
   }
 
-  public void testSimpleFunctionCall() {
+  public void testSimpleFunctionCall1() {
     test("var a = String(23)", "var a = '' + 23");
     test("var a = String('hello')", "var a = '' + 'hello'");
     testSame("var a = String('hello', bar());");
     testSame("var a = String({valueOf: function() { return 1; }});");
+  }
+
+  public void testSimpleFunctionCall2() {
+    test("var a = Boolean(true)", "var a = !0");
+    test("var a = Boolean(false)", "var a = !1");
+    test("var a = Boolean(1)", "var a = !!1");
+    test("var a = Boolean(x)", "var a = !!x");
+    test("var a = Boolean({})", "var a = !!{}");
+    testSame("var a = Boolean()");
+    testSame("var a = Boolean(!0, !1);");
   }
 
   public void testRotateAssociativeOperators() {
@@ -482,43 +555,5 @@ public final class PeepholeSubstituteAlternateSyntaxTest extends CompilerTestCas
   public void testNoRotateInfiniteLoop() {
     test("1/x * (y/1 * (1/z))", "1/x * (y/1) * (1/z)");
     testSame("1/x * (y/1) * (1/z)");
-  }
-
-  private static class StringCompareTestCase extends CompilerTestCase {
-
-    StringCompareTestCase() {
-      super("", false);
-    }
-
-    @Override
-    protected CompilerPass getProcessor(Compiler compiler) {
-      CompilerPass peepholePass =
-        new PeepholeOptimizationsPass(compiler,
-            new PeepholeSubstituteAlternateSyntax(false));
-      return peepholePass;
-    }
-
-    public void testBindToCall3() {
-      test("(goog.bind(f.m))()", "(0,f.m)()");
-      test("(goog.bind(f.m,a))()", "f.m.call(a)");
-
-      test("(goog.bind(f.m))(a)", "(0,f.m)(a)");
-      test("(goog.bind(f.m,a))(b)", "f.m.call(a,b)");
-
-      test("(goog.partial(f.m))()", "(0,f.m)()");
-      test("(goog.partial(f.m,a))()", "(0,f.m)(a)");
-
-      test("(goog.partial(f.m))(a)", "(0,f.m)(a)");
-      test("(goog.partial(f.m,a))(b)", "(0,f.m)(a,b)");
-
-      // Without using type information we don't know "f" is a function.
-      testSame("f.m.bind()()");
-      testSame("f.m.bind(a)()");
-      testSame("f.m.bind()(a)");
-      testSame("f.m.bind(a)(b)");
-
-      // Don't rewrite if the bind isn't the immediate call target
-      testSame("goog.bind(f.m).call(g)");
-    }
   }
 }

@@ -16,6 +16,7 @@
 
 package com.google.javascript.jscomp;
 
+import com.google.javascript.jscomp.CompilerOptions.PropertyCollapseLevel;
 import com.google.javascript.jscomp.CompilerOptions.Reach;
 
 /**
@@ -25,6 +26,8 @@ import com.google.javascript.jscomp.CompilerOptions.Reach;
  * @author bolinfest@google.com (Michael Bolin)
  */
 public enum CompilationLevel {
+  /** BUNDLE Simply orders and concatenates files to the output. */
+  BUNDLE,
 
   /**
    * WHITESPACE_ONLY removes comments and extra whitespace in the input JS.
@@ -48,10 +51,33 @@ public enum CompilationLevel {
   ADVANCED_OPTIMIZATIONS,
   ;
 
+  public static CompilationLevel fromString(String value) {
+    if (value == null) {
+      return null;
+    }
+    switch (value) {
+      case "BUNDLE":
+        return CompilationLevel.BUNDLE;
+      case "WHITESPACE_ONLY":
+      case "WHITESPACE":
+        return CompilationLevel.WHITESPACE_ONLY;
+      case "SIMPLE_OPTIMIZATIONS":
+      case "SIMPLE":
+        return CompilationLevel.SIMPLE_OPTIMIZATIONS;
+      case "ADVANCED_OPTIMIZATIONS":
+      case "ADVANCED":
+        return CompilationLevel.ADVANCED_OPTIMIZATIONS;
+      default:
+        return null;
+    }
+  }
+
   private CompilationLevel() {}
 
   public void setOptionsForCompilationLevel(CompilerOptions options) {
     switch (this) {
+      case BUNDLE:
+        break;
       case WHITESPACE_ONLY:
         applyBasicCompilationOptions(options);
         break;
@@ -70,6 +96,7 @@ public enum CompilationLevel {
     options.setAnonymousFunctionNaming(AnonymousFunctionNamingPolicy.UNMAPPED);
     options.generatePseudoNames = true;
     options.removeClosureAsserts = false;
+    options.removeJ2clAsserts = false;
     // Don't shadow variables as it is too confusing.
     options.shadowVariables = false;
   }
@@ -113,7 +140,7 @@ public enum CompilationLevel {
     options.setOptimizeArgumentsArray(true);
     options.setRemoveUnusedVariables(Reach.LOCAL_ONLY);
     options.collapseObjectLiterals = true;
-    options.protectHiddenSideEffects = true;
+    options.setProtectHiddenSideEffects(true);
   }
 
   /**
@@ -125,6 +152,9 @@ public enum CompilationLevel {
     // Do not call applySafeCompilationOptions(options) because the call can
     // create possible conflicts between multiple diagnostic groups.
 
+    options.setCheckSymbols(true);
+    options.setCheckTypes(true);
+
     // All the safe optimizations.
     options.dependencyOptions.setDependencySorting(true);
     options.setClosurePass(true);
@@ -133,34 +163,35 @@ public enum CompilationLevel {
     options.setDeadAssignmentElimination(true);
     options.setExtractPrototypeMemberDeclarations(true);
     options.setCollapseVariableDeclarations(true);
-    options.convertToDottedProperties = true;
-    options.labelRenaming = true;
+    options.setConvertToDottedProperties(true);
+    options.setLabelRenaming(true);
     options.setRemoveDeadCode(true);
     options.setOptimizeArgumentsArray(true);
-    options.collapseObjectLiterals = true;
-    options.protectHiddenSideEffects = true;
+    options.setCollapseObjectLiterals(true);
+    options.setProtectHiddenSideEffects(true);
 
     // All the advanced optimizations.
-    options.removeClosureAsserts = true;
-    options.reserveRawExports = true;
-    options.setRenamingPolicy(
-        VariableRenamingPolicy.ALL, PropertyRenamingPolicy.ALL_UNQUOTED);
-    options.shadowVariables = true;
+    options.setRemoveClosureAsserts(true);
+    options.setRemoveAbstractMethods(true);
+    options.setReserveRawExports(true);
+    options.setRenamingPolicy(VariableRenamingPolicy.ALL, PropertyRenamingPolicy.ALL_UNQUOTED);
+    options.setShadowVariables(true);
     options.setRemoveUnusedPrototypeProperties(true);
     options.setRemoveUnusedPrototypePropertiesInExterns(false);
     options.setRemoveUnusedClassProperties(true);
     options.setCollapseAnonymousFunctions(true);
-    options.setCollapseProperties(true);
+    options.setCollapsePropertiesLevel(PropertyCollapseLevel.ALL);
     options.setCheckGlobalThisLevel(CheckLevel.WARNING);
     options.setRewriteFunctionExpressions(false);
     options.setSmartNameRemoval(true);
+    options.setExtraSmartNameRemoval(true);
     options.setInlineConstantVars(true);
     options.setInlineFunctions(Reach.ALL);
     options.setAssumeClosuresOnlyCaptureReferences(false);
-    options.setInlineGetters(true);
     options.setInlineVariables(Reach.ALL);
     options.setFlowSensitiveInlineVariables(true);
     options.setComputeFunctionSideEffects(true);
+    options.setAssumeStrictThis(true);
 
     // Remove unused vars also removes unused functions.
     options.setRemoveUnusedVariables(Reach.ALL);
@@ -171,27 +202,53 @@ public enum CompilationLevel {
 
     // Call optimizations
     options.setDevirtualizePrototypeMethods(true);
-    options.optimizeParameters = true;
-    options.optimizeReturns = true;
-    options.optimizeCalls = true;
+    options.setOptimizeCalls(true);
   }
 
   /**
-   * Enable additional optimizations that use type information.
+   * Enable additional optimizations that use type information. Only has
+   * an effect for ADVANCED_OPTIMIZATIONS; this is a no-op for other modes.
    * @param options The CompilerOptions object to set the options on.
    */
   public void setTypeBasedOptimizationOptions(CompilerOptions options) {
     switch (this) {
       case ADVANCED_OPTIMIZATIONS:
-        options.inferTypes = true;
-        options.disambiguateProperties = true;
-        options.ambiguateProperties = true;
-        options.inlineProperties = true;
+        options.setDisambiguateProperties(true);
+        options.setAmbiguateProperties(true);
+        options.setInlineProperties(true);
+        options.setUseTypesForLocalOptimization(true);
         break;
       case SIMPLE_OPTIMIZATIONS:
-        // TODO(johnlenz): enable peephole type based optimization.
-        break;
       case WHITESPACE_ONLY:
+      case BUNDLE:
+        break;
+    }
+  }
+
+  /**
+   * Enable additional optimizations that operate on global declarations. Advanced mode does
+   * this by default, but this isn't valid in simple mode in the general case and should only
+   * be enabled when code is self contained (such as when it is enclosed by a function wrapper.
+   *
+   * @param options The CompilerOptions object to set the options on.
+   */
+  public void setWrappedOutputOptimizations(CompilerOptions options) {
+    // Global variables and properties names can't conflict.
+    options.reserveRawExports = false;
+    switch (this) {
+      case SIMPLE_OPTIMIZATIONS:
+        // Enable global variable optimizations (but not property optimizations)
+        options.setVariableRenaming(VariableRenamingPolicy.ALL);
+        options.setCollapsePropertiesLevel(PropertyCollapseLevel.MODULE_EXPORT);
+        options.setCollapseAnonymousFunctions(true);
+        options.setInlineConstantVars(true);
+        options.setInlineFunctions(Reach.ALL);
+        options.setInlineVariables(Reach.ALL);
+        options.setRemoveUnusedVariables(Reach.ALL);
+        break;
+      case ADVANCED_OPTIMIZATIONS:
+      case WHITESPACE_ONLY:
+      case BUNDLE:
         break;
     }
   }

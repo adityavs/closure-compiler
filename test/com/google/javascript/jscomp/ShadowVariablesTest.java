@@ -16,22 +16,24 @@
 
 package com.google.javascript.jscomp;
 
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
+
 /**
  * Unit tests for {@link ShadowVariables}.
  *
- *
  */
-public final class ShadowVariablesTest extends CompilerTestCase{
+public final class ShadowVariablesTest extends CompilerTestCase {
   // Use pseudo names to make test easier to read.
   private boolean generatePseudoNames = false;
   private RenameVars pass = null;
 
   @Override
   protected CompilerPass getProcessor(Compiler compiler) {
-      pass = new RenameVars(
-          compiler, "", false, false,
-          generatePseudoNames, true, false, null, null, null, null);
-      return  pass;
+    pass = new RenameVars(
+        compiler, "", false, false,
+        generatePseudoNames, true, false, null, null, null,
+        new DefaultNameGenerator());
+    return  pass;
   }
 
   @Override
@@ -42,6 +44,7 @@ public final class ShadowVariablesTest extends CompilerTestCase{
   @Override
   protected void setUp() throws Exception {
     super.setUp();
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2017);
     generatePseudoNames = false;
   }
 
@@ -86,12 +89,25 @@ public final class ShadowVariablesTest extends CompilerTestCase{
 
   public void testNoShadowReferencedVariables() {
     generatePseudoNames = true;
-    test("function  f1  () { var  x  ; x  ; x  ; x  ;" +
-         "  return function  f2  ( y  ) {" +
-         "    return function  f3  () { x  } }}",
-         "function $f1$$() { var $x$$;$x$$;$x$$;$x$$;" +
-         "  return function $f2$$($y$$) {" +
-         "    return function $f3$$() {$x$$} }}");
+    // Unsafe to shadow function names on IE8
+    test(lines(
+        "function f1() {",
+        "  var x; x; x; x;",
+        "  return function f2(y) {",
+        "    return function f3() {",
+        "      x;",
+        "    };",
+        "  };",
+        "}"),
+        lines(
+        "function $f1$$() {",
+        "  var $x$$; $x$$; $x$$; $x$$;",
+        "  return function $f2$$($y$$) {",
+        "    return function $f3$$() {",
+        "      $x$$;",
+        "    };",
+        "  };",
+        "}"));
   }
 
   public void testNoShadowGlobalVariables() {
@@ -256,7 +272,8 @@ public final class ShadowVariablesTest extends CompilerTestCase{
     try {
       vm.getNewNameToOriginalNameMap();
     } catch (java.lang.IllegalArgumentException unexpected) {
-      fail("Invalid VariableMap generated: " + vm.getOriginalNameToNewNameMap());
+      throw new AssertionError(
+          "Invalid VariableMap generated: " + vm.getOriginalNameToNewNameMap(), unexpected);
     }
   }
 
@@ -269,26 +286,113 @@ public final class ShadowVariablesTest extends CompilerTestCase{
     // why we can't update the pseudo name map on-the-fly.
 
     generatePseudoNames = true;
-    test("function f(x) {" +
-         "  x;x;x;" +
-         "  return function (y) { y; x };" +
-         "  return function (y) {" +
-         "    y;" +
-         "    return function (m, n) {" +
-         "       m;m;m;" +
-         "    };" +
-         "  };" +
-         "}",
+    test(
+        lines(
+            "function f(x) {",
+            "  x;x;x;",
+            "  return function (y) { y; x };",
+            "  return function (y) {",
+            "    y;",
+            "    return function (m, n) {",
+            "       m;m;m;",
+            "    };",
+            "  };",
+            "}"),
+        lines(
+            "function $f$$($x$$) {",
+            "  $x$$;$x$$;$x$$;",
+            "  return function ($y$$) { $y$$; $x$$ };",
+            "  return function ($x$$) {",
+            "    $x$$;",
+            "    return function ($x$$, $y$$) {",
+            "       $x$$;$x$$;$x$$;",
+            "    };",
+            "  };",
+            "}"));
+  }
 
-         "function $f$$($x$$) {" +
-         "  $x$$;$x$$;$x$$;" +
-         "  return function ($y$$) { $y$$; $x$$ };" +
-         "  return function ($x$$) {" +
-         "    $x$$;" +
-         "    return function ($x$$, $y$$) {" +
-         "       $x$$;$x$$;$x$$;" +
-         "    };" +
-         "  };" +
-         "}");
+  public void testBlocks() {
+    // Unsafe to shadow nested "var"s
+    test(lines(
+        "function f() {",
+        "  var x = 1;",
+        "  {",
+        "    var y = 2;",
+        "    {",
+        "      var z = 3;",
+        "    }",
+        "  }",
+        "}"),
+        lines(
+        "function a() {",
+        "  var b = 1;",
+        "  {",
+        "    var c = 2;",
+        "    {",
+        "      var d = 3;",
+        "    }",
+        "  }",
+        "}"));
+
+    // Safe to shadow nested "let"s
+    test(lines(
+        "function f() {",
+        "  let x = 1;",
+        "  {",
+        "    let y = 2;",
+        "    {",
+        "      let z = 3;",
+        "    }",
+        "  }",
+        "}"),
+        lines(
+        "function b() {",
+        "  let a = 1;",
+        "  {",
+        "    let a = 2;",
+        "      {",
+        "        let a = 3;",
+        "      }",
+        "  }",
+        "}"));
+
+    test(lines(
+        "function f() {",
+        "  let x = 1;",
+        "  {",
+        "    let y = x;",
+        "    {",
+        "      let z = y;",
+        "      let w = x;",
+        "    }",
+        "  }",
+        "}"),
+        lines(
+        "function c() {",
+        "  let a = 1;",
+        "  {",
+        "    let b = a;",
+        "    {",
+        "      let d = b;",
+        "      let e = a;",
+        "    }",
+        "  }",
+        "}"));
+  }
+
+  public void testCatch() {
+    // Unsafe to shadow caught exceptions on IE8 since they are not block scoped
+    test(lines(
+        "function f(a) {",
+        "  try {",
+        "  } catch (e) {",
+        "  }",
+        "}"),
+        lines(
+        "function a(b) {",
+        "  try {",
+        "  } catch (c) {",
+        "  }",
+        "}"));
   }
 }

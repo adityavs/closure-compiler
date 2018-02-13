@@ -16,7 +16,12 @@
 
 package com.google.javascript.jscomp.newtypes;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.collect.ImmutableSet;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Static methods that operate on {@code TypeWithProperties} instances.
@@ -28,42 +33,45 @@ final class TypeWithPropertiesStatics {
 
   static JSType getProp(
       ImmutableSet<? extends TypeWithProperties> types, QualifiedName qname) {
-    if (types == null) {
-      return null;
-    }
-    JSType ptype = JSType.BOTTOM;
-    boolean foundProp = false;
+    checkNotNull(types);
+    JSType ptype = null;
     for (TypeWithProperties t : types) {
       if (t.mayHaveProp(qname)) {
-        foundProp = true;
-        ptype = JSType.join(ptype, t.getProp(qname));
+        JSType tmp = t.getProp(qname);
+        ptype = ptype == null ? tmp : JSType.join(ptype, tmp);
       }
     }
-    return foundProp ? ptype : null;
+    return ptype;
   }
 
   static JSType getDeclaredProp(
       ImmutableSet<? extends TypeWithProperties> types, QualifiedName qname) {
-    if (types == null) {
-      return null;
-    }
-    JSType ptype = JSType.BOTTOM;
+    checkNotNull(types);
+    JSType ptype = null;
     for (TypeWithProperties t : types) {
       if (t.mayHaveProp(qname)) {
         JSType declType = t.getDeclaredProp(qname);
         if (declType != null) {
-          ptype = JSType.join(ptype, declType);
+          ptype = ptype == null ? declType : JSType.join(ptype, declType);
         }
       }
     }
-    return ptype.isBottom() ? null : ptype;
+    return ptype;
+  }
+
+  static Collection<JSType> getSubtypesWithProperty(
+      ImmutableSet<? extends TypeWithProperties> types, QualifiedName qname) {
+    checkNotNull(types);
+    Set<JSType> typesWithProp = new HashSet<>();
+    for (TypeWithProperties t : types) {
+      typesWithProp.addAll(t.getSubtypesWithProperty(qname));
+    }
+    return typesWithProp;
   }
 
   static boolean mayHaveProp(
       ImmutableSet<? extends TypeWithProperties> types, QualifiedName qname) {
-    if (types == null) {
-      return false;
-    }
+    checkNotNull(types);
     for (TypeWithProperties t : types) {
       if (t.mayHaveProp(qname)) {
         return true;
@@ -74,9 +82,7 @@ final class TypeWithPropertiesStatics {
 
   static boolean hasProp(
       ImmutableSet<? extends TypeWithProperties> types, QualifiedName qname) {
-    if (types == null) {
-      return false;
-    }
+    checkNotNull(types);
     for (TypeWithProperties t : types) {
       if (!t.hasProp(qname)) {
         return false;
@@ -87,9 +93,7 @@ final class TypeWithPropertiesStatics {
 
   static boolean hasConstantProp(
       ImmutableSet<? extends TypeWithProperties> types, QualifiedName qname) {
-    if (types == null) {
-      return false;
-    }
+    checkNotNull(types);
     for (TypeWithProperties t : types) {
       if (t.hasConstantProp(qname)) {
         return true;

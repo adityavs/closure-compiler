@@ -18,14 +18,11 @@ package com.google.javascript.jscomp;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
-
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.logging.Logger;
-
 
 /**
  * Gives anonymous function names that are optimized to be small and provides a
@@ -45,8 +42,8 @@ import java.util.logging.Logger;
  */
 class NameAnonymousFunctionsMapped implements CompilerPass {
 
-  private static Logger logger = Logger.getLogger(
-      NameAnonymousFunctionsMapped.class.getName());
+  private static final Logger logger =
+      Logger.getLogger(NameAnonymousFunctionsMapped.class.getName());
 
   static final char PREFIX = '$';
   static final String PREFIX_STRING = "$";
@@ -66,7 +63,8 @@ class NameAnonymousFunctionsMapped implements CompilerPass {
         previousMap != null ?
             previousMap.getNewNameToOriginalNameMap().keySet() :
             Collections.<String>emptySet();
-    this.nameGenerator = new NameGenerator(reserved, PREFIX_STRING, null);
+    this.nameGenerator = new DefaultNameGenerator(
+        reserved, PREFIX_STRING, null);
     this.previousMap = previousMap;
     this.renameMap = new HashMap<>();
   }
@@ -75,12 +73,9 @@ class NameAnonymousFunctionsMapped implements CompilerPass {
   public void process(Node externs, Node root) {
     AnonymousFunctionNamingCallback namingCallback =
         new AnonymousFunctionNamingCallback(new MappedFunctionNamer());
-    NodeTraversal.traverse(compiler, root, namingCallback);
+    NodeTraversal.traverseEs6(compiler, root, namingCallback);
     logger.fine("Named " + namedCount + " anon functions using " +
         bytesUsed + " bytes");
-    if (namedCount > 0) {
-      compiler.reportCodeChange();
-    }
   }
 
   /**
@@ -95,13 +90,15 @@ class NameAnonymousFunctionsMapped implements CompilerPass {
 
     @Override
     public final String getName(Node node) {
-      switch (node.getType()) {
-        case Token.NAME:
-        case Token.STRING:
-        case Token.STRING_KEY:
+      switch (node.getToken()) {
+        case NAME:
+        case STRING:
+        case STRING_KEY:
           return node.getString();
+        case COMPUTED_PROP:
+          return getName(node.getFirstChild());
         default:
-          return new CodePrinter.Builder(node).build();
+          return compiler.toSource(node);
       }
     }
 
@@ -112,6 +109,7 @@ class NameAnonymousFunctionsMapped implements CompilerPass {
       fnNameNode.setString(newName);
       namedCount++;
       bytesUsed += newName.length();
+      compiler.reportChangeToEnclosingScope(fnNameNode);
     }
 
     String getAlternateName(String name) {

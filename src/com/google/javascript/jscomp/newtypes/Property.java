@@ -16,10 +16,11 @@
 
 package com.google.javascript.jscomp.newtypes;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkArgument;
+
 import com.google.common.collect.Multimap;
 import com.google.javascript.rhino.Node;
-
+import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -29,7 +30,7 @@ import java.util.Objects;
  * @author blickly@google.com (Ben Lickly)
  * @author dimvar@google.com (Dimitris Vardoulakis)
  */
-class Property {
+class Property implements Serializable {
   // AST node where the property is defined; most commonly null.
   // TODO(dimvar): if having this field on every property wastes memory,
   // consider alternatives:
@@ -46,10 +47,10 @@ class Property {
     OPTIONAL,
     REQUIRED;
   }
-  private Attribute attribute;
+  private final Attribute attribute;
 
   private Property(Node defSite, JSType inferredType, JSType declaredType, Attribute attribute) {
-    Preconditions.checkArgument(inferredType != null);
+    checkArgument(inferredType != null);
     this.defSite = defSite;
     this.inferredType = inferredType;
     this.declaredType = declaredType;
@@ -92,18 +93,27 @@ class Property {
     return inferredType;
   }
 
+  Node getDefSite() {
+    return this.defSite;
+  }
+
   JSType getDeclaredType() {
     return declaredType;
   }
 
   Property withOptional() {
     return isOptional() ? this
-        : new Property(defSite, inferredType, declaredType, Attribute.OPTIONAL);
+        : new Property(this.defSite, this.inferredType, this.declaredType, Attribute.OPTIONAL);
   }
 
   Property withRequired() {
     return isRequired() ? this
-        : new Property(defSite, inferredType, declaredType, Attribute.REQUIRED);
+        : new Property(this.defSite, this.inferredType, this.declaredType, Attribute.REQUIRED);
+  }
+
+  Property withNewType(JSType newType) {
+    return new Property(
+        this.defSite, newType, this.declaredType == null ? null : newType, this.attribute);
   }
 
   private static Attribute meetAttributes(Attribute a1, Attribute a2) {
@@ -186,16 +196,14 @@ class Property {
   }
 
   /** Returns whether unification succeeded */
-  boolean unifyWithSubtype(
-      Property other,
-      List<String> typeParameters,
-      Multimap<String, JSType> typeMultimap) {
+  boolean unifyWithSubtype(Property other, List<String> typeParameters,
+      Multimap<String, JSType> typeMultimap, SubtypeCache subSuperMap) {
     if (!inferredType.unifyWithSubtype(
-        other.inferredType, typeParameters, typeMultimap)) {
+        other.inferredType, typeParameters, typeMultimap, subSuperMap)) {
       return false;
     } else if (declaredType != null && other.declaredType != null &&
         !declaredType.unifyWithSubtype(
-        other.declaredType, typeParameters, typeMultimap)) {
+            other.declaredType, typeParameters, typeMultimap, subSuperMap)) {
       return false;
     }
     return true;
@@ -215,17 +223,17 @@ class Property {
 
   @Override
   public String toString() {
-    return appendTo(new StringBuilder()).toString();
+    return appendTo(new StringBuilder(), ToStringContext.TO_STRING).toString();
   }
 
-  public StringBuilder appendTo(StringBuilder builder) {
+  public StringBuilder appendTo(StringBuilder builder, ToStringContext ctx) {
     switch (attribute) {
       case CONSTANT:
-        return inferredType.appendTo(builder).append('^');
+        return inferredType.appendTo(builder, ctx).append('^');
       case REQUIRED:
-        return inferredType.appendTo(builder);
+        return inferredType.appendTo(builder, ctx);
       case OPTIONAL:
-        return inferredType.appendTo(builder).append('=');
+        return inferredType.appendTo(builder, ctx).append('=');
       default:
         throw new RuntimeException("Unknown Attribute value " + attribute);
     }
@@ -233,13 +241,12 @@ class Property {
 
   @Override
   public boolean equals(Object o) {
-    if (o == null) {
+    if (!(o instanceof Property)) {
       return false;
     }
     if (this == o) {
       return true;
     }
-    Preconditions.checkArgument(o instanceof Property);
     Property p2 = (Property) o;
     return inferredType.equals(p2.inferredType) &&
         attribute == p2.attribute;

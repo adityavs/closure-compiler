@@ -21,31 +21,28 @@ package com.google.javascript.jscomp;
  * Tests for the interaction of multiple peephole passes are in
  * PeepholeIntegrationTest.
  */
-public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
+public final class PeepholeMinimizeConditionsTest extends TypeICompilerTestCase {
 
   private boolean late = true;
 
-  // TODO(user): Remove this when we no longer need to do string comparison.
-  private PeepholeMinimizeConditionsTest(boolean compareAsTree) {
-    super("", compareAsTree);
-  }
-
   public PeepholeMinimizeConditionsTest() {
-    super("");
+    super(DEFAULT_EXTERNS);
   }
 
   @Override
-  public void setUp() throws Exception {
-    late = true;
+  protected void setUp() throws Exception {
     super.setUp();
-    enableLineNumberCheck(true);
-    disableNormalize();
+    late = true;
+    this.mode = TypeInferenceMode.NEITHER;
+    // NTI warns about property accesses on *
+    ignoreWarnings(DiagnosticGroups.NEW_CHECK_TYPES_EXTRA_CHECKS);
   }
 
   @Override
-  public CompilerPass getProcessor(final Compiler compiler) {
-    PeepholeOptimizationsPass peepholePass = new PeepholeOptimizationsPass(
-        compiler, new PeepholeMinimizeConditions(late));
+  protected CompilerPass getProcessor(final Compiler compiler) {
+    PeepholeOptimizationsPass peepholePass =
+        new PeepholeOptimizationsPass(
+            compiler, getName(), new PeepholeMinimizeConditions(late));
     peepholePass.setRetraverseOnChange(false);
     return peepholePass;
   }
@@ -61,26 +58,6 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
 
   private void fold(String js, String expected) {
     test(js, expected);
-  }
-
-  private static void assertResultString(String js, String expected) {
-    assertResultString(js, expected, false);
-  }
-
-  // TODO(user): This is same as fold() except it uses string comparison. Any
-  // test that needs tell us where a folding is constructing an invalid AST.
-  private static void assertResultString(String js, String expected,
-      boolean normalize) {
-    PeepholeMinimizeConditionsTest scTest
-        = new PeepholeMinimizeConditionsTest(false);
-
-    if (normalize) {
-      scTest.enableNormalize();
-    } else {
-      scTest.disableNormalize();
-    }
-
-    scTest.test(js, expected);
   }
 
   /** Check that removing blocks with 1 child works */
@@ -109,16 +86,13 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
     fold("function f(){if(x){a.foo()}}", "function f(){x&&a.foo()}");
 
     // Try it out with throw/catch/finally [which should not change]
-    fold("function f(){try{foo()}catch(e){bar(e)}finally{baz()}}",
-         "function f(){try{foo()}catch(e){bar(e)}finally{baz()}}");
+    foldSame("function f(){try{foo()}catch(e){bar(e)}finally{baz()}}");
 
     // Try it out with switch statements
-    fold("function f(){switch(x){case 1:break}}",
-         "function f(){switch(x){case 1:break}}");
+    foldSame("function f(){switch(x){case 1:break}}");
 
     // Do while loops stay in a block if that's where they started
-    fold("function f(){if(e1){do foo();while(e2)}else foo2()}",
-         "function f(){if(e1){do foo();while(e2)}else foo2()}");
+    foldSame("function f(){if(e1){do foo();while(e2)}else foo2()}");
     // Test an obscure case with do and while
     fold("if(x){do{foo()}while(y)}else bar()",
          "if(x){do foo();while(y)}else bar()");
@@ -222,17 +196,18 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
     fold("function f(){if(x)y%=1;else y%=2;}", "function f(){y%=x?1:2}");
     fold("function f(){if(x)y|=1;else y|=2;}", "function f(){y|=x?1:2}");
 
-    // sanity check, don't fold if the 2 ops don't match
+    // Don't fold if the 2 ops don't match.
     foldSame("function f(){x ? y-=1 : y+=2}");
 
-    // sanity check, don't fold if the 2 LHS don't match
+    // Don't fold if the 2 LHS don't match.
     foldSame("function f(){x ? y-=1 : z-=1}");
 
-    // sanity check, don't fold if there are potential effects
+    // Don't fold if there are potential effects.
     foldSame("function f(){x ? y().a=3 : y().a=4}");
   }
 
   public void testRemoveDuplicateStatements() {
+    enableNormalize();
     fold("if (a) { x = 1; x++ } else { x = 2; x++ }",
          "x=(a) ? 1 : 2; x++");
     fold("if (a) { x = 1; x++; y += 1; z = pi; }" +
@@ -257,6 +232,13 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
          "}");
   }
 
+  public void testDontRemoveDuplicateStatementsWithoutNormalization() {
+    // In the following test case, we can't remove the duplicate "alert(x);" lines since each "x"
+    // refers to a different variable.
+    // We only try removing duplicate statements if the AST is normalized and names are unique.
+    testSame("if (Math.random() < 0.5) { const x = 3; alert(x); } else { const x = 5; alert(x); }");
+  }
+
   public void testNotCond() {
     fold("function f(){if(!x)foo()}", "function f(){x||foo()}");
     fold("function f(){if(!x)b=1}", "function f(){x||(b=1)}");
@@ -276,7 +258,7 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
   public void testFoldLogicalOpStringCompare() {
     // side-effects
     // There is two way to parse two &&'s and both are correct.
-    assertResultString("if(foo() && false) z()", "(foo(),0)&&z()");
+    fold("if (foo() && false) z()", "(foo(), 0) && z()");
   }
 
   public void testFoldNot() {
@@ -339,6 +321,16 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
     fold("if(!a&&!b)foo()", "(a||b)||foo()");
   }
 
+  public void testMinimizeDemorgan2() {
+    // Make sure trees with cloned functions are marked as changed
+    fold("(!(a&&!((function(){})())))||foo()", "!a||(function(){})()||foo()");
+  }
+
+  public void testMinimizeDemorgan2b() {
+    // Make sure unchanged trees with functions are not marked as changed
+    foldSame("!a||(function(){})()||foo()");
+  }
+
   public void testMinimizeDemorgan3() {
     fold("if((!a||!b)&&(c||d)) foo()", "(a&&b||!c&&!d)||foo()");
   }
@@ -352,9 +344,12 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
          "(!x || y!==2 && f() || y!==3 && h()) || foo()");
   }
 
-  public void testMinimizeDemorgan20() {
+  public void testMinimizeDemorgan20a() {
     fold("if (0===c && (2===a || 1===a)) f(); else g()",
          "if (0!==c || 2!==a && 1!==a) g(); else f()");
+  }
+
+  public void testMinimizeDemorgan20b() {
     fold("if (0!==c || 2!==a && 1!==a) g(); else f()",
          "(0!==c || 2!==a && 1!==a) ? g() : f()");
   }
@@ -369,6 +364,12 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
   }
 
   public void testMinimizeHook() {
+    fold("x ? x : y", "x || y");
+    // We assume GETPROPs don't have side effects.
+    fold("x.y ? x.y : x.z", "x.y || x.z");
+    // This can be folded if x() does not have side effects.
+    foldSame("x() ? x() : y()");
+
     fold("!x ? foo() : bar()",
          "x ? bar() : foo()");
     fold("while(!(x ? y : z)) foo();",
@@ -386,8 +387,9 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
 
   public void testMinimizeExprResult() {
     fold("!x||!y", "x&&y");
-    fold("if(!(x&&!y)) foo()", "x&&!y||!foo()");
-    fold("if(!x||y) foo()", "x&&!y||!foo()");
+    fold("if(!(x&&!y)) foo()", "(!x||y)&&foo()");
+    fold("if(!x||y) foo()", "(!x||y)&&foo()");
+    fold("(!x||y)&&foo()", "x&&!y||!foo()");
   }
 
   public void testMinimizeDemorgan21() {
@@ -403,17 +405,23 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
     // This test uses constant folding logic, so is only here for completeness.
     // These could be simplified to "for(;;) ..."
     fold("for(;!!true;) foo()", "for(;1;) foo()");
+    // Verify function deletion tracking.
+    fold("if(!!true||function(){}) {}", "if(1) {}");
     // Don't bother with FOR inits as there are normalized out.
     fold("for(!!true;;) foo()", "for(!0;;) foo()");
 
     // These test tryMinimizeCondition
     fold("for(;!!x;) foo()", "for(;x;) foo()");
 
-    // sanity check
     foldSame("for(a in b) foo()");
     foldSame("for(a in {}) foo()");
     foldSame("for(a in []) foo()");
     fold("for(a in !!true) foo()", "for(a in !0) foo()");
+
+    foldSame("for(a of b) foo()");
+    foldSame("for(a of {}) foo()");
+    foldSame("for(a of []) foo()");
+    fold("for(a of !!true) foo()", "for(a of !0) foo()");
   }
 
   public void testMinimizeCondition_example1() {
@@ -434,8 +442,9 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
         "var x; for(;!foo;) {} x;");
 
     // 'while' is normalized to 'for'
-    enableNormalize(true);
+    enableNormalize();
     fold("while(true) if (a) break", "for(;1&&!a;);");
+    disableNormalize();
   }
 
   public void testFoldLoopBreakEarly() {
@@ -447,8 +456,9 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
     foldSame("for(;a;) { if (b) break; if (c) break; }");
 
     foldSame("while(1) if (a) break");
-    enableNormalize(true);
+    enableNormalize();
     foldSame("while(1) if (a) break");
+    disableNormalize();
   }
 
   public void testFoldConditionalVarDeclaration() {
@@ -766,4 +776,125 @@ public final class PeepholeMinimizeConditionsTest extends CompilerTestCase {
         "x = x++ ? x + 2 : x + 3");
   }
 
+  public void testCoercionSubstitution_disabled() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame("var x = {}; if (x != null) throw 'a';");
+    testSame("var x = {}; var y = x != null;");
+
+    testSame("var x = 1; if (x != 0) throw 'a';");
+    testSame("var x = 1; var y = x != 0;");
+  }
+
+  public void testCoercionSubstitution_booleanResult0() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame("var x = {}; var y = x != null;");
+  }
+
+  public void testCoercionSubstitution_booleanResult1() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame("var x = {}; var y = x == null;");
+    testSame("var x = {}; var y = x !== null;");
+    testSame("var x = undefined; var y = x !== null;");
+    testSame("var x = {}; var y = x === null;");
+    testSame("var x = undefined; var y = x === null;");
+
+    testSame("var x = 1; var y = x != 0;");
+    testSame("var x = 1; var y = x == 0;");
+    testSame("var x = 1; var y = x !== 0;");
+    testSame("var x = 1; var y = x === 0;");
+  }
+
+  public void testCoercionSubstitution_if() {
+    this.mode = TypeInferenceMode.BOTH;
+    test("var x = {};\nif (x != null) throw 'a';\n", "var x={}; if (x!=null) throw 'a'");
+    testSame("var x = {};\nif (x == null) throw 'a';\n");
+    testSame("var x = {};\nif (x !== null) throw 'a';\n");
+    testSame("var x = {};\nif (x === null) throw 'a';\n");
+    testSame("var x = {};\nif (null != x) throw 'a';\n");
+    testSame("var x = {};\nif (null == x) throw 'a';\n");
+    testSame("var x = {};\nif (null !== x) throw 'a';\n");
+    testSame("var x = {};\nif (null === x) throw 'a';\n");
+
+    testSame("var x = 1;\nif (x != 0) throw 'a';\n");
+    testSame("var x = 1;\nif (x != 0) throw 'a';\n");
+    testSame("var x = 1;\nif (x == 0) throw 'a';\n");
+    testSame("var x = 1;\nif (x !== 0) throw 'a';\n");
+    testSame("var x = 1;\nif (x === 0) throw 'a';\n");
+    testSame("var x = 1;\nif (0 != x) throw 'a';\n");
+    testSame("var x = 1;\nif (0 == x) throw 'a';\n");
+    testSame("var x = 1;\nif (0 !== x) throw 'a';\n");
+    testSame("var x = 1;\nif (0 === x) throw 'a';\n");
+    testSame("var x = NaN;\nif (0 === x) throw 'a';\n");
+    testSame("var x = NaN;\nif (x === 0) throw 'a';\n");
+  }
+
+  public void testCoercionSubstitution_expression() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame("var x = {}; x != null && alert('b');");
+    testSame("var x = 1; x != 0 && alert('b');");
+  }
+
+  public void testCoercionSubstitution_hook() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame(
+        lines(
+            "var x = {};",
+            "var y = x != null ? 1 : 2;"));
+    testSame(
+        lines(
+            "var x = 1;",
+            "var y = x != 0 ? 1 : 2;"));
+  }
+
+  public void testCoercionSubstitution_not() {
+    this.mode = TypeInferenceMode.BOTH;
+    test(
+        "var x = {};\nvar y = !(x != null) ? 1 : 2;\n",
+        "var x = {};\nvar y = (x == null) ? 1 : 2;\n");
+    test("var x = 1;\nvar y = !(x != 0) ? 1 : 2;\n", "var x = 1;\nvar y = x == 0 ? 1 : 2;\n");
+  }
+
+  public void testCoercionSubstitution_while() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame("var x = {}; while (x != null) throw 'a';");
+    testSame("var x = 1; while (x != 0) throw 'a';");
+  }
+
+  public void testCoercionSubstitution_unknownType() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame("var x = /** @type {?} */ ({});\nif (x != null) throw 'a';\n");
+    testSame("var x = /** @type {?} */ (1);\nif (x != 0) throw 'a';\n");
+  }
+
+  public void testCoercionSubstitution_allType() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame("var x = /** @type {*} */ ({});\nif (x != null) throw 'a';\n");
+    testSame("var x = /** @type {*} */ (1);\nif (x != 0) throw 'a';\n");
+  }
+
+  public void testCoercionSubstitution_primitivesVsNull() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame("var x = 0;\nif (x != null) throw 'a';\n");
+    testSame("var x = '';\nif (x != null) throw 'a';\n");
+    testSame("var x = false;\nif (x != null) throw 'a';\n");
+  }
+
+  public void testCoercionSubstitution_nonNumberVsZero() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame("var x = {};\nif (x != 0) throw 'a';\n");
+    testSame("var x = '';\nif (x != 0) throw 'a';\n");
+    testSame("var x = false;\nif (x != 0) throw 'a';\n");
+  }
+
+  public void testCoercionSubstitution_boxedNumberVsZero() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame("var x = new Number(0);\nif (x != 0) throw 'a';\n");
+  }
+
+  public void testCoercionSubstitution_boxedPrimitives() {
+    this.mode = TypeInferenceMode.BOTH;
+    testSame("var x = new Number(); if (x != null) throw 'a';");
+    testSame("var x = new String(); if (x != null) throw 'a';");
+    testSame("var x = new Boolean();\nif (x != null) throw 'a';");
+  }
 }

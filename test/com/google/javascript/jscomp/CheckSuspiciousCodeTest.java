@@ -22,9 +22,6 @@ import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
  * Tests for CheckSuspiciousCode
  */
 public final class CheckSuspiciousCodeTest extends CompilerTestCase {
-  public CheckSuspiciousCodeTest() {
-    this.parseTypeInfo = true;
-  }
 
   @Override
   protected CompilerPass getProcessor(Compiler compiler) {
@@ -33,61 +30,63 @@ public final class CheckSuspiciousCodeTest extends CompilerTestCase {
   }
 
   @Override
-  protected int getNumRepetitions() {
-    return 1;
+  protected void setUp() throws Exception {
+    super.setUp();
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2017);
+    enableParseTypeInfo();
   }
 
-  public void test(String js, DiagnosticType error) {
-    test(js, js, null, error);
+  @Override
+  protected int getNumRepetitions() {
+    return 1;
   }
 
   public void testSuspiciousSemi() {
     final DiagnosticType e = CheckSuspiciousCode.SUSPICIOUS_SEMICOLON;
 
-    testOk("if(x()) x = y;");
-    test("if(x()); x = y;", e);  // I've had this bug, damned ;
-    testOk("if(x()){} x = y;");
+    testSame("if(x()) x = y;");
+    testWarning("if(x()); x = y;", e);  // I've had this bug, damned ;
+    testSame("if(x()){} x = y;");
 
-    testOk("if(x()) x = y; else y=z;");
-    test("if(x()); else y=z;", e);
-    testOk("if(x()){} else y=z;");
-    test("if(x()) x = y; else;", e);
-    testOk("if(x()) x = y; else {}");
+    testSame("if(x()) x = y; else y=z;");
+    testWarning("if(x()); else y=z;", e);
+    testSame("if(x()){} else y=z;");
+    testWarning("if(x()) x = y; else;", e);
+    testSame("if(x()) x = y; else {}");
 
-    testOk("while(x()) x = y;");
-    test("while(x()); x = y;", e);
-    testOk("while(x()){} x = y;");
-    test("while(x()); {x = y}", e);
-    testOk("while(x()){} {x = y}");
+    testSame("while(x()) x = y;");
+    testWarning("while(x()); x = y;", e);
+    testSame("while(x()){} x = y;");
+    testWarning("while(x()); {x = y}", e);
+    testSame("while(x()){} {x = y}");
 
-    testOk("for(;;) x = y;");
-    test("for(;;); x = y;", e);
-    testOk("for(;;){} x = y;");
-    testOk("for(x in y) x = y;");
-    test("for(x in y); x = y;", e);
-    testOk("for(x in y){} x = y;");
-    setAcceptedLanguage(LanguageMode.ECMASCRIPT6);
-    testOk("var y = [1, 2, 3]; for(x of y) console.log(x);");
-    test("var y = [1, 2, 3]; for(x of y); console.log(x);", e);
-    testOk("var y = [1, 2, 3]; for(x of y){} console.log(x);");
+    testSame("for(;;) x = y;");
+    testWarning("for(;;); x = y;", e);
+    testSame("for(;;){} x = y;");
+    testSame("for(x in y) x = y;");
+    testWarning("for(x in y); x = y;", e);
+    testSame("for(x in y){} x = y;");
+
+    testSame("var y = [1, 2, 3]; for(x of y) console.log(x);");
+    testWarning("var y = [1, 2, 3]; for(x of y); console.log(x);", e);
+    testSame("var y = [1, 2, 3]; for(x of y){} console.log(x);");
   }
 
   public void testSuspiciousIn() {
-    testSame("'foo' in 1", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
-    testSame("'foo' in 'test'", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
-    testSame("'foo' in NaN", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
-    testSame("'foo' in undefined", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
-    testSame("'foo' in Infinity", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
-    testSame("'foo' in true", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
-    testSame("'foo' in false", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
-    testSame("'foo' in null", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
-    testSame("'foo' in !Object", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
-    testSame("'foo' in Object", null);
-    testSame("'foo' in {}", null);
+    testWarning("'foo' in 1", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
+    testWarning("'foo' in 'test'", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
+    testWarning("'foo' in NaN", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
+    testWarning("'foo' in undefined", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
+    testWarning("'foo' in Infinity", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
+    testWarning("'foo' in true", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
+    testWarning("'foo' in false", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
+    testWarning("'foo' in null", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
+    testWarning("'foo' in !Object", CheckSuspiciousCode.SUSPICIOUS_IN_OPERATOR);
+    testSame("'foo' in Object");
+    testSame("'foo' in {}");
   }
 
   public void testForOf() {
-    setAcceptedLanguage(LanguageMode.ECMASCRIPT6);
     testSame("var y = [1, 2, 3]; for (var x of y) console.log(x);");
     testSame("var y = [1, 2, 3]; for (var x of 'test') console.log(x);");
     testSame("for (var x of 123) console.log(x);");
@@ -100,7 +99,7 @@ public final class CheckSuspiciousCodeTest extends CompilerTestCase {
   }
 
   private void testReportNaN(String js) {
-    testSame(js, CheckSuspiciousCode.SUSPICIOUS_COMPARISON_WITH_NAN);
+    testWarning(js, CheckSuspiciousCode.SUSPICIOUS_COMPARISON_WITH_NAN);
   }
 
   public void testComparison1() {
@@ -162,6 +161,17 @@ public final class CheckSuspiciousCodeTest extends CompilerTestCase {
         "/** @constructor */ function Foo() {}; var foo = new Foo();"
         + "!foo", "Foo");
 
+    testReportInstanceOf("(4 + 5)", "Number");
+    testReportInstanceOf("('a' + 'b')", "String");
+    testReportInstanceOf("('a' + 5)", "String");
+
+    // The following five are from "Wat — Destroy All Software Talks"
+    testReportInstanceOf("([] + [])", "String");
+    testReportInstanceOf("([] + {})", "String");
+    testReportInstanceOf("({} + [])", "String");
+    testReportInstanceOf("({c:1} + [])", "String");
+    testReportInstanceOf("({} + {})", "Number"); // NaN
+
     testReportInstanceOf("!''", "String");
     testReportInstanceOf("!4", "Number");
     testReportInstanceOf("!(new Boolean(true))", "Boolean");
@@ -174,36 +184,36 @@ public final class CheckSuspiciousCodeTest extends CompilerTestCase {
         + "!this", "Foo;"
         + "}");
 
-    testOk("new String('') instanceof String");
-    testOk("new Number(4) instanceof Number");
-    testOk("new Boolean(true) instanceof Boolean");
-    testOk("new Object() instanceof Object");
-    testOk("Object.prototype instanceof Object");
-    testOk("Function instanceof Object");
-    testOk("func() instanceof String");
-    testOk("({}) instanceof Object");
-    testOk("/** @constructor */ function Foo() {"
+    testSame("new String('') instanceof String");
+    testSame("new Number(4) instanceof Number");
+    testSame("var a = new Number(4); a instanceof Number");
+    testSame("new Boolean(true) instanceof Boolean");
+    testSame("new Object() instanceof Object");
+    testSame("Object.prototype instanceof Object");
+    testSame("Function instanceof Object");
+    testSame("func() instanceof String");
+    testSame("({}) instanceof Object");
+    testSame("/** @constructor */ function Foo() {"
         + " var a = this instanceof Foo; }");
 
-    // TODO(apavlov): It would be nice to have this report, too.
-    testOk("(4 + 5) instanceof Number");
-
-    setAcceptedLanguage(LanguageMode.ECMASCRIPT6);
-    testOk("(()=>42) instanceof Function");
-    testOk("class Person{} Person instanceof Function");
-    testOk(LINE_JOINER.join(
+    testSame("(()=>42) instanceof Function");
+    testSame("class Person{} Person instanceof Function");
+    testSame(lines(
         "class Person{}",
         "var peter = new Person();",
         "peter instanceof Person"));
-    testOk("taggedTemplate`${tagged}Temp` instanceof Function");
+    testSame("taggedTemplate`${tagged}Temp` instanceof Function");
   }
 
   private void testReportInstanceOf(String left, String right) {
-    testSame(left + " instanceof " + right,
+    testWarning(left + " instanceof " + right,
         CheckSuspiciousCode.SUSPICIOUS_INSTANCEOF_LEFT_OPERAND);
   }
 
-  private void testOk(String js) {
-    test(js, (DiagnosticType) null);
+  public void testCheckNegatedLeftOperandOfInOperator() {
+    testSame("if (!(x in y)) {}");
+    testSame("if (('' + !x) in y) {}");
+    testWarning(
+        "if (!x in y) {}", CheckSuspiciousCode.SUSPICIOUS_NEGATED_LEFT_OPERAND_OF_IN_OPERATOR);
   }
 }

@@ -16,10 +16,10 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.javascript.rhino.jstype.JSType;
+import com.google.javascript.rhino.TypeI;
 
 /**
- * The different strategies for matching the {@code JSType} of nodes.
+ * The different strategies for matching the {@code TypeI} of nodes.
  */
 public enum TypeMatchingStrategy {
 
@@ -27,13 +27,19 @@ public enum TypeMatchingStrategy {
    * Matches type or any subtype. Matches types with different nullability/voidability. Allows loose
    * matches.
    */
-  DEFAULT(true, true, true),
+  LOOSE(true, true, true),
 
   /**
    * Matches type or any subtype. Does not match types with different nullability/voidability.
    * Allows loose matches.
    */
   STRICT_NULLABILITY(true, false, true),
+
+  /**
+   * Matches type or any subtype. Does not match types with different nullability/voidability.
+   * Does not allow loose matches.
+   */
+  SUBTYPES(true, false, false),
 
   /**
    * Does not match subtypes. Does not match types with different nullability/voidability. Does not
@@ -52,48 +58,50 @@ public enum TypeMatchingStrategy {
     this.allowLooseMatches = allowLooseMatches;
   }
 
-  public MatchResult match(JSType templateType, JSType type) {
+  public MatchResult match(TypeI templateType, TypeI type) {
     if (templateType.isUnknownType()) {
       // If the template type is '?', then any type is a match and this is not considered a loose
       // match.
-      return new MatchResult(true, false);
+      return MatchResult.MATCH;
     }
 
-    if (type == null || type.isUnknownType() || type.isAllType()) {
-      return new MatchResult(allowLooseMatches, allowLooseMatches);
+    if (type == null || type.isUnknownType() || type.isTop()) {
+      return allowLooseMatches ? MatchResult.LOOSE_MATCH : MatchResult.NO_MATCH;
+    }
+
+    if (allowSubtypes) {
+      if (ignoreNullability) {
+        type = type.restrictByNotNullOrUndefined();
+      }
+      if (type.isSubtypeOf(templateType)) {
+        return MatchResult.MATCH;
+      }
     }
 
     boolean nullableMismatch = templateType.isNullable() != type.isNullable();
     boolean voidableMismatch = templateType.isVoidable() != type.isVoidable();
     if (!ignoreNullability && (nullableMismatch || voidableMismatch)) {
-      return new MatchResult(false, false);
+      return MatchResult.NO_MATCH;
     }
 
-    if (allowSubtypes) {
-      return new MatchResult(type.restrictByNotNullOrUndefined().isSubtype(templateType), false);
-    }
-
-    return new MatchResult(type.isEquivalentTo(templateType), false);
+    return type.isEquivalentTo(templateType) ? MatchResult.MATCH : MatchResult.NO_MATCH;
   }
 
   /**
-   * The result of comparing two different {@code JSType} instances.
+   * The result of comparing two different {@code TypeI} instances.
    */
-  public static class MatchResult {
-    private final boolean isMatch;
-    private final boolean isLooseMatch;
+  public enum MatchResult {
+    MATCH,
+    NO_MATCH,
+    LOOSE_MATCH;
 
-    public MatchResult(boolean isMatch, boolean isLooseMatch) {
-      this.isMatch = isMatch;
-      this.isLooseMatch = isLooseMatch;
-    }
 
     public boolean isMatch() {
-      return isMatch;
+      return this != NO_MATCH;
     }
 
     public boolean isLooseMatch() {
-      return isLooseMatch;
+      return this == LOOSE_MATCH;
     }
   }
 }

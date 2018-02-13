@@ -15,24 +15,26 @@
  */
 package com.google.javascript.jscomp.newtypes;
 
+import java.io.Serializable;
+
 /**
  * Used by NominalType and ObjectType for @struct, @dict and @unrestricted.
  *
  * @author blickly@google.com (Ben Lickly)
  * @author dimvar@google.com (Dimitris Vardoulakis)
  */
-class ObjectKind {
+public class ObjectKind implements Serializable {
   private static final int UNRESTRICTED_MASK = 0;
   private static final int STRUCT_MASK = 1;
   private static final int DICT_MASK = 2;
   // No matter how you access its properties, it complains.
   private static final int BOTH_MASK = 3;
 
-  private int mask;
+  private final int mask;
 
-  static final ObjectKind UNRESTRICTED = new ObjectKind(UNRESTRICTED_MASK);
-  static final ObjectKind STRUCT = new ObjectKind(STRUCT_MASK);
-  static final ObjectKind DICT = new ObjectKind(DICT_MASK);
+  public static final ObjectKind UNRESTRICTED = new ObjectKind(UNRESTRICTED_MASK);
+  public static final ObjectKind STRUCT = new ObjectKind(STRUCT_MASK);
+  public static final ObjectKind DICT = new ObjectKind(DICT_MASK);
   private static final ObjectKind BOTH = new ObjectKind(BOTH_MASK);
 
   private static final ObjectKind[] vals = {
@@ -54,15 +56,19 @@ class ObjectKind {
     return vals[ok1.mask | ok2.mask];
   }
 
+  boolean isUnrestricted() {
+    return this.mask == UNRESTRICTED_MASK;
+  }
+
   boolean isStruct() {
-    return (mask & STRUCT_MASK) != 0;
+    return (this.mask & STRUCT_MASK) != 0;
   }
 
   boolean isDict() {
-    return (mask & DICT_MASK) != 0;
+    return (this.mask & DICT_MASK) != 0;
   }
 
   boolean isSubtypeOf(ObjectKind other) {
-    return mask == (mask & other.mask);
+    return this.mask == (this.mask & other.mask);
   }
 }

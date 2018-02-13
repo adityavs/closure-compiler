@@ -21,8 +21,6 @@ import com.google.javascript.jscomp.regex.RegExpTree;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
 
-import java.util.Set;
-
 /**
  * Look for references to the global RegExp object that would cause
  * regular expressions to be unoptimizable, and checks that regular expressions
@@ -40,14 +38,32 @@ class CheckRegExp extends AbstractPostOrderCallback implements CompilerPass {
         "JSC_MALFORMED_REGEXP",
         "Malformed Regular Expression: {0}");
 
-  private static final Set<String> REGEXP_PROPERTY_BLACKLIST = ImmutableSet.of(
-      "$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8", "$9",
-      "$_", "$input",
-      // The following would also be blacklisted, but they aren't valid
-      // identifiers, so can't be accessed with the '.' operator anyway.
-      // "$*", "$&", "$+", "$`", "$'",
-      "input", "lastMatch", "lastParen", "leftContext", "rightContext",
-      "global", "ignoreCase", "lastIndex", "multiline", "source");
+  private static final ImmutableSet<String> REGEXP_PROPERTY_BLACKLIST =
+      ImmutableSet.of(
+          "$1",
+          "$2",
+          "$3",
+          "$4",
+          "$5",
+          "$6",
+          "$7",
+          "$8",
+          "$9",
+          "$_",
+          "$input",
+          // The following would also be blacklisted, but they aren't valid
+          // identifiers, so can't be accessed with the '.' operator anyway.
+          // "$*", "$&", "$+", "$`", "$'",
+          "input",
+          "lastMatch",
+          "lastParen",
+          "leftContext",
+          "rightContext",
+          "global",
+          "ignoreCase",
+          "lastIndex",
+          "multiline",
+          "source");
 
   private final AbstractCompiler compiler;
   private boolean globalRegExpPropertiesUsed = false;
@@ -62,7 +78,7 @@ class CheckRegExp extends AbstractPostOrderCallback implements CompilerPass {
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, this);
+    NodeTraversal.traverseEs6(compiler, root, this);
   }
 
   @Override
@@ -70,7 +86,7 @@ class CheckRegExp extends AbstractPostOrderCallback implements CompilerPass {
     if (NodeUtil.isReferenceName(n)) {
       String name = n.getString();
       if (name.equals("RegExp") && t.getScope().getVar(name) == null) {
-        int parentType = parent.getType();
+        Token parentType = parent.getToken();
         boolean first = (n == parent.getFirstChild());
         if (!((parentType == Token.NEW && first)
             || (parentType == Token.CALL && first)
@@ -89,8 +105,7 @@ class CheckRegExp extends AbstractPostOrderCallback implements CompilerPass {
     // Check the syntax of regular expression patterns.
     } else if (n.isRegExp()) {
       String pattern = n.getFirstChild().getString();
-      String flags = n.getChildCount() == 2
-          ? n.getLastChild().getString() : "";
+      String flags = n.hasTwoChildren() ? n.getLastChild().getString() : "";
       try {
         RegExpTree.parseRegExp(pattern, flags);
       } catch (IllegalArgumentException | IndexOutOfBoundsException ex) {

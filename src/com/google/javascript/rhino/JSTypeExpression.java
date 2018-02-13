@@ -40,13 +40,15 @@
 package com.google.javascript.rhino;
 
 import com.google.javascript.rhino.jstype.JSType;
+import com.google.javascript.rhino.jstype.JSTypeRegistry;
 import com.google.javascript.rhino.jstype.StaticTypedScope;
-
 import java.io.Serializable;
 
 /**
- * Represents a type expression as a miniature Rhino AST, so that the
- * type expression can be evaluated later.
+ * When parsing a jsdoc, a type-annotation string is parsed to a type AST.
+ * Somewhat confusingly, we use the Node class both for type ASTs and for the source-code AST.
+ * JSTypeExpression wraps a type AST.
+ * During type checking, type ASTs are evaluated to JavaScript types.
  *
  * @author nicksantos@google.com (Nick Santos)
  */
@@ -81,27 +83,26 @@ public final class JSTypeExpression implements Serializable {
    * @return Whether this expression denotes an optional {@code @param}.
    */
   public boolean isOptionalArg() {
-    return root.getType() == Token.EQUALS;
+    return root.getToken() == Token.EQUALS;
   }
 
   /**
    * @return Whether this expression denotes a rest args {@code @param}.
    */
   public boolean isVarArgs() {
-    return root.getType() == Token.ELLIPSIS;
+    return root.getToken() == Token.ELLIPSIS;
   }
 
   /**
    * Evaluates the type expression into a {@code JSType} object.
    */
   public JSType evaluate(StaticTypedScope<JSType> scope, TypeIRegistry registry) {
-    JSType type = (JSType) registry.createTypeFromCommentNode(root, sourceName, scope);
-    root.setJSType(type);
-    return type;
-  }
-
-  public TypeI evaluateInEmptyScope(TypeIRegistry registry) {
-    return evaluate(null, registry);
+    if (registry instanceof JSTypeRegistry) {
+      JSType type = ((JSTypeRegistry) registry).createTypeFromCommentNode(root, sourceName, scope);
+      root.setJSType(type);
+      return type;
+    }
+    return null;
   }
 
   @Override
@@ -112,7 +113,7 @@ public final class JSTypeExpression implements Serializable {
 
   @Override
   public int hashCode() {
-    return root.toStringTree().hashCode();
+    return root.hashCode();
   }
 
   /**
@@ -123,12 +124,16 @@ public final class JSTypeExpression implements Serializable {
     return root;
   }
 
-  @Override
-  public String toString() {
-    return "type: " + root.toString();
+  public String getSourceName() {
+    return this.sourceName;
   }
 
-  public JSTypeExpression clone() {
+  @Override
+  public String toString() {
+    return "type: " + root.toStringTree();
+  }
+
+  public JSTypeExpression copy() {
     return new JSTypeExpression(root.cloneTree(), sourceName);
   }
 }

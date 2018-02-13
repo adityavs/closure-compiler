@@ -15,184 +15,140 @@
  */
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.base.Supplier;
 import com.google.common.collect.HashMultiset;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.ListMultimap;
+import com.google.common.collect.MultimapBuilder;
 import com.google.common.collect.Multiset;
+import com.google.javascript.jscomp.MakeDeclaredNamesUnique.ContextualRenameInverter;
 import com.google.javascript.jscomp.NodeTraversal.ScopedCallback;
+import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.TokenStream;
-
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.annotation.Nullable;
 
 /**
  *  Find all Functions, VARs, and Exception names and make them
  *  unique.  Specifically, it will not modify object properties.
  *  @author johnlenz@google.com (John Lenz)
- *  TODO(johnlenz): Try to merge this with the ScopeCreator.
  */
-class MakeDeclaredNamesUnique
-    implements NodeTraversal.ScopedCallback {
+class MakeDeclaredNamesUnique extends NodeTraversal.AbstractScopedCallback {
 
   // Arguments is special cased to handle cases where a local name shadows
   // the arguments declaration.
   public static final String ARGUMENTS = "arguments";
 
-  // The name stack is similar to how we model scopes but handles some
-  // additional cases that are not handled by the current Scope object.
-  // Specifically, a Scope currently has only two concepts of scope (global,
-  // and function local).  But there are in reality a couple of additional
-  // case to worry about:
-  //   catch expressions
-  //   function expressions names
-  // Both belong to a scope by themselves.
-  // In addition, ES6 introduced block scopes, which we also need to handle.
-  private final Deque<Renamer> nameStack = new ArrayDeque<>();
+  // There is one renamer on the stack for each scope. This was added before any support for ES6 was
+  // in place, so it was necessary to maintain this separate stack, rather than just using the
+  // NodeTraversal's stack of scopes, in order to handle catch blocks and function names correctly.
+  private final Deque<Renamer> renamerStack = new ArrayDeque<>();
   private final Renamer rootRenamer;
+  private final boolean markChanges;
 
   MakeDeclaredNamesUnique() {
-    this(new ContextualRenamer());
+    this(new ContextualRenamer(), true);
   }
 
   MakeDeclaredNamesUnique(Renamer renamer) {
+    this(renamer, true);
+  }
+
+  MakeDeclaredNamesUnique(Renamer renamer, boolean markChanges) {
     this.rootRenamer = renamer;
+    this.markChanges = markChanges;
   }
 
   static CompilerPass getContextualRenameInverter(AbstractCompiler compiler) {
-    return new ContextualRenameInverter(compiler);
+    return new ContextualRenameInverter(compiler, true);
   }
 
   @Override
   public void enterScope(NodeTraversal t) {
+    checkState(
+        t.getScopeCreator().hasBlockScope(),
+        "MakeDeclaredNamesUnique requires an ES6-compatible scope creator. %s is not compatible.",
+        t.getScopeCreator());
     Node declarationRoot = t.getScopeRoot();
-    // ES6 function blocks are handled along with PARAM_LIST
-    if (NodeUtil.isFunctionBlock(declarationRoot)) {
-      return;
-    }
 
     Renamer renamer;
-    if (nameStack.isEmpty()) {
+    if (renamerStack.isEmpty()) {
       // If the contextual renamer is being used, the starting context can not
       // be a function.
-      Preconditions.checkState(
-          !declarationRoot.isFunction() ||
-          !(rootRenamer instanceof ContextualRenamer));
-      Preconditions.checkState(t.inGlobalScope());
+      checkState(!declarationRoot.isFunction() || !(rootRenamer instanceof ContextualRenamer));
       renamer = rootRenamer;
     } else {
-      renamer = nameStack.peek().forChildScope(!NodeUtil.createsBlockScope(declarationRoot));
+      boolean hoist = !declarationRoot.isFunction() && !NodeUtil.createsBlockScope(declarationRoot);
+      renamer = renamerStack.peek().createForChildScope(t.getScopeRoot(), hoist);
     }
 
-    if (!declarationRoot.isFunction()) {
-      // Add the block declarations
-      findDeclaredNames(declarationRoot, null, renamer);
-    }
-    nameStack.push(renamer);
+    renamerStack.push(renamer);
+
+    findDeclaredNames(t, declarationRoot);
   }
 
   @Override
   public void exitScope(NodeTraversal t) {
-    // ES6 function blocks are handled along with PARAM_LIST
-    if (NodeUtil.isFunctionBlock(t.getScopeRoot())) {
-      return;
-    }
     if (!t.inGlobalScope()) {
-      nameStack.pop();
+      renamerStack.pop();
     }
-  }
-
-  @Override
-  public boolean shouldTraverse(NodeTraversal t, Node n, Node parent) {
-    switch (n.getType()) {
-      case Token.FUNCTION: {
-        // Add recursive function name, if needed.
-        // NOTE: "enterScope" is called after we need to pick up this name.
-        Renamer renamer = nameStack.peek().forChildScope(false);
-
-        // If needed, add the function recursive name.
-        String name = n.getFirstChild().getString();
-        if (name != null && !name.isEmpty() && parent != null
-            && !NodeUtil.isFunctionDeclaration(n)) {
-          renamer.addDeclaredName(name, false);
-        }
-
-        nameStack.push(renamer);
-        break;
-      }
-
-      case Token.PARAM_LIST: {
-        Renamer renamer = nameStack.peek().forChildScope(true);
-
-        // Add the function parameters
-        for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {
-          String name = c.getString();
-          renamer.addDeclaredName(name, true);
-        }
-
-        Node functionBody = n.getNext();
-        findDeclaredNames(functionBody, null, renamer);
-
-        nameStack.push(renamer);
-        break;
-      }
-
-      case Token.CATCH: {
-        Renamer renamer = nameStack.peek().forChildScope(false);
-
-        String name = n.getFirstChild().getString();
-        renamer.addDeclaredName(name, false);
-
-        nameStack.push(renamer);
-        break;
-      }
-    }
-
-    return true;
   }
 
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
-    switch (n.getType()) {
-      case Token.NAME:
+    switch (n.getToken()) {
+      case NAME:
+      case IMPORT_STAR:
+        visitName(t, n, parent);
+        break;
+
+      case STRING_KEY: {
         String newName = getReplacementName(n.getString());
-        if (newName != null) {
-          Renamer renamer = nameStack.peek();
-          if (renamer.stripConstIfReplaced()) {
-            // TODO(johnlenz): Do we need to do anything about the Javadoc?
-            n.removeProp(Node.IS_CONSTANT_NAME);
-          }
-          n.setString(newName);
-          t.getCompiler().reportCodeChange();
+        if (newName != null && !n.hasChildren()) {
+          Node name = IR.name(n.getString()).useSourceInfoFrom(n);
+          n.addChildToBack(name);
+          visitName(t, name, n);
         }
         break;
+      }
 
-      case Token.FUNCTION:
-        // Remove the function body scope
-        nameStack.pop();
-        // Remove function recursive name (if any).
-        nameStack.pop();
+      default:
         break;
+    }
+  }
 
-      case Token.PARAM_LIST:
-        // Note: The parameters and function body variables live in the
-        // same scope, we introduce the scope when in the "shouldTraverse"
-        // visit of LP, but remove it when when we exit the function above.
-        break;
-
-      case Token.CATCH:
-        // Remove catch except name from the stack of names.
-        nameStack.pop();
-        break;
+  private void visitName(NodeTraversal t, Node n, Node parent) {
+    // Don't rename the exported name foo in export {a as foo}; or import {foo as b};
+    if (NodeUtil.isNonlocalModuleExportName(n)) {
+      return;
+    }
+    String newName = getReplacementName(n.getString());
+    if (newName != null) {
+      Renamer renamer = renamerStack.peek();
+      if (renamer.stripConstIfReplaced()) {
+        // TODO(johnlenz): Do we need to do anything about the Javadoc?
+        n.removeProp(Node.IS_CONSTANT_NAME);
+      }
+      n.setString(newName);
+      if (markChanges) {
+        t.reportCodeChange();
+        // If we are renaming a function declaration, make sure the containing scope
+        // has the opporunity to act on the change.
+        if (parent.isFunction() && NodeUtil.isFunctionDeclaration(parent)) {
+          t.getCompiler().reportChangeToEnclosingScope(parent);
+        }
+      }
     }
   }
 
@@ -201,8 +157,8 @@ class MakeDeclaredNamesUnique
    * current scope.
    */
   private String getReplacementName(String oldName) {
-    for (Renamer names : nameStack) {
-      String newName = names.getReplacementName(oldName);
+    for (Renamer renamer : renamerStack) {
+      String newName = renamer.getReplacementName(oldName);
       if (newName != null) {
         return newName;
       }
@@ -211,27 +167,14 @@ class MakeDeclaredNamesUnique
   }
 
   /**
-   * Traverses the current scope and collects declared names.  Does not
-   * decent into functions or add CATCH exceptions.
+   * Traverses the current scope and collects declared names by calling {@code addDeclaredName} on
+   * the {@code Renamer} that is at the top of the {@code renamerStack}.
    */
-  private void findDeclaredNames(Node n, Node parent, Renamer renamer) {
-    // Do a shallow traversal, so don't traverse into function declarations,
-    // except for the name of the function itself.
-    if (parent == null
-        || !parent.isFunction()
-        || n == parent.getFirstChild()) {
-      if (NodeUtil.isVarDeclaration(n)) {
-        renamer.addDeclaredName(n.getString(), true);
-      } else if (NodeUtil.isBlockScopedDeclaration(n)) {
-        renamer.addDeclaredName(n.getString(), false);
-      } else if (NodeUtil.isFunctionDeclaration(n)) {
-        Node nameNode = n.getFirstChild();
-        renamer.addDeclaredName(nameNode.getString(), true);
-      }
+  private void findDeclaredNames(NodeTraversal t, Node n) {
+    checkState(NodeUtil.createsScope(n) || n.isScript(), n);
 
-      for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {
-        findDeclaredNames(c, n, renamer);
-      }
+    for (Var v : t.getScope().getVarIterable()) {
+      renamerStack.peek().addDeclaredName(v.getName(), false);
     }
   }
 
@@ -242,6 +185,8 @@ class MakeDeclaredNamesUnique
 
     /**
      * Called when a declared name is found in the local current scope.
+     * @param hoisted Whether this name should be declared in the nearest enclosing "hoist scope"
+     *     instead of the scope represented by this Renamer.
      */
     void addDeclaredName(String name, boolean hoisted);
 
@@ -257,9 +202,10 @@ class MakeDeclaredNamesUnique
     boolean stripConstIfReplaced();
 
     /**
+     * @param hoisted True if this is a "hoist" scope: A function, module, or global scope.
      * @return A Renamer for a scope within the scope of the current Renamer.
      */
-    Renamer forChildScope(boolean hoisted);
+    Renamer createForChildScope(Node scopeRoot, boolean hoisted);
 
     /**
      * @return The closest hoisting target for var and function declarations.
@@ -270,26 +216,30 @@ class MakeDeclaredNamesUnique
   /**
    * Inverts the transformation by {@link ContextualRenamer}, when possible.
    */
-  static class ContextualRenameInverter
-      implements ScopedCallback, CompilerPass {
+  static class ContextualRenameInverter implements ScopedCallback, CompilerPass {
     private final AbstractCompiler compiler;
 
     // The set of names referenced in the current scope.
     private Set<String> referencedNames = ImmutableSet.of();
 
     // Stack reference sets.
-    private Deque<Set<String>> referenceStack = new ArrayDeque<>();
+    private final Deque<Set<String>> referenceStack = new ArrayDeque<>();
 
     // Name are globally unique initially, so we don't need a per-scope map.
-    private Map<String, List<Node>> nameMap = new HashMap<>();
+    private final ListMultimap<String, Node> nameMap =
+        MultimapBuilder.hashKeys().arrayListValues().build();
 
-    private ContextualRenameInverter(AbstractCompiler compiler) {
+    // Whether to report changes to the compiler.
+    private final boolean markChanges;
+
+    private ContextualRenameInverter(AbstractCompiler compiler, boolean markChanges) {
       this.compiler = compiler;
+      this.markChanges = markChanges;
     }
 
     @Override
     public void process(Node externs, Node js) {
-      NodeTraversal.traverse(compiler, js, this);
+      NodeTraversal.traverseEs6(compiler, js, this);
     }
 
     public static String getOriginalName(String name) {
@@ -328,8 +278,7 @@ class MakeDeclaredNamesUnique
         return;
       }
 
-      for (Iterator<Var> it = t.getScope().getVars(); it.hasNext();) {
-        Var v = it.next();
+      for (Var v : t.getScope().getVarIterable()) {
         handleScopeVar(v);
       }
 
@@ -351,7 +300,7 @@ class MakeDeclaredNamesUnique
      * values.
      */
     void handleScopeVar(Var v) {
-      String name  = v.getName();
+      String name = v.getName();
       if (containsSeparator(name) && !getOriginalName(name).isEmpty()) {
         String newName = findReplacementName(name);
         referencedNames.remove(name);
@@ -359,13 +308,20 @@ class MakeDeclaredNamesUnique
         // scopes or the current scope renaming another var to this new name.
         referencedNames.add(newName);
         List<Node> references = nameMap.get(name);
-        Preconditions.checkState(references != null);
         for (Node n : references) {
-          Preconditions.checkState(n.isName());
+          checkState(n.isName() || n.isImportStar(), n);
           n.setString(newName);
+          if (markChanges) {
+            compiler.reportChangeToEnclosingScope(n);
+            Node parent = n.getParent();
+            // If we are renaming a function declaration, make sure the containing scope
+            // has the opportunity to act on the change.
+            if (parent.isFunction() && NodeUtil.isFunctionDeclaration(parent)) {
+              compiler.reportChangeToEnclosingScope(parent);
+            }
+          }
         }
-        compiler.reportCodeChange();
-        nameMap.remove(name);
+        nameMap.removeAll(name);
       }
     }
 
@@ -401,7 +357,7 @@ class MakeDeclaredNamesUnique
         return;
       }
 
-      if (NodeUtil.isReferenceName(node)) {
+      if (NodeUtil.isReferenceName(node) || node.isImportStar()) {
         String name = node.getString();
         // Add all referenced names to the set so it is possible to check for
         // conflicts.
@@ -414,63 +370,82 @@ class MakeDeclaredNamesUnique
     }
 
     private void addCandidateNameReference(String name, Node n) {
-      List<Node> nodes = nameMap.get(name);
-      if (null == nodes) {
-        nodes = new LinkedList<>();
-        nameMap.put(name, nodes);
-      }
-      nodes.add(n);
+      nameMap.put(name, n);
     }
   }
 
   /**
-   * Rename every locally name to be unique, the first encountered declaration
-   * (specifically global names) are left in their original form. Those that are
-   * renamed are made unique by giving them a unique suffix based on
-   * the number of declarations of the name.
+   * Renames every local name to be unique. The first encountered declaration of a given name
+   * (specifically a global declaration) is left in its original form. Those that are renamed are
+   * made unique by giving them a unique suffix based on the number of declarations of the name.
    *
-   * The root ContextualRenamer is assumed to be in GlobalScope.
+   * <p>The root ContextualRenamer is assumed to be in GlobalScope.
    *
-   * Used by the Normalize pass.
+   * <p>Used by the Normalize pass.
+   *
    * @see Normalize
    */
   static class ContextualRenamer implements Renamer {
+    @Nullable
+    private final Node scopeRoot;
+
+    // This multiset is shared between this ContextualRenamer and its parent (and its parent's
+    // parent, etc.) because it tracks counts of variables across the entire JS program.
     private final Multiset<String> nameUsage;
+
+    // By contrast, this is a different map for each ContextualRenamer because it's just keeping
+    // track of the names used by this renamer.
     private final Map<String, String> declarations = new HashMap<>();
     private final boolean global;
 
     private final Renamer hoistRenamer;
 
-    static final String UNIQUE_ID_SEPARATOR = "$$";
+    static final String UNIQUE_ID_SEPARATOR = "$jscomp$";
+
+    @Override
+    public String toString() {
+      return toStringHelper(this)
+          .add("scopeRoot", scopeRoot)
+          .add("nameUsage", nameUsage)
+          .add("declarations", declarations)
+          .add("global", global)
+          .toString();
+    }
 
     ContextualRenamer() {
+      scopeRoot = null;
       global = true;
       nameUsage = HashMultiset.create();
 
       hoistRenamer = this;
     }
 
-    /**
-     * Constructor for child scopes.
-     */
+    /** Constructor for child scopes. */
     private ContextualRenamer(
-        Multiset<String> nameUsage, boolean hoistingTargetScope, Renamer parent) {
+        Node scopeRoot, Multiset<String> nameUsage, boolean hoistingTargetScope, Renamer parent) {
+      checkState(NodeUtil.createsScope(scopeRoot), scopeRoot);
+
+      if (scopeRoot.isFunction()) {
+        checkState(!hoistingTargetScope, scopeRoot);
+      }
+
+      this.scopeRoot = scopeRoot;
       this.global = false;
       this.nameUsage = nameUsage;
 
       if (hoistingTargetScope) {
+        checkState(!NodeUtil.createsBlockScope(scopeRoot), scopeRoot);
         hoistRenamer = this;
       } else {
+        checkState(NodeUtil.createsBlockScope(scopeRoot) || scopeRoot.isFunction(), scopeRoot);
         hoistRenamer = parent.getHoistRenamer();
       }
     }
 
-    /**
-     * Create a ContextualRenamer
-     */
+    /** Create a ContextualRenamer */
     @Override
-    public Renamer forChildScope(boolean hoistintTargetScope) {
-      return new ContextualRenamer(nameUsage, hoistintTargetScope, this);
+    public Renamer createForChildScope(Node scopeRoot, boolean hoistingTargetScope) {
+      return new ContextualRenamer(scopeRoot, nameUsage, hoistingTargetScope, this);
     }
 
     /**
@@ -559,7 +534,7 @@ class MakeDeclaredNamesUnique
       this.uniqueIdSupplier = uniqueIdSupplier;
       // To ensure that the id does not conflict with the id from the
       // ContextualRenamer some prefix is needed.
-      Preconditions.checkArgument(!idPrefix.isEmpty());
+      checkArgument(!idPrefix.isEmpty());
       this.idPrefix = idPrefix;
       this.removeConstness = removeConstness;
 
@@ -572,7 +547,7 @@ class MakeDeclaredNamesUnique
 
     @Override
     public void addDeclaredName(String name, boolean hoisted) {
-      Preconditions.checkState(!name.equals(ARGUMENTS));
+      checkState(!name.equals(ARGUMENTS));
       if (hoisted && hoistRenamer != this) {
         hoistRenamer.addDeclaredName(name, hoisted);
       } else {
@@ -601,8 +576,7 @@ class MakeDeclaredNamesUnique
 
       // By using the same separator the id will be stripped if it isn't
       // needed when variable renaming is turned off.
-      return name + ContextualRenamer.UNIQUE_ID_SEPARATOR
-          + idPrefix + uniqueIdSupplier.get();
+      return name + ContextualRenamer.UNIQUE_ID_SEPARATOR + idPrefix + uniqueIdSupplier.get();
     }
 
     @Override
@@ -611,7 +585,7 @@ class MakeDeclaredNamesUnique
     }
 
     @Override
-    public Renamer forChildScope(boolean hoistingTargetScope) {
+    public Renamer createForChildScope(Node scopeRoot, boolean hoistingTargetScope) {
       return new InlineRenamer(
           convention, uniqueIdSupplier, idPrefix, removeConstness, hoistingTargetScope, this);
     }
@@ -646,15 +620,15 @@ class MakeDeclaredNamesUnique
     }
 
     @Override
-    public Renamer forChildScope(boolean hoisted) {
+    public Renamer createForChildScope(Node scopeRoot, boolean hoisted) {
       return new InlineRenamer(convention, uniqueIdSupplier, idPrefix, false, hoisted, this);
     }
   }
 
   /** Only rename things that match the whitelist. Wraps another renamer. */
   static class WhitelistedRenamer implements Renamer {
-    private Renamer delegate;
-    private Set<String> whitelist;
+    private final Renamer delegate;
+    private final Set<String> whitelist;
 
     WhitelistedRenamer(Renamer delegate, Set<String> whitelist) {
       this.delegate = delegate;
@@ -680,8 +654,9 @@ class MakeDeclaredNamesUnique
     }
 
     @Override
-    public Renamer forChildScope(boolean hoistingTargetScope) {
-      return new WhitelistedRenamer(delegate.forChildScope(hoistingTargetScope), whitelist);
+    public Renamer createForChildScope(Node scopeRoot, boolean hoistingTargetScope) {
+      return new WhitelistedRenamer(
+          delegate.createForChildScope(scopeRoot, hoistingTargetScope), whitelist);
     }
 
     @Override

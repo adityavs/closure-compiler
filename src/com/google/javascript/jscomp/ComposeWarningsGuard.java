@@ -46,8 +46,7 @@ public class ComposeWarningsGuard extends WarningsGuard {
   private final Map<WarningsGuard, Integer> orderOfAddition = new HashMap<>();
   private int numberOfAdds = 0;
 
-  private final Comparator<WarningsGuard> guardComparator =
-      new GuardComparator(orderOfAddition);
+  private final Comparator<WarningsGuard> guardComparator = new GuardComparator(orderOfAddition);
   private boolean demoteErrors = false;
 
   private static class GuardComparator
@@ -68,14 +67,12 @@ public class ComposeWarningsGuard extends WarningsGuard {
 
       // If the warnings guards have the same priority, the one that
       // was added last wins.
-      return orderOfAddition.get(b).intValue() -
-          orderOfAddition.get(a).intValue();
+      return orderOfAddition.get(b).intValue() - orderOfAddition.get(a).intValue();
     }
   }
 
   // The order that the guards are applied in.
-  private final TreeSet<WarningsGuard> guards =
-      new TreeSet<>(guardComparator);
+  private final TreeSet<WarningsGuard> guards = new TreeSet<>(guardComparator);
 
   public ComposeWarningsGuard(List<WarningsGuard> guards) {
     addGuards(guards);
@@ -159,13 +156,28 @@ public class ComposeWarningsGuard extends WarningsGuard {
     return false;
   }
 
+  @Override
+  public DiagnosticGroupState enablesExplicitly(DiagnosticGroup group) {
+    for (WarningsGuard guard : guards) {
+      switch (guard.enablesExplicitly(group)) {
+        case ON:
+          return DiagnosticGroupState.ON;
+        case OFF:
+          return DiagnosticGroupState.OFF;
+        case UNSPECIFIED:
+          continue;
+      }
+    }
+    return DiagnosticGroupState.UNSPECIFIED;
+  }
+
   List<WarningsGuard> getGuards() {
     return Collections.unmodifiableList(new ArrayList<>(guards));
   }
 
   /**
-   * Make a warnings guard that's the same as this one but with
-   * all escalating guards turned down.
+   * Make a warnings guard that's the same as this one but demotes all
+   * errors to warnings.
    */
   ComposeWarningsGuard makeEmergencyFailSafeGuard() {
     ComposeWarningsGuard safeGuard = new ComposeWarningsGuard();
@@ -174,6 +186,17 @@ public class ComposeWarningsGuard extends WarningsGuard {
       safeGuard.addGuard(guard);
     }
     return safeGuard;
+  }
+
+  @Override
+  protected ComposeWarningsGuard makeNonStrict() {
+    ComposeWarningsGuard nonStrictGuard = new ComposeWarningsGuard();
+    for (WarningsGuard guard : guards.descendingSet()) {
+      if (!(guard instanceof StrictWarningsGuard)) {
+        nonStrictGuard.addGuard(guard.makeNonStrict());
+      }
+    }
+    return nonStrictGuard;
   }
 
   @Override

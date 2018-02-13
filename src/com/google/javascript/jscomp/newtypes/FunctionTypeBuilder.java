@@ -16,8 +16,9 @@
 
 package com.google.javascript.jscomp.newtypes;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -47,17 +48,16 @@ public final class FunctionTypeBuilder {
   private JSType restFormals = null;
   private JSType returnType = null;
   private boolean loose = false;
-  private NominalType nominalType;
+  private boolean isAbstract = false;
+  private JSType nominalType;
   // Only used to build DeclaredFunctionType for prototype methods
-  private NominalType receiverType;
-  // Non-empty iff this function has an @template annotation
-  private ImmutableList<String> typeParameters = ImmutableList.of();
+  private JSType receiverType;
+  private TypeParameters typeParameters = TypeParameters.EMPTY;
 
-  static FunctionTypeBuilder qmarkFunctionBuilder() {
-    FunctionTypeBuilder builder = new FunctionTypeBuilder();
-    builder.addRestFormals(JSType.UNKNOWN);
-    builder.addRetType(JSType.UNKNOWN);
-    return builder;
+  private final JSTypes commonTypes;
+
+  public FunctionTypeBuilder(JSTypes commonTypes) {
+    this.commonTypes = checkNotNull(commonTypes);
   }
 
   /**
@@ -67,15 +67,14 @@ public final class FunctionTypeBuilder {
     if (restFormals != null) {
       // Nothing to do here, since there is no way to add a placeholder.
     } else if (!optionalFormals.isEmpty()) {
-      optionalFormals.add(JSType.UNKNOWN);
+      optionalFormals.add(this.commonTypes.UNKNOWN);
     } else {
-      requiredFormals.add(JSType.UNKNOWN);
+      requiredFormals.add(this.commonTypes.UNKNOWN);
     }
     return this;
   }
 
-  public FunctionTypeBuilder addReqFormal(JSType t)
-      throws WrongParameterOrderException {
+  public FunctionTypeBuilder addReqFormal(JSType t) {
     if (!optionalFormals.isEmpty() || restFormals != null) {
       throw new WrongParameterOrderException(
           "Cannot add required formal after optional or rest args");
@@ -84,8 +83,16 @@ public final class FunctionTypeBuilder {
     return this;
   }
 
-  public FunctionTypeBuilder addOptFormal(JSType t)
-      throws WrongParameterOrderException {
+  public FunctionTypeBuilder addReqFormalToFront(JSType t) {
+    if (!optionalFormals.isEmpty() || restFormals != null) {
+      throw new WrongParameterOrderException(
+          "Cannot add required formal after optional or rest args");
+    }
+    requiredFormals.add(0, t);
+    return this;
+  }
+
+  public FunctionTypeBuilder addOptFormal(JSType t) {
     if (restFormals != null) {
       throw new WrongParameterOrderException(
           "Cannot add optional formal after rest args");
@@ -93,8 +100,8 @@ public final class FunctionTypeBuilder {
     if (t == null) {
       optionalFormals.add(null);
     } else {
-      Preconditions.checkArgument(!t.isBottom());
-      optionalFormals.add(JSType.join(t, JSType.UNDEFINED));
+      checkArgument(!t.isBottom());
+      optionalFormals.add(JSType.join(t, this.commonTypes.UNDEFINED));
     }
     return this;
   }
@@ -105,13 +112,13 @@ public final class FunctionTypeBuilder {
   }
 
   public FunctionTypeBuilder addRestFormals(JSType t) {
-    Preconditions.checkState(restFormals == null);
+    checkState(restFormals == null);
     restFormals = t;
     return this;
   }
 
   public FunctionTypeBuilder addRetType(JSType t) {
-    Preconditions.checkState(returnType == null);
+    checkState(returnType == null);
     returnType = t;
     return this;
   }
@@ -121,39 +128,73 @@ public final class FunctionTypeBuilder {
     return this;
   }
 
-  public FunctionTypeBuilder addNominalType(NominalType cl) {
-    Preconditions.checkState(nominalType == null);
-    nominalType = cl;
+  public FunctionTypeBuilder addAbstract(boolean isAbstract) {
+    this.isAbstract = isAbstract;
     return this;
   }
 
-  public FunctionTypeBuilder addTypeParameters(
-      ImmutableList<String> typeParameters) {
-    Preconditions.checkNotNull(typeParameters);
-    Preconditions.checkState(this.typeParameters.isEmpty());
+  public FunctionTypeBuilder addNominalType(JSType t) {
+    checkState(this.nominalType == null);
+    this.nominalType = t;
+    return this;
+  }
+
+  public FunctionTypeBuilder addTypeParameters(TypeParameters typeParameters) {
+    checkNotNull(typeParameters);
+    checkState(this.typeParameters.isEmpty());
     this.typeParameters = typeParameters;
     return this;
   }
 
-  public FunctionTypeBuilder addReceiverType(NominalType cl) {
-    Preconditions.checkState(receiverType == null);
-    receiverType = cl;
+  /**
+   * This method is used to handle functions with .call. For simplicity, if a TTL function
+   * is used with .call, the TTL variables will be treated as unknown.
+   */
+  public FunctionTypeBuilder appendTypeParameters(TypeParameters typeParameters) {
+    checkNotNull(typeParameters);
+    ArrayList<String> newTypeParams = new ArrayList<>();
+    newTypeParams.addAll(this.typeParameters.asList());
+    newTypeParams.addAll(typeParameters.asList());
+    this.typeParameters = TypeParameters.make(newTypeParams);
+    return this;
+  }
+
+  public FunctionTypeBuilder addReceiverType(JSType t) {
+    // this.receiverType is not always null here, because of prototype methods
+    // with an explicit @this annotation
+    this.receiverType = t;
     return this;
   }
 
   public DeclaredFunctionType buildDeclaration() {
-    Preconditions.checkState(!loose);
-    Preconditions.checkState(outerVars.isEmpty());
+    checkState(!loose);
+    checkState(outerVars.isEmpty());
     return DeclaredFunctionType.make(
+        this.commonTypes,
         requiredFormals, optionalFormals, restFormals, returnType,
-        nominalType, receiverType, typeParameters);
+        nominalType, receiverType, typeParameters, isAbstract);
   }
 
   public FunctionType buildFunction() {
-    FunctionType result = FunctionType.normalized(
+    // qmarkFunctionBuilder().buildDeclaration creates a non-loose function,
+    // we change that here to have a unique representation in FunctionType.
+    if (this.requiredFormals.isEmpty()
+        && this.optionalFormals.isEmpty()
+        && this.restFormals != null && this.restFormals.isUnknown()
+        && this.returnType != null && this.returnType.isUnknown()
+        && this.nominalType == null
+        && this.receiverType == null
+        && this.typeParameters.isEmpty()
+        && this.outerVars.isEmpty()) {
+      return this.commonTypes.QMARK_FUNCTION;
+    }
+    return FunctionType.normalized(
+        this.commonTypes,
         requiredFormals, optionalFormals, restFormals, returnType,
-        nominalType, receiverType, outerVars, typeParameters, loose);
-    result.checkValid();
-    return result;
+        nominalType, receiverType, outerVars, typeParameters, loose, isAbstract);
+  }
+
+  public JSType buildType() {
+    return this.commonTypes.fromFunctionType(buildFunction());
   }
 }

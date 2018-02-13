@@ -15,6 +15,7 @@
  */
 package com.google.javascript.jscomp;
 
+import com.google.common.annotations.GwtIncompatible;
 import java.io.Serializable;
 import java.text.MessageFormat;
 
@@ -35,11 +36,8 @@ public final class DiagnosticType
   /** The default way to format errors */
   public final MessageFormat format;
 
-  /** Default level */
-  public final CheckLevel defaultLevel;
-
-  /** Reporting level, initially the defaultLevel but may be changed. */
-  public CheckLevel level;
+  /** The default reporting level for this diagnostic */
+  public final CheckLevel level;
 
   /**
    * Create a DiagnosticType at level CheckLevel.ERROR
@@ -94,10 +92,8 @@ public final class DiagnosticType
    */
   private DiagnosticType(String key, CheckLevel level, MessageFormat format) {
     this.key = key;
-    this.defaultLevel = level;
+    this.level = level;
     this.format = format;
-
-    this.level = this.defaultLevel;
   }
 
   /**
@@ -125,6 +121,7 @@ public final class DiagnosticType
   }
 
   @Override
+  @GwtIncompatible("java.text.MessageFormat.toPattern()")
   public String toString() {
     return key + ": " + format.toPattern();
   }

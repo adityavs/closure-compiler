@@ -18,11 +18,10 @@ package com.google.javascript.jscomp;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-
-import junit.framework.TestCase;
-
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
 import java.util.Arrays;
 import java.util.List;
+import junit.framework.TestCase;
 
 /**
  * Tests for error message filtering.
@@ -101,6 +100,19 @@ public final class RhinoErrorReporterTest extends TestCase {
     assertEquals(4, error.getCharno());
   }
 
+  public void testMissingCurlyBraceWarning() {
+    reportLintWarnings = false;
+    assertNoWarningOrError("/** @type string */ var x;");
+
+    reportLintWarnings = true;
+    assertWarning(
+        "/** @type string */ var x;",
+        RhinoErrorReporter.JSDOC_MISSING_BRACES_WARNING,
+        "Bad type annotation. Type annotations should have curly braces. See"
+            + " https://github.com/google/closure-compiler/wiki/Bad-Type-Annotation"
+            + " for more information.");
+  }
+
   /**
    * Verifies that the compiler emits an error for the given code.
    */
@@ -143,6 +155,7 @@ public final class RhinoErrorReporterTest extends TestCase {
   private Compiler parseCode(String code) {
     Compiler compiler = new Compiler();
     CompilerOptions options = new CompilerOptions();
+    options.setLanguageIn(LanguageMode.ECMASCRIPT3);
 
     if (!reportEs3Props) {
       options.setWarningLevel(
@@ -157,6 +170,9 @@ public final class RhinoErrorReporterTest extends TestCase {
     } else {
       options.setWarningLevel(
           DiagnosticGroups.LINT_CHECKS,
+          CheckLevel.WARNING);
+      options.setWarningLevel(
+          DiagnosticGroups.JSDOC_MISSING_TYPE,
           CheckLevel.WARNING);
     }
 

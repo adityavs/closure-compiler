@@ -22,8 +22,6 @@ import com.google.common.collect.Multimap;
 import com.google.javascript.jscomp.NodeTraversal.Callback;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
-
 import java.util.Collection;
 import java.util.List;
 
@@ -37,11 +35,16 @@ import java.util.List;
  *
  * as:
  *
- * C.prototype.getA = JSCompiler_get("a_);
- * C.prototype.setA = JSCompiler_set("a_);
+ * C.prototype.getA = JSCompiler_get("a");
+ * C.prototype.setA = JSCompiler_set("a");
  *
  * if by doing so we will save bytes, after the helper functions are
  * added and renaming is done.
+ *
+ * NOTE: JSCompiler_get and JSCompiler_set turn dotted accesses to
+ * computed accesses, which causes JS engines to use dictionary lookups.
+ * Because of this perf regression, this pass is off by default in advanced
+ * mode even though it improves code size.
  *
  */
 class FunctionRewriter implements CompilerPass {
@@ -66,7 +69,7 @@ class FunctionRewriter implements CompilerPass {
 
     // Accumulate possible reductions in the reduction multi-map.  They
     // will be applied in the loop below.
-    NodeTraversal.traverse(compiler, root,
+    NodeTraversal.traverseEs6(compiler, root,
                            new ReductionGatherer(reducers, reductionMap));
 
     // Apply reductions iff they will provide some savings.
@@ -97,8 +100,9 @@ class FunctionRewriter implements CompilerPass {
         }
 
         Node addingRoot = compiler.getNodeForCodeInsertion(null);
-        addingRoot.addChildrenToFront(helperCode);
-        compiler.reportCodeChange();
+        NodeUtil.markNewScopesChanged(helperCode, compiler);
+        addingRoot.addChildToFront(helperCode);
+        compiler.reportChangeToEnclosingScope(addingRoot);
       }
     }
   }
@@ -115,8 +119,10 @@ class FunctionRewriter implements CompilerPass {
   }
 
   private static boolean isReduceableFunctionExpression(Node n) {
+    Node parent = n.getParent();
     return NodeUtil.isFunctionExpression(n)
-        && !NodeUtil.isGetOrSetKey(n.getParent());
+        && !NodeUtil.isGetOrSetKey(parent)
+        && !parent.isMemberFunctionDef();
   }
 
   /**
@@ -138,7 +144,8 @@ class FunctionRewriter implements CompilerPass {
      */
     void apply() {
       parent.replaceChild(oldChild, newChild);
-      compiler.reportCodeChange();
+      NodeUtil.markFunctionsDeleted(oldChild, compiler);
+      compiler.reportChangeToEnclosingScope(newChild);
     }
 
     /**
@@ -246,7 +253,7 @@ class FunctionRewriter implements CompilerPass {
 
     @Override
     public Node reduce(Node node) {
-      if (NodeUtil.isEmptyFunctionExpression(node)) {
+      if (isReduceableFunctionExpression(node) && NodeUtil.isEmptyFunctionExpression(node)) {
         return buildCallNode(FACTORY_METHOD_NAME, null, node);
       } else {
         return node;
@@ -320,9 +327,10 @@ class FunctionRewriter implements CompilerPass {
      * @return Whether the function matches the pattern.
      */
     private boolean isIdentityFunction(Node functionNode) {
-      Node argList = functionNode.getFirstChild().getNext();
+      Node argList = functionNode.getSecondChild();
       Node paramNode = argList.getFirstChild();
-      if (paramNode == null) {
+      if (paramNode == null || !paramNode.isName()) {
+        // no parameters, or first parameter uses destructuring or a default value
         return false;
       }
 
@@ -416,8 +424,7 @@ class FunctionRewriter implements CompilerPass {
       Node propName = getGetPropertyName(node);
       if (propName != null) {
         if (!propName.isString()) {
-          throw new IllegalStateException(
-              "Expected STRING, got " + Token.name(propName.getType()));
+          throw new IllegalStateException("Expected STRING, got " + propName.getToken());
         }
 
         return buildCallNode(FACTORY_METHOD_NAME, propName, node);
@@ -477,8 +484,7 @@ class FunctionRewriter implements CompilerPass {
       Node propName = getSetPropertyName(node);
       if (propName != null) {
         if (!propName.isString()) {
-          throw new IllegalStateException(
-              "Expected STRING, got " + Token.name(propName.getType()));
+          throw new IllegalStateException("Expected STRING, got " + propName.getToken());
         }
 
         return buildCallNode(FACTORY_METHOD_NAME, propName, node);
@@ -500,9 +506,10 @@ class FunctionRewriter implements CompilerPass {
         return null;
       }
 
-      Node argList = functionNode.getFirstChild().getNext();
+      Node argList = functionNode.getSecondChild();
       Node paramNode = argList.getFirstChild();
-      if (paramNode == null) {
+      if (paramNode == null || !paramNode.isName()) {
+        // no parameters, or first parameter uses destructuring or a default value
         return null;
       }
 

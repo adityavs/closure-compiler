@@ -70,18 +70,15 @@ public final class RecordFunctionInformationTest extends TestCase {
     Node externsRoot = externs(root);
     Node mainRoot = main(root);
 
-    String m0_after = f;
-    String m1_after = g;
     Node nodeG = mainRoot.getFirstChild().getLastChild();
     mainRoot.getFirstChild().removeChild(nodeG);
-    mainRoot.getLastChild().addChildrenToBack(nodeG.cloneTree());
+    mainRoot.getLastChild().addChildToBack(nodeG.cloneTree());
 
-    FunctionInformationMap.Builder expected =
-      FunctionInformationMap.newBuilder();
+    FunctionInformationMap.Builder expected = FunctionInformationMap.newBuilder();
     expected.addEntry(
         FunctionInformationMap.Entry.newBuilder()
         .setId(0)
-        .setSourceName("i0")
+        .setSourceName("i0.js")
         .setLineNumber(1)
         .setModuleName("m0")
         .setSize(g.length())
@@ -90,7 +87,7 @@ public final class RecordFunctionInformationTest extends TestCase {
     expected.addEntry(
         FunctionInformationMap.Entry.newBuilder()
         .setId(1)
-        .setSourceName("i0")
+        .setSourceName("i0.js")
         .setLineNumber(1)
         .setModuleName("m1")
         .setSize(g.length())
@@ -103,14 +100,12 @@ public final class RecordFunctionInformationTest extends TestCase {
 
   private void test(String js, FunctionInformationMap expected) {
     Compiler compiler = new Compiler();
+    CompilerOptions options = new CompilerOptions();
+    options.setEmitUseStrict(false);
     compiler.init(ImmutableList.of(SourceFile.fromCode("externs", "")),
                   ImmutableList.of(SourceFile.fromCode("testcode", js)),
-                  new CompilerOptions());
+                  options);
     test(compiler, expected);
-  }
-
-  private void test(JSModule[] modules, FunctionInformationMap expected) {
-    test(compilerFor(modules), expected);
   }
 
   private void test(Compiler compiler, FunctionInformationMap expected) {
@@ -120,11 +115,11 @@ public final class RecordFunctionInformationTest extends TestCase {
 
   private void test(Compiler compiler, Node externsRoot, Node mainRoot,
       FunctionInformationMap expected) {
-    FunctionNames functionNames = new FunctionNames(compiler);
-    functionNames.process(externsRoot, mainRoot);
+    CollectFunctionNames collectFunctionNames = new CollectFunctionNames(compiler);
+    collectFunctionNames.process(externsRoot, mainRoot);
 
     RecordFunctionInformation processor =
-        new RecordFunctionInformation(compiler, functionNames);
+        new RecordFunctionInformation(compiler, collectFunctionNames.getFunctionNames());
     processor.process(externsRoot, mainRoot);
     FunctionInformationMap result = processor.getMap();
     assertEquals(expected, result);
@@ -132,10 +127,12 @@ public final class RecordFunctionInformationTest extends TestCase {
 
   private Compiler compilerFor(JSModule[] modules) {
       Compiler compiler = new Compiler();
+      CompilerOptions options = new CompilerOptions();
+      options.setEmitUseStrict(false);
       compiler.initModules(
           ImmutableList.of(SourceFile.fromCode("externs", "")),
           ImmutableList.copyOf(modules),
-          new CompilerOptions());
+          options);
       return compiler;
   }
 
@@ -148,6 +145,6 @@ public final class RecordFunctionInformationTest extends TestCase {
   }
 
   private Node main(Node root) {
-    return root.getFirstChild().getNext();
+    return root.getSecondChild();
   }
 }

@@ -44,7 +44,6 @@ import static com.google.javascript.rhino.jstype.TernaryValue.TRUE;
 
 import com.google.javascript.rhino.ErrorReporter;
 import com.google.javascript.rhino.Node;
-
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
@@ -55,12 +54,6 @@ import java.util.Set;
  */
 public class EnumType extends PrototypeObjectType {
   private static final long serialVersionUID = 1L;
-
-  /**
-   * The object literal or alias which this type represents.
-   * It may be {@code null}.
-   */
-  private final Node source;
 
   // the type of the individual elements
   private EnumElementType elementsType;
@@ -76,15 +69,7 @@ public class EnumType extends PrototypeObjectType {
   EnumType(JSTypeRegistry registry, String name, Node source,
       JSType elementsType) {
     super(registry, "enum{" + name + "}", null);
-    this.source = source;
-    this.elementsType = new EnumElementType(registry, elementsType, name);
-  }
-
-  /**
-   * Gets the source node or null if this is an unknown enum.
-   */
-  public Node getSource() {
-    return source;
+    this.elementsType = new EnumElementType(registry, elementsType, name, this);
   }
 
   @Override
@@ -117,11 +102,15 @@ public class EnumType extends PrototypeObjectType {
     return defineDeclaredProperty(name, elementsType, definingNode);
   }
 
-  /**
-   * Gets the elements' type.
-   */
+  /** Gets the elements' type, which is a subtype of the enumerated type. */
   public EnumElementType getElementsType() {
     return elementsType;
+  }
+
+  /** Gets the enumerated type. */
+  @Override
+  public JSType getEnumeratedTypeOfEnumObject() {
+    return elementsType.getPrimitiveType();
   }
 
   @Override
@@ -135,20 +124,20 @@ public class EnumType extends PrototypeObjectType {
 
   @Override
   public boolean isSubtype(JSType that) {
-    return isSubtype(that, ImplCache.create());
+    return isSubtype(that, ImplCache.create(), SubtypingMode.NORMAL);
   }
 
   @Override
   protected boolean isSubtype(JSType that,
-      ImplCache implicitImplCache) {
+      ImplCache implicitImplCache, SubtypingMode subtypingMode) {
     return that.isEquivalentTo(getNativeType(JSTypeNative.OBJECT_TYPE)) ||
         that.isEquivalentTo(getNativeType(JSTypeNative.OBJECT_PROTOTYPE)) ||
-        JSType.isSubtypeHelper(this, that, implicitImplCache);
+        JSType.isSubtypeHelper(this, that, implicitImplCache, subtypingMode);
   }
 
   @Override
-  String toStringHelper(boolean forAnnotations) {
-    return forAnnotations ? "Object" : getReferenceName();
+  StringBuilder appendTo(StringBuilder sb, boolean forAnnotations) {
+    return sb.append(forAnnotations ? "!Object" : getReferenceName());
   }
 
   @Override

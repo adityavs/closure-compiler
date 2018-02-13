@@ -15,17 +15,27 @@
  */
 package com.google.javascript.jscomp.lint;
 
+import com.google.javascript.jscomp.CheckLevel;
 import com.google.javascript.jscomp.Compiler;
+import com.google.javascript.jscomp.CompilerOptions;
 import com.google.javascript.jscomp.CompilerPass;
 import com.google.javascript.jscomp.CompilerTestCase;
+import com.google.javascript.jscomp.DiagnosticGroups;
 
 /**
  * Test case for {@link CheckEmptyStatements}.
  */
 public class CheckEmptyStatementsTest extends CompilerTestCase {
   @Override
-  public CompilerPass getProcessor(Compiler compiler) {
+  protected CompilerPass getProcessor(Compiler compiler) {
     return new CheckEmptyStatements(compiler);
+  }
+
+  @Override
+  protected CompilerOptions getOptions(CompilerOptions options) {
+    super.getOptions(options);
+    options.setWarningLevel(DiagnosticGroups.LINT_CHECKS, CheckLevel.WARNING);
+    return options;
   }
 
   private void testWarning(String js) {
@@ -38,10 +48,26 @@ public class CheckEmptyStatementsTest extends CompilerTestCase {
     testWarning("alert(1);;");
   }
 
+  public void testWarning_withES6Modules01() {
+    testWarning("export function f() {};;");
+  }
+
+  public void testWarning_withES6Modules02() {
+    testWarning("export var x;;");
+  }
+
   public void testNoWarning() {
     testSame("function f() {}");
     testSame("var x;");
     testSame("alert(1);");
     testSame("if (x); y;");
+  }
+
+  public void testNoWarning_withES6Modules01() {
+    testSame("export function f() {}");
+  }
+
+  public void testNoWarning_withES6Modules02() {
+    testSame("export var x;");
   }
 }

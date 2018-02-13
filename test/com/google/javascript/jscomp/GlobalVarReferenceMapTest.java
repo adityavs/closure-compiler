@@ -17,19 +17,15 @@
 package com.google.javascript.jscomp;
 
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.javascript.jscomp.ReferenceCollectingCallback.Reference.createRefForTest;
+import static com.google.javascript.jscomp.Reference.createRefForTest;
 
 import com.google.common.collect.ImmutableList;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.Reference;
-import com.google.javascript.jscomp.ReferenceCollectingCallback.ReferenceCollection;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
-import junit.framework.TestCase;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import junit.framework.TestCase;
 
 /**
  * Unit-tests for the GlobalVarReferenceMap class.
@@ -50,9 +46,9 @@ public final class GlobalVarReferenceMapTest extends TestCase {
   private final GlobalVarReferenceMap map = new GlobalVarReferenceMap(
       ImmutableList.of(INPUT1, INPUT2, INPUT3), ImmutableList.of(EXTERN1));
   private final Map<Var, ReferenceCollection> globalMap = new HashMap<>();
-  private final Node root = new Node(Token.BLOCK);
+  private final Node root = new Node(Token.ROOT);
   private final Scope globalScope = Scope.createGlobalScope(root);
-  private Node scriptRoot = new Node(Token.SCRIPT);
+  private final Node scriptRoot = new Node(Token.SCRIPT);
 
   // In the initial setUp we have 3 references to var1 (one in each input) and
   // 2 references to var2 (in first and third inputs), and 2 references to var3

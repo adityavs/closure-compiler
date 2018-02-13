@@ -16,50 +16,37 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
-import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.jstype.TernaryValue;
-
 import javax.annotation.Nullable;
 
 /**
  * Transform the structure of the AST so that the number of explicit exits
- * are minimized.
+ * are minimized and instead flows to implicit exits conditions.
  *
  * @author johnlenz@google.com (John Lenz)
  */
-class MinimizeExitPoints
-    extends AbstractPostOrderCallback
-    implements CompilerPass {
-
-  AbstractCompiler compiler;
-
-  MinimizeExitPoints(AbstractCompiler compiler) {
-    this.compiler = compiler;
-  }
-
+class MinimizeExitPoints extends AbstractPeepholeOptimization {
   @Override
-  public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, this);
-  }
-
-  @Override
-  public void visit(NodeTraversal t, Node n, Node parent) {
-    switch (n.getType()) {
-      case Token.LABEL:
+  Node optimizeSubtree(Node n) {
+    switch (n.getToken()) {
+      case LABEL:
         tryMinimizeExits(
             n.getLastChild(), Token.BREAK, n.getFirstChild().getString());
         break;
 
-      case Token.FOR:
-      case Token.WHILE:
+      case FOR:
+      case FOR_IN:
+      case FOR_OF:
+      case WHILE:
         tryMinimizeExits(NodeUtil.getLoopCodeBlock(n), Token.CONTINUE, null);
         break;
 
-      case Token.DO:
+      case DO:
         tryMinimizeExits(NodeUtil.getLoopCodeBlock(n), Token.CONTINUE, null);
 
         Node cond = NodeUtil.getConditionExpression(n);
@@ -71,13 +58,22 @@ class MinimizeExitPoints
         }
         break;
 
-      case Token.FUNCTION:
-        // FYI: the function will be analyzed w/out a call to
-        // NodeTraversal/pushScope. Bypassing pushScope could cause a bug if
-        // there is code that relies on NodeTraversal knowing the correct scope.
-        tryMinimizeExits(n.getLastChild(), Token.RETURN, null);
+      case BLOCK:
+        if (n.getParent() != null && n.getParent().isFunction()) {
+          tryMinimizeExits(n, Token.RETURN, null);
+        }
+        break;
+
+      case SWITCH:
+        tryMinimizeSwitchExits(n, Token.BREAK, null);
+        break;
+
+        // TODO(johnlenz): Minimize any block that ends in a optimizable statements:
+        //   break, continue, return
+      default:
         break;
     }
+    return n;
   }
 
   /**
@@ -107,7 +103,7 @@ class MinimizeExitPoints
    * @param labelName If parent is a label the name of the label to look for,
    *   null otherwise. Non-null only for breaks within labels.
    */
-  void tryMinimizeExits(Node n, int exitType, @Nullable String labelName) {
+  void tryMinimizeExits(Node n, Token exitType, @Nullable String labelName) {
 
     // Just an 'exit'.
     if (matchingExitNode(n, exitType, labelName)) {
@@ -118,7 +114,7 @@ class MinimizeExitPoints
 
     // Just an 'if'.
     if (n.isIf()) {
-      Node ifBlock = n.getFirstChild().getNext();
+      Node ifBlock = n.getSecondChild();
       tryMinimizeExits(ifBlock, exitType, labelName);
       Node elseBlock = ifBlock.getNext();
       if (elseBlock != null) {
@@ -133,7 +129,7 @@ class MinimizeExitPoints
       tryMinimizeExits(tryBlock, exitType, labelName);
       Node allCatchNodes = NodeUtil.getCatchBlock(n);
       if (NodeUtil.hasCatchHandler(allCatchNodes)) {
-        Preconditions.checkState(allCatchNodes.hasOneChild());
+        checkState(allCatchNodes.hasOneChild());
         Node catchNode = allCatchNodes.getFirstChild();
         Node catchCodeBlock = catchNode.getLastChild();
         tryMinimizeExits(catchCodeBlock, exitType, labelName);
@@ -150,10 +146,14 @@ class MinimizeExitPoints
       tryMinimizeExits(labelBlock, exitType, labelName);
     }
 
-    // TODO(johnlenz): The last case of SWITCH statement?
+    // We can only minimize switch cases if we are not trying to remove unlabeled breaks.
+    if (n.isSwitch()  && (exitType != Token.BREAK || labelName != null)) {
+      tryMinimizeSwitchExits(n, exitType, labelName);
+      return;
+    }
 
     // The rest assumes a block with at least one child, bail on anything else.
-    if (!n.isBlock() || n.getLastChild() == null) {
+    if (!n.isNormalBlock() || !n.hasChildren()) {
       return;
     }
 
@@ -161,22 +161,20 @@ class MinimizeExitPoints
     // Convert "if (blah) break;  if (blah2) break; other_stmt;" to
     // become "if (blah); else { if (blah2); else { other_stmt; } }"
     // which will get converted to "if (!blah && !blah2) { other_stmt; }".
-    for (Node c : n.children()) {
-
+    for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {
       // An 'if' block to process below.
       if (c.isIf()) {
         Node ifTree = c;
-        Node trueBlock, falseBlock;
 
         // First, the true condition block.
-        trueBlock = ifTree.getFirstChild().getNext();
-        falseBlock = trueBlock.getNext();
+        Node trueBlock = ifTree.getSecondChild();
+        Node falseBlock = trueBlock.getNext();
         tryMinimizeIfBlockExits(trueBlock, falseBlock,
             ifTree, exitType, labelName);
 
         // Now the else block.
         // The if blocks may have changed, get them again.
-        trueBlock = ifTree.getFirstChild().getNext();
+        trueBlock = ifTree.getSecondChild();
         falseBlock = trueBlock.getNext();
         if (falseBlock != null) {
           tryMinimizeIfBlockExits(falseBlock, trueBlock,
@@ -200,6 +198,48 @@ class MinimizeExitPoints
     }
   }
 
+  void tryMinimizeSwitchExits(Node n, Token exitType, @Nullable String labelName) {
+    checkState(n.isSwitch());
+    // Skipping the switch condition, visit all the children.
+    for (Node c = n.getSecondChild(); c != null; c = c.getNext()) {
+      if (c != n.getLastChild()) {
+        tryMinimizeSwitchCaseExits(c, exitType, labelName);
+      } else {
+        // Last case, the last case block can be optimized more aggressively.
+        tryMinimizeExits(c.getLastChild(), exitType, labelName);
+      }
+    }
+  }
+
+  /**
+   * Attempt to remove explicit exits from switch cases that also occur implicitly
+   * after the switch.
+   */
+  void tryMinimizeSwitchCaseExits(Node n, Token exitType, @Nullable String labelName) {
+    checkState(NodeUtil.isSwitchCase(n));
+
+    checkState(n != n.getParent().getLastChild());
+    Node block = n.getLastChild();
+    Node maybeBreak = block.getLastChild();
+    if (maybeBreak == null || !maybeBreak.isBreak() || maybeBreak.hasChildren()) {
+      // Can not minimize exits from a case without an explicit break from the switch.
+      return;
+    }
+
+    // Now try to minimize the exits of the last child before the break, if it is removed
+    // look at what has become the child before the break.
+    Node childBeforeBreak = maybeBreak.getPrevious();
+    while (childBeforeBreak != null) {
+      Node c = childBeforeBreak;
+      tryMinimizeExits(c, exitType, labelName);
+      // If the node is still the last child, we are done.
+      childBeforeBreak = maybeBreak.getPrevious();
+      if (c == childBeforeBreak) {
+        break;
+      }
+    }
+  }
+
   /**
    * Look for exits (returns, breaks, or continues, depending on the context) at
    * the end of a block and removes them by moving the if node's siblings,
@@ -213,12 +253,12 @@ class MinimizeExitPoints
    *     named-break associated with a label.
    */
   private void tryMinimizeIfBlockExits(Node srcBlock, Node destBlock,
-      Node ifNode, int exitType, @Nullable String labelName) {
+      Node ifNode, Token exitType, @Nullable String labelName) {
     Node exitNodeParent = null;
     Node exitNode = null;
 
     // Pick an exit node candidate.
-    if (srcBlock.isBlock()) {
+    if (srcBlock.isNormalBlock()) {
       if (!srcBlock.hasChildren()) {
         return;
       }
@@ -235,6 +275,11 @@ class MinimizeExitPoints
       return;
     }
 
+    // Ensure no block-scoped declarations are moved into an inner block.
+    if (!tryConvertAllBlockScopedFollowing(ifNode)) {
+      return;
+    }
+
     // Take case of the if nodes siblings, if any.
     if (ifNode.getNext() != null) {
       // Move siblings of the if block into the opposite
@@ -246,7 +291,7 @@ class MinimizeExitPoints
       } else if (destBlock.isEmpty()) {
         // Use the new block.
         ifNode.replaceChild(destBlock, newDestBlock);
-      } else if (destBlock.isBlock()) {
+      } else if (destBlock.isNormalBlock()) {
         // Reuse the existing block.
         newDestBlock = destBlock;
       } else {
@@ -272,8 +317,8 @@ class MinimizeExitPoints
    *     non-null only for breaks associated with labels.
    * @return Whether the node matches the specified block-exit type.
    */
-  private static boolean matchingExitNode(Node n, int type, @Nullable String labelName) {
-    if (n.getType() == type) {
+  private static boolean matchingExitNode(Node n, Token type, @Nullable String labelName) {
+    if (n.getToken() == type) {
       if (type == Token.RETURN) {
         // only returns without expressions.
         return !n.hasChildren();
@@ -307,5 +352,41 @@ class MinimizeExitPoints
         destParent.addChildToBack(n);
       }
     }
+  }
+
+  /**
+   * Convert all let/const declarations following the start node to var declarations if possible.
+   *
+   * <p>See the unit tests for examples of why this is necessary before moving code into an inner
+   * block, and why this is unsafe to do to declarations inside a loop.
+   *
+   * @param start The start point
+   * @return Whether all block-scoped declarations have been converted.
+   */
+  private static boolean tryConvertAllBlockScopedFollowing(Node start) {
+    if (NodeUtil.isWithinLoop(start)) {
+      // If in a loop, don't convert anything to a var. Return true only if there are no let/consts.
+      return !hasBlockScopedVarsFollowing(start);
+    }
+    for (Node n = start.getNext(); n != null; n = n.getNext()) {
+      if (n.isLet() || n.isConst()) {
+        n.setToken(Token.VAR);
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Detect any block-scoped declarations that are younger siblings of the given starting point.
+   *
+   * @param start The start point
+   */
+  private static boolean hasBlockScopedVarsFollowing(Node start) {
+    for (Node n = start.getNext(); n != null; n = n.getNext()) {
+      if (n.isLet() || n.isConst()) {
+        return true;
+      }
+    }
+    return false;
   }
 }

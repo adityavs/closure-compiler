@@ -16,13 +16,13 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkState;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.base.CaseFormat;
-import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.javascript.jscomp.JsMessage.IdGenerator;
 import com.google.javascript.jscomp.JsMessage.PlaceholderReference;
-
 import java.util.List;
 
 /**
@@ -56,7 +56,7 @@ public final class GoogleJsMessageIdGenerator implements IdGenerator {
 
   @Override
   public String generateId(String meaning, List<CharSequence> messageParts) {
-    Preconditions.checkState(meaning != null);
+    checkState(meaning != null);
 
     StringBuilder sb = new StringBuilder();
     for (CharSequence part : messageParts) {
@@ -71,7 +71,7 @@ public final class GoogleJsMessageIdGenerator implements IdGenerator {
     String tcValue = sb.toString();
 
     String projectScopedMeaning =
-        (projectId != null ? (projectId + ": ") : "") + meaning;
+        (Strings.isNullOrEmpty(projectId) ? "" : (projectId + ": ")) + meaning;
     return String.valueOf(
         MessageId.generateId(tcValue, projectScopedMeaning));
   }

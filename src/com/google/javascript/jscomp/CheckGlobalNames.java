@@ -16,12 +16,13 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.jscomp.GlobalNamespace.Name;
 import com.google.javascript.jscomp.GlobalNamespace.Ref;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
-
 import java.util.HashSet;
 import java.util.Set;
 
@@ -73,7 +74,7 @@ class CheckGlobalNames implements CompilerPass {
    * can be re-used for multiple check passes. Returns this for easy chaining.
    */
   CheckGlobalNames injectNamespace(GlobalNamespace namespace) {
-    Preconditions.checkArgument(namespace.hasExternsRoot());
+    checkArgument(namespace.hasExternsRoot());
     this.namespace = namespace;
     return this;
   }
@@ -85,7 +86,7 @@ class CheckGlobalNames implements CompilerPass {
     }
 
     // Find prototype properties that will affect our analysis.
-    Preconditions.checkState(namespace.hasExternsRoot());
+    checkState(namespace.hasExternsRoot());
     findPrototypeProps("Object", objectPrototypeProps);
     findPrototypeProps("Function", functionPrototypeProps);
     objectPrototypeProps.addAll(
@@ -110,7 +111,7 @@ class CheckGlobalNames implements CompilerPass {
     if (slot != null) {
       for (Ref ref : slot.getRefs()) {
         if (ref.type == Ref.Type.PROTOTYPE_GET) {
-          Node fullName = ref.getNode().getParent().getParent();
+          Node fullName = ref.getNode().getGrandparent();
           if (fullName.isGetProp()) {
             props.add(fullName.getLastChild().getString());
           }
@@ -168,7 +169,7 @@ class CheckGlobalNames implements CompilerPass {
         reportBadModuleReference(name, ref);
       } else {
         // Check for late references.
-        if (ref.scope.isGlobal()) {
+        if (ref.scope.getClosestHoistScope().isGlobal()) {
           // Prototype references are special, because in our reference graph,
           // A.prototype counts as a reference to A.
           boolean isPrototypeGet = (ref.type == Ref.Type.PROTOTYPE_GET);
@@ -188,7 +189,7 @@ class CheckGlobalNames implements CompilerPass {
                     NAME_DEFINED_LATE_WARNING,
                     refName,
                     owner.getFullName(),
-                    owner.getDeclaration().source.getName(),
+                    owner.getDeclaration().getSourceFile().getName(),
                     String.valueOf(owner.getDeclaration().node.getLineno())));
           }
         }

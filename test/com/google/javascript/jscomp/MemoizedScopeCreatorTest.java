@@ -1,5 +1,5 @@
 /*
- * Copyright 2009 The Closure Compiler Authors.
+ * Copyright 2017 The Closure Compiler Authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,42 +22,34 @@ import com.google.javascript.rhino.Token;
 import junit.framework.TestCase;
 
 /**
- * A dopey test for {@link MemoizedScopeCreator}. This is mostly here
- * just so it's easy to write more tests if this becomes more complicated.
- *
- * @author nicksantos@google.com (Nick Santos)
+ * A tests for {@link MemoizedScopeCreator}.
  */
 public final class MemoizedScopeCreatorTest extends TestCase {
 
   public void testMemoization() throws Exception {
-    Node trueNode = new Node(Token.TRUE);
-    Node falseNode = new Node(Token.FALSE);
-    // Wow, is there really a circular dependency between JSCompiler and
-    // SyntacticScopeCreator?
+    Node root1 = new Node(Token.ROOT);
+    Node root2 = new Node(Token.ROOT);
     Compiler compiler = new Compiler();
     compiler.initOptions(new CompilerOptions());
-    ScopeCreator creator = new MemoizedScopeCreator(
-        SyntacticScopeCreator.makeTyped(compiler));
-    Scope scopeA = creator.createScope(trueNode, null);
-    assertSame(scopeA, creator.createScope(trueNode, null));
-    assertNotSame(scopeA, creator.createScope(falseNode, null));
+    ScopeCreator creator = new MemoizedScopeCreator(new Es6SyntacticScopeCreator(compiler));
+    Scope scopeA = (Scope) creator.createScope(root1, null);
+    assertSame(scopeA, creator.createScope(root1, null));
+    assertNotSame(scopeA, creator.createScope(root2, null));
   }
 
   public void testPreconditionCheck() throws Exception {
     Compiler compiler = new Compiler();
     compiler.initOptions(new CompilerOptions());
-    Node trueNode = new Node(Token.TRUE);
-    ScopeCreator creator = new MemoizedScopeCreator(
-        SyntacticScopeCreator.makeTyped(compiler));
-    Scope scopeA = creator.createScope(trueNode, null);
+    Node root = new Node(Token.ROOT);
+    ScopeCreator creator = new MemoizedScopeCreator(new Es6SyntacticScopeCreator(compiler));
+    Scope scopeA = (Scope) creator.createScope(root, null);
 
     boolean handled = false;
     try {
-      creator.createScope(trueNode, scopeA);
+      creator.createScope(root, scopeA);
     } catch (IllegalStateException e) {
       handled = true;
     }
     assertTrue(handled);
   }
-
 }

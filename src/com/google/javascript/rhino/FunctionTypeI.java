@@ -39,13 +39,14 @@
 
 package com.google.javascript.rhino;
 
+import java.util.Collection;
 import java.util.List;
 
 /**
  * @author blickly@google.com (Ben Lickly)
  * @author dimvar@google.com (Dimitris Vardoulakis)
  */
-public interface FunctionTypeI extends TypeI {
+public interface FunctionTypeI extends ObjectTypeI {
   /**
    * Creates a new function type B based on the original function type A.
    * Takes the receiver type (this type) of A and makes it the first
@@ -54,17 +55,71 @@ public interface FunctionTypeI extends TypeI {
    */
   TypeI convertMethodToFunction();
 
+  /** Returns whether {@code this} type represents a constructor. */
+  boolean hasInstanceType();
+
+  /**
+   * Returns a type representing an instance of {@code this} constructor,
+   * or null if {@code this} is not a constructor.
+   */
   ObjectTypeI getInstanceType();
 
+  TypeI getReturnType();
+
+  /**
+   * For a constructor function, returns the name of the instances.
+   * For other functions, returns null.
+   */
   String getReferenceName();
 
+  /** Gets the AST Node where this function was defined. */
   Node getSource();
 
-  List<? extends FunctionTypeI> getSubTypes();
+  /**
+   * Returns an iterable of direct types that are subtypes of this type.
+   * This is only valid for constructors and interfaces, and will not be
+   * null. This allows a downward traversal of the subtype graph.
+   */
+  Iterable<FunctionTypeI> getDirectSubTypes();
 
+  /** Gets the type of {@code this} in this function. */
   TypeI getTypeOfThis();
 
+  /** Whether this function type has any properties (not counting "prototype"). */
   boolean hasProperties();
 
   void setSource(Node n);
+
+  /** Checks if a call to this function with the given list of arguments is valid. */
+  boolean acceptsArguments(List<? extends TypeI> argumentTypes);
+
+  Collection<ObjectTypeI> getAncestorInterfaces();
+
+  ObjectTypeI getPrototypeProperty();
+
+  Iterable<TypeI> getParameterTypes();
+
+  /** Returns the number of required arguments. */
+  int getMinArity();
+
+  /** Returns the maximum number of allowed arguments, or Integer.MAX_VALUE if variadic. */
+  int getMaxArity();
+
+  /** Returns a Builder instance initialized to this function. */
+  Builder toBuilder();
+
+  /** Interface for building FunctionTypeI instances. */
+  interface Builder {
+    /** Returns a builder with unknown return type. */
+    Builder withUnknownReturnType();
+
+    /** Returns a builder with the given return type. */
+    Builder withReturnType(TypeI returnType);
+
+    /** Returns a builder with an empty parameter list. */
+    Builder withNoParameters();
+
+    /** Builds a new FunctionTypeI. */
+    FunctionTypeI build();
+  }
 }

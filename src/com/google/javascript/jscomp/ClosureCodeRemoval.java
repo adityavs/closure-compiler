@@ -21,7 +21,6 @@ import com.google.javascript.jscomp.CodingConvention.AssertionFunctionSpec;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.jscomp.NodeTraversal.Callback;
 import com.google.javascript.rhino.Node;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -62,6 +61,9 @@ final class ClosureCodeRemoval implements CompilerPass {
    */
   private final List<RemovableAssignment> abstractMethodAssignmentNodes =
        new ArrayList<>();
+
+  /** List of member function definition nodes annotated with @abstract. */
+  private final List<Node> abstractMemberFunctionNodes = new ArrayList<>();
 
   /**
    * List of assertion functions.
@@ -123,18 +125,20 @@ final class ClosureCodeRemoval implements CompilerPass {
       for (Node ancestor : assignAncestors) {
         if (ancestor.isExprResult()) {
           lastAncestor.removeChild(ancestor);
+          NodeUtil.markFunctionsDeleted(ancestor, compiler);
         } else {
-          rhs.detachFromParent();
+          rhs.detach();
           ancestor.replaceChild(last, rhs);
         }
         last = ancestor;
       }
-      compiler.reportCodeChange();
+      compiler.reportChangeToEnclosingScope(lastAncestor);
     }
   }
 
   /**
-   * Identifies all assignments of the abstract method to a variable.
+   * Identifies all assignments of the abstract method to a variable and all methods annotated with
+   * "@abstract" in their JSDoc.
    */
   private class FindAbstractMethods extends AbstractPostOrderCallback {
     @Override
@@ -146,8 +150,19 @@ final class ClosureCodeRemoval implements CompilerPass {
         if (nameNode.isQualifiedName() &&
             valueNode.isQualifiedName() &&
             valueNode.matchesQualifiedName(ABSTRACT_METHOD_NAME)) {
-          abstractMethodAssignmentNodes.add(new RemovableAssignment(
-              n.getFirstChild(), n, t));
+          // Foo.prototype.bar = goog.abstractMethod
+          abstractMethodAssignmentNodes.add(
+              new RemovableAssignment(n.getFirstChild(), n, t));
+        } else if (n.getJSDocInfo() != null
+            && n.getJSDocInfo().isAbstract()
+            && !(n.getJSDocInfo().isConstructor() || valueNode.isClass())) {
+          // @abstract
+          abstractMethodAssignmentNodes.add(
+              new RemovableAssignment(n.getFirstChild(), n, t));
+        }
+      } else if (n.isMemberFunctionDef() && parent.isClassMembers()) {
+        if (n.getJSDocInfo() != null && n.getJSDocInfo().isAbstract()) {
+          abstractMemberFunctionNodes.add(n);
         }
       }
     }
@@ -211,22 +226,33 @@ final class ClosureCodeRemoval implements CompilerPass {
       assignment.remove();
     }
 
+    for (Node memberFunction : abstractMemberFunctionNodes) {
+      compiler.reportFunctionDeleted(memberFunction.getFirstChild());
+      Node parent = memberFunction.getParent();
+      parent.removeChild(memberFunction);
+      compiler.reportChangeToEnclosingScope(parent);
+    }
+
     for (Node call : assertionCalls) {
       // If the assertion is an expression, just strip the whole thing.
+      compiler.reportChangeToEnclosingScope(call);
       Node parent = call.getParent();
       if (parent.isExprResult()) {
-        parent.getParent().removeChild(parent);
+        parent.detach();
+        NodeUtil.markFunctionsDeleted(parent, compiler);
       } else {
         // Otherwise, replace the assertion with its first argument,
         // which is the return value of the assertion.
-        Node firstArg = call.getFirstChild().getNext();
+        Node firstArg = call.getSecondChild();
         if (firstArg == null) {
           parent.replaceChild(call, NodeUtil.newUndefinedNode(call));
         } else {
-          parent.replaceChild(call, firstArg.detachFromParent());
+          Node replacement = firstArg.detach();
+          replacement.setTypeI(call.getTypeI());
+          parent.replaceChild(call, replacement);
         }
+        NodeUtil.markFunctionsDeleted(call, compiler);
       }
-      compiler.reportCodeChange();
     }
   }
 }

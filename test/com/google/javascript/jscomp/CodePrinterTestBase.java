@@ -15,11 +15,12 @@
  */
 package com.google.javascript.jscomp;
 
-import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
-import com.google.javascript.rhino.InputId;
-import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
+import static com.google.common.base.Preconditions.checkArgument;
 
+import com.google.common.collect.ImmutableList;
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
+import com.google.javascript.jscomp.TypeICompilerTestCase.TypeInferenceMode;
+import com.google.javascript.rhino.Node;
 import junit.framework.TestCase;
 
 /** Base class for tests that exercise {@link CodePrinter}. */
@@ -32,7 +33,9 @@ public abstract class CodePrinterTestBase extends TestCase {
   protected LanguageMode languageMode = LanguageMode.ECMASCRIPT5;
   protected Compiler lastCompiler = null;
 
-  @Override public void setUp() {
+  @Override
+  protected void setUp() throws Exception {
+    super.setUp();
     allowWarnings = false;
     preserveTypeAnnotations = false;
     trustedStrings = true;
@@ -41,35 +44,44 @@ public abstract class CodePrinterTestBase extends TestCase {
   }
 
   Node parse(String js) {
-    return parse(js, false);
+    return parse(js, TypeInferenceMode.NEITHER);
   }
 
-  Node parse(String js, boolean checkTypes) {
+  Node parse(String js, TypeInferenceMode mode) {
+    checkArgument(mode != TypeInferenceMode.BOTH);
     Compiler compiler = new Compiler();
     lastCompiler = compiler;
     CompilerOptions options = new CompilerOptions();
     options.setTrustedStrings(trustedStrings);
     options.preserveTypeAnnotations = preserveTypeAnnotations;
-
     // Allow getters and setters.
     options.setLanguageIn(languageMode);
-    compiler.initOptions(options);
-    Node n = compiler.parseTestCode(js);
+    options.setWarningLevel(DiagnosticGroups.NEW_CHECK_TYPES_EXTRA_CHECKS, CheckLevel.OFF);
+    options.setNewTypeInference(mode.runsNTI());
 
-    if (checkTypes) {
+    compiler.init(
+        ImmutableList.of(SourceFile.fromCode("externs", CompilerTestCase.MINIMAL_EXTERNS)),
+        ImmutableList.of(SourceFile.fromCode("testcode", js)),
+        options);
+    Node externsAndJs = compiler.parseInputs();
+    checkUnexpectedErrorsOrWarnings(compiler, 0);
+    Node root = externsAndJs.getLastChild();
+    Node externs = externsAndJs.getFirstChild();
+
+    if (mode.runsNTI()) {
+      new GlobalTypeInfoCollector(compiler).process(externs, root);
+      NewTypeInference nti = new NewTypeInference(compiler);
+      nti.process(externs, root);
+    } else if (mode.runsOTI()) {
       DefaultPassConfig passConfig = new DefaultPassConfig(null);
       CompilerPass typeResolver = passConfig.resolveTypes.create(compiler);
-      Node externs = new Node(Token.SCRIPT);
-      externs.setInputId(new InputId("externs"));
-      Node externAndJsRoot = new Node(Token.BLOCK, externs, n);
-      externAndJsRoot.setIsSyntheticBlock(true);
-      typeResolver.process(externs, n);
+      typeResolver.process(externs, root);
       CompilerPass inferTypes = passConfig.inferTypes.create(compiler);
-      inferTypes.process(externs, n);
+      inferTypes.process(externs, root);
     }
 
     checkUnexpectedErrorsOrWarnings(compiler, 0);
-    return n;
+    return root.getFirstChild();
   }
 
   private void checkUnexpectedErrorsOrWarnings(
@@ -112,7 +124,7 @@ public abstract class CodePrinterTestBase extends TestCase {
 
   String printNode(Node n) {
     CompilerOptions options = new CompilerOptions();
-    options.setLineLengthThreshold(CodePrinter.DEFAULT_LINE_LENGTH_THRESHOLD);
+    options.setLineLengthThreshold(CompilerOptions.DEFAULT_LINE_LENGTH_THRESHOLD);
     options.setLanguageOut(languageMode);
     return new CodePrinter.Builder(n).setCompilerOptions(options).build();
   }
@@ -127,7 +139,7 @@ public abstract class CodePrinterTestBase extends TestCase {
         parsePrint(js, newCompilerOptions(new CompilerOptionBuilder() {
           @Override void setOptions(CompilerOptions options) {
             options.setPrettyPrint(false);
-            options.setLineLengthThreshold(CodePrinter.DEFAULT_LINE_LENGTH_THRESHOLD);
+            options.setLineLengthThreshold(CompilerOptions.DEFAULT_LINE_LENGTH_THRESHOLD);
           }
         })));
   }

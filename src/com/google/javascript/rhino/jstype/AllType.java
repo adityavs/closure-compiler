@@ -81,8 +81,8 @@ public final class AllType extends JSType {
   }
 
   @Override
-  String toStringHelper(boolean forAnnotations) {
-    return "*";
+  StringBuilder appendTo(StringBuilder sb, boolean forAnnotations) {
+    return sb.append("*");
   }
 
   @Override
@@ -112,5 +112,20 @@ public final class AllType extends JSType {
   @Override
   JSType resolveInternal(ErrorReporter t, StaticTypedScope<JSType> scope) {
     return this;
+  }
+
+  @Override
+  public int hashCode() {
+    return System.identityHashCode(this);
+  }
+
+  @Override
+  public boolean isNullable() {
+    return true;
+  }
+
+  @Override
+  public boolean isVoidable() {
+    return true;
   }
 }

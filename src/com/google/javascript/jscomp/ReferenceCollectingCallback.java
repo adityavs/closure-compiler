@@ -16,39 +16,32 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
-import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 import com.google.javascript.jscomp.NodeTraversal.ScopedCallback;
-import com.google.javascript.rhino.InputId;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.StaticRef;
-import com.google.javascript.rhino.StaticSourceFile;
 import com.google.javascript.rhino.StaticSymbolTable;
-import com.google.javascript.rhino.Token;
-
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 /**
- * A helper class for passes that want to access all information about where a
- * variable is referenced and declared at once and then make a decision as to
- * how it should be handled, possibly inlining, reordering, or generating
- * warnings. Callers do this by providing {@link Behavior} and then
- * calling {@link #process(Node, Node)}.
+ * A helper class for passes that want to access all information about where a variable is
+ * referenced and declared at once and then make a decision as to how it should be handled, possibly
+ * inlining, reordering, or generating warnings. Callers do this by providing {@link Behavior} and
+ * then calling {@link #process(Node, Node)}.
  *
  * @author kushal@google.com (Kushal Dave)
  */
-class ReferenceCollectingCallback implements ScopedCallback,
-    HotSwapCompilerPass,
-    StaticSymbolTable<Var, ReferenceCollectingCallback.Reference> {
+public final class ReferenceCollectingCallback
+    implements ScopedCallback, HotSwapCompilerPass, StaticSymbolTable<Var, Reference> {
 
   /**
    * Maps a given variable to a collection of references to that name. Note that
@@ -67,6 +60,8 @@ class ReferenceCollectingCallback implements ScopedCallback,
    * Source of behavior at various points in the traversal.
    */
   private final Behavior behavior;
+
+  private final ScopeCreator scopeCreator;
 
   /**
    * JavaScript compiler to use in traversing.
@@ -89,8 +84,9 @@ class ReferenceCollectingCallback implements ScopedCallback,
   /**
    * Constructor initializes block stack.
    */
-  ReferenceCollectingCallback(AbstractCompiler compiler, Behavior behavior) {
-    this(compiler, behavior, Predicates.<Var>alwaysTrue());
+  public ReferenceCollectingCallback(AbstractCompiler compiler, Behavior behavior,
+      ScopeCreator creator) {
+    this(compiler, behavior, creator, Predicates.<Var>alwaysTrue());
   }
 
   /**
@@ -99,10 +95,11 @@ class ReferenceCollectingCallback implements ScopedCallback,
    * The test for Var equality uses reference equality, so it's necessary to
    * inject a scope when you traverse.
    */
-  ReferenceCollectingCallback(AbstractCompiler compiler, Behavior behavior,
+  ReferenceCollectingCallback(AbstractCompiler compiler, Behavior behavior, ScopeCreator creator,
       Predicate<Var> varFilter) {
     this.compiler = compiler;
     this.behavior = behavior;
+    this.scopeCreator = creator;
     this.varFilter = varFilter;
   }
 
@@ -112,15 +109,28 @@ class ReferenceCollectingCallback implements ScopedCallback,
    */
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverseRoots(compiler, this, externs, root);
+    NodeTraversal t = new NodeTraversal(compiler, this, scopeCreator);
+    t.traverseRoots(externs, root);
+  }
+
+  public void process(Node root) {
+    NodeTraversal t = new NodeTraversal(compiler, this, scopeCreator);
+    t.traverse(root);
   }
 
   /**
    * Targets reference collection to a particular scope.
    */
   void processScope(Scope scope) {
+    boolean shouldAddToBlockStack = !scope.isHoistScope();
     this.narrowScope = scope;
-    (new NodeTraversal(compiler, this)).traverseAtScope(scope);
+    if (shouldAddToBlockStack) {
+      blockStack.add(new BasicBlock(null, scope.getRootNode()));
+    }
+    (new NodeTraversal(compiler, this, scopeCreator)).traverseAtScope(scope);
+    if (shouldAddToBlockStack) {
+      pop(blockStack);
+    }
     this.narrowScope = null;
   }
 
@@ -129,7 +139,7 @@ class ReferenceCollectingCallback implements ScopedCallback,
    */
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
-    NodeTraversal.traverse(compiler, scriptRoot, this);
+    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
   }
 
   /**
@@ -159,24 +169,25 @@ class ReferenceCollectingCallback implements ScopedCallback,
    */
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
-    if (n.isName() || n.isRest()
-        || (n.isStringKey() && parent.isObjectPattern() && !n.hasChildren())) {
-      Var v;
-      if (n.getString().equals("arguments")) {
-        v = t.getScope().getArgumentsVar();
-      } else {
-        v = t.getScope().getVar(n.getString());
+    if (n.isName() || n.isImportStar() || (n.isStringKey() && !n.hasChildren())) {
+      if ((parent.isImportSpec() && n != parent.getLastChild())
+          || (parent.isExportSpec() && n != parent.getFirstChild())) {
+        // The n in `import {n as x}` or `export {x as n}` are not references, even though
+        // they are represented in the AST as NAME nodes.
+        return;
       }
+
+      Var v = t.getScope().getVar(n.getString());
 
       if (v != null) {
         if (varFilter.apply(v)) {
           addReference(v, new Reference(n, t, peek(blockStack)));
         }
 
-        if (v.getParentNode() != null &&
-            NodeUtil.isHoistedFunctionDeclaration(v.getParentNode()) &&
+        if (v.getParentNode() != null
+            && NodeUtil.isHoistedFunctionDeclaration(v.getParentNode())
             // If we're only traversing a narrow scope, do not try to climb outside.
-            (narrowScope == null || narrowScope.getDepth() <= v.getScope().getDepth())) {
+            && (narrowScope == null || narrowScope.getDepth() <= v.getScope().getDepth())) {
           outOfBandTraversal(v);
         }
       }
@@ -198,29 +209,29 @@ class ReferenceCollectingCallback implements ScopedCallback,
     // Replace the block stack with a new one. This algorithm only works
     // because we know hoisted functions cannot be inside loops. It will have to
     // change if we ever do general function continuations.
-    Preconditions.checkState(NodeUtil.isHoistedFunctionDeclaration(fnNode));
+    checkState(NodeUtil.isHoistedFunctionDeclaration(fnNode), fnNode);
 
     Scope containingScope = v.getScope();
 
     // This is tricky to compute because of the weird traverseAtScope call for
-    // CollapseProperties.
+    // AggressiveInlineAliases.
     List<BasicBlock> newBlockStack = null;
     if (containingScope.isGlobal()) {
       newBlockStack = new ArrayList<>();
       newBlockStack.add(blockStack.get(0));
     } else {
       for (int i = 0; i < blockStack.size(); i++) {
-        if (blockStack.get(i).root == containingScope.getRootNode()) {
+        if (blockStack.get(i).getRoot() == containingScope.getRootNode()) {
           newBlockStack = new ArrayList<>(blockStack.subList(0, i + 1));
         }
       }
     }
-    Preconditions.checkNotNull(newBlockStack);
+    checkNotNull(newBlockStack);
 
     List<BasicBlock> oldBlockStack = blockStack;
     blockStack = newBlockStack;
 
-    NodeTraversal outOfBandTraversal = new NodeTraversal(compiler, this);
+    NodeTraversal outOfBandTraversal = new NodeTraversal(compiler, this, scopeCreator);
     outOfBandTraversal.traverseFunctionOutOfBand(fnNode, containingScope);
 
     blockStack = oldBlockStack;
@@ -232,9 +243,14 @@ class ReferenceCollectingCallback implements ScopedCallback,
    */
   @Override
   public void enterScope(NodeTraversal t) {
-    Node n = t.getScope().getRootNode();
+    Node n = t.getScopeRoot();
     BasicBlock parent = blockStack.isEmpty() ? null : peek(blockStack);
-    blockStack.add(new BasicBlock(parent, n));
+    // Don't add all ES6 scope roots to blockStack, only those that are also scopes according to
+    // the ES5 scoping rules. Other nodes that ought to be considered the root of a BasicBlock
+    // are added in shouldTraverse() or processScope() and removed in visit().
+    if (t.isHoistScope()) {
+      blockStack.add(new BasicBlock(parent, n));
+    }
   }
 
   /**
@@ -242,41 +258,44 @@ class ReferenceCollectingCallback implements ScopedCallback,
    */
   @Override
   public void exitScope(NodeTraversal t) {
-    pop(blockStack);
-    if (t.getScope().isGlobal()) {
-      // Update global scope reference lists when we are done with it.
-      compiler.updateGlobalVarReferences(referenceMap, t.getScopeRoot());
-      behavior.afterExitScope(t, compiler.getGlobalVarReferences());
-    } else {
-      behavior.afterExitScope(t, new ReferenceMapWrapper(referenceMap));
+    if (t.isHoistScope()) {
+      pop(blockStack);
     }
+    behavior.afterExitScope(t, new ReferenceMapWrapper(referenceMap));
   }
 
   /**
    * Updates block stack.
    */
   @Override
-  public boolean shouldTraverse(NodeTraversal nodeTraversal, Node n,
-      Node parent) {
+  public boolean shouldTraverse(NodeTraversal nodeTraversal, Node n, Node parent) {
     // We automatically traverse a hoisted function body when that function
     // is first referenced, so that the reference lists are in the right order.
     //
     // TODO(nicksantos): Maybe generalize this to a continuation mechanism
-    // like in RemoveUnusedVars.
+    // like in RemoveUnusedCode.
     if (NodeUtil.isHoistedFunctionDeclaration(n)) {
       Node nameNode = n.getFirstChild();
       Var functionVar = nodeTraversal.getScope().getVar(nameNode.getString());
-      if (functionVar != null) {
-        if (finishedFunctionTraverse.contains(functionVar)) {
-          return false;
-        }
-        startedFunctionTraverse.add(functionVar);
+      checkNotNull(functionVar);
+      if (finishedFunctionTraverse.contains(functionVar)) {
+        return false;
       }
+      startedFunctionTraverse.add(functionVar);
     }
 
     // If node is a new basic block, put on basic block stack
     if (isBlockBoundary(n, parent)) {
       blockStack.add(new BasicBlock(peek(blockStack), n));
+    }
+
+    // Add the second x before the first one in "let [x] = x;". VariableReferenceCheck
+    // relies on reference order to give a warning.
+    if ((n.isDefaultValue() || n.isDestructuringLhs()) && n.hasTwoChildren()) {
+      Scope scope = nodeTraversal.getScope();
+      nodeTraversal.traverseInnerNode(n.getSecondChild(), n, scope);
+      nodeTraversal.traverseInnerNode(n.getFirstChild(), n, scope);
+      return false;
     }
     return true;
   }
@@ -286,7 +305,7 @@ class ReferenceCollectingCallback implements ScopedCallback,
   }
 
   private static <T> T peek(List<T> list) {
-    return list.get(list.size() - 1);
+    return Iterables.getLast(list);
   }
 
   /**
@@ -294,13 +313,15 @@ class ReferenceCollectingCallback implements ScopedCallback,
    */
   private static boolean isBlockBoundary(Node n, Node parent) {
     if (parent != null) {
-      switch (parent.getType()) {
-        case Token.DO:
-        case Token.FOR:
-        case Token.FOR_OF:
-        case Token.TRY:
-        case Token.WHILE:
-        case Token.WITH:
+      switch (parent.getToken()) {
+        case DO:
+        case FOR:
+        case FOR_IN:
+        case FOR_OF:
+        case TRY:
+        case WHILE:
+        case WITH:
+        case CLASS:
           // NOTE: TRY has up to 3 child blocks:
           // TRY
           //   BLOCK
@@ -311,14 +332,17 @@ class ReferenceCollectingCallback implements ScopedCallback,
           // FINALLY token. For simplicity, we consider each BLOCK
           // a separate basic BLOCK.
           return true;
-        case Token.AND:
-        case Token.HOOK:
-        case Token.IF:
-        case Token.OR:
+        case AND:
+        case HOOK:
+        case IF:
+        case OR:
+        case SWITCH:
           // The first child of a conditional is not a boundary,
           // but all the rest of the children are.
           return n != parent.getFirstChild();
 
+        default:
+          break;
       }
     }
 
@@ -337,11 +361,7 @@ class ReferenceCollectingCallback implements ScopedCallback,
     referenceInfo.add(reference);
   }
 
-  interface ReferenceMap {
-    ReferenceCollection getReferences(Var var);
-  }
-
-  private static class ReferenceMapWrapper implements ReferenceMap {
+  static class ReferenceMapWrapper implements ReferenceMap {
     private final Map<Var, ReferenceCollection> referenceMap;
 
     public ReferenceMapWrapper(Map<Var, ReferenceCollection> referenceMap) {
@@ -352,13 +372,22 @@ class ReferenceCollectingCallback implements ScopedCallback,
     public ReferenceCollection getReferences(Var var) {
       return referenceMap.get(var);
     }
+
+    Map<Var, ReferenceCollection> getRawReferenceMap() {
+      return referenceMap;
+    }
+
+    @Override
+    public String toString() {
+      return referenceMap.toString();
+    }
   }
 
   /**
    * Way for callers to add specific behavior during traversal that
    * utilizes the built-up reference information.
    */
-  interface Behavior {
+  public interface Behavior {
     /**
      * Called after we finish with a scope.
      */
@@ -370,474 +399,4 @@ class ReferenceCollectingCallback implements ScopedCallback,
     public void afterExitScope(NodeTraversal t, ReferenceMap referenceMap) {}
   };
 
-  /**
-   * A collection of references. Can be subclassed to apply checks or
-   * store additional state when adding.
-   */
-  static class ReferenceCollection implements Iterable<Reference> {
-
-    List<Reference> references = new ArrayList<>();
-
-    @Override
-    public Iterator<Reference> iterator() {
-      return references.iterator();
-    }
-
-    void add(Reference reference) {
-      references.add(reference);
-    }
-
-    /**
-     * Determines if the variable for this reference collection is
-     * "well-defined." A variable is well-defined if we can prove at
-     * compile-time that it's assigned a value before it's used.
-     *
-     * Notice that if this function returns false, this doesn't imply that the
-     * variable is used before it's assigned. It just means that we don't
-     * have enough information to make a definitive judgment.
-     */
-    protected boolean isWellDefined() {
-      int size = references.size();
-      if (size == 0) {
-        return false;
-      }
-
-      // If this is a declaration that does not instantiate the variable,
-      // it's not well-defined.
-      Reference init = getInitializingReference();
-      if (init == null) {
-        return false;
-      }
-
-      Preconditions.checkState(references.get(0).isDeclaration());
-      BasicBlock initBlock = init.getBasicBlock();
-      for (int i = 1; i < size; i++) {
-        if (!initBlock.provablyExecutesBefore(
-                references.get(i).getBasicBlock())) {
-          return false;
-        }
-      }
-
-      return true;
-    }
-
-    /**
-     * Whether the variable is escaped into an inner scope.
-     */
-    boolean isEscaped() {
-      Scope scope = null;
-      for (Reference ref : references) {
-        if (scope == null) {
-          scope = ref.scope;
-        } else if (scope != ref.scope) {
-          return true;
-        }
-      }
-      return false;
-    }
-
-    /**
-     * @param index The index into the references array to look for an
-     * assigning declaration.
-     *
-     * This is either the declaration if a value is assigned (such as
-     * "var a = 2", "function a()...", "... catch (a)...").
-     */
-    private boolean isInitializingDeclarationAt(int index) {
-      Reference maybeInit = references.get(index);
-      if (maybeInit.isInitializingDeclaration()) {
-        // This is a declaration that represents the initial value.
-        // Specifically, var declarations without assignments such as "var a;"
-        // are not.
-        return true;
-      }
-      return false;
-    }
-
-    /**
-     * @param index The index into the references array to look for an
-     * initialized assignment reference. That is, an assignment immediately
-     * follow a variable declaration that itself does not initialize the
-     * variable.
-     */
-    private boolean isInitializingAssignmentAt(int index) {
-      if (index < references.size() && index > 0) {
-        Reference maybeDecl = references.get(index - 1);
-        if (maybeDecl.isVarDeclaration()) {
-          Preconditions.checkState(!maybeDecl.isInitializingDeclaration());
-          Reference maybeInit = references.get(index);
-          if (maybeInit.isSimpleAssignmentToName()) {
-            return true;
-          }
-        }
-      }
-      return false;
-    }
-
-    /**
-     * @return The reference that provides the value for the variable at the
-     * time of the first read, if known, otherwise null.
-     *
-     * This is either the variable declaration ("var a = ...") or first
-     * reference following the declaration if it is an assignment.
-     */
-    Reference getInitializingReference() {
-      if (isInitializingDeclarationAt(0)) {
-        return references.get(0);
-      } else if (isInitializingAssignmentAt(1)) {
-        return references.get(1);
-      }
-      return null;
-    }
-
-    /**
-     * Constants are allowed to be defined after their first use.
-     */
-    Reference getInitializingReferenceForConstants() {
-      int size = references.size();
-      for (int i = 0; i < size; i++) {
-        if (isInitializingDeclarationAt(i) || isInitializingAssignmentAt(i)) {
-          return references.get(i);
-        }
-      }
-      return null;
-    }
-
-    /**
-     * @return Whether the variable is only assigned a value once for its
-     *     lifetime.
-     */
-    boolean isAssignedOnceInLifetime() {
-      Reference ref = getOneAndOnlyAssignment();
-      if (ref == null) {
-        return false;
-      }
-
-      // Make sure this assignment is not in a loop.
-      for (BasicBlock block = ref.getBasicBlock();
-           block != null; block = block.getParent()) {
-        if (block.isFunction) {
-          if (ref.getSymbol().getScope() != ref.scope) {
-            return false;
-          }
-          break;
-        } else if (block.isLoop) {
-          return false;
-        }
-      }
-
-      return true;
-    }
-
-    /**
-     * @return The one and only assignment. Returns if there are 0 or 2+
-     *    assignments.
-     */
-    private Reference getOneAndOnlyAssignment() {
-      Reference assignment = null;
-      int size = references.size();
-      for (int i = 0; i < size; i++) {
-        Reference ref = references.get(i);
-        if (ref.isLvalue() || ref.isInitializingDeclaration()) {
-          if (assignment == null) {
-            assignment = ref;
-          } else {
-            return null;
-          }
-        }
-      }
-      return assignment;
-    }
-
-    /**
-     * @return Whether the variable is never assigned a value.
-     */
-    boolean isNeverAssigned() {
-      int size = references.size();
-      for (int i = 0; i < size; i++) {
-        Reference ref = references.get(i);
-        if (ref.isLvalue() || ref.isInitializingDeclaration()) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    boolean firstReferenceIsAssigningDeclaration() {
-      int size = references.size();
-      return size > 0 && references.get(0).isInitializingDeclaration();
-    }
-  }
-
-  /**
-   * Represents a single declaration or reference to a variable.
-   */
-  static final class Reference implements StaticRef {
-
-    private static final Set<Integer> DECLARATION_PARENTS =
-        ImmutableSet.of(Token.VAR, Token.LET, Token.CONST, Token.PARAM_LIST,
-            Token.FUNCTION, Token.CLASS, Token.CATCH);
-
-    private final Node nameNode;
-    private final BasicBlock basicBlock;
-    private final Scope scope;
-    private final InputId inputId;
-    private final StaticSourceFile sourceFile;
-
-    Reference(Node nameNode, NodeTraversal t,
-        BasicBlock basicBlock) {
-      this(nameNode, basicBlock, t.getScope(), t.getInput().getInputId());
-    }
-
-    @Override
-    public String toString() {
-      return nameNode.toString();
-    }
-
-    /**
-     * Creates a variable reference in a given script file name, used in tests.
-     *
-     * @return The created reference.
-     */
-    @VisibleForTesting
-    static Reference createRefForTest(CompilerInput input) {
-      return new Reference(new Node(Token.NAME), null, null,
-          input.getInputId());
-    }
-
-    private Reference(Node nameNode,
-        BasicBlock basicBlock, Scope scope, InputId inputId) {
-      this.nameNode = nameNode;
-      this.basicBlock = basicBlock;
-      this.scope = scope;
-      this.inputId = inputId;
-      this.sourceFile = nameNode.getStaticSourceFile();
-    }
-
-    /**
-     * Makes a copy of the current reference using a new Scope instance.
-     */
-    Reference cloneWithNewScope(Scope newScope) {
-      return new Reference(nameNode, basicBlock, newScope, inputId);
-    }
-
-    @Override
-    public Var getSymbol() {
-      return scope.getVar(nameNode.getString());
-    }
-
-    @Override
-    public Node getNode() {
-      return nameNode;
-    }
-
-    public InputId getInputId() {
-      return inputId;
-    }
-
-    @Override
-    public StaticSourceFile getSourceFile() {
-      return sourceFile;
-    }
-
-    boolean isDeclaration() {
-      return isDeclarationHelper(nameNode);
-    }
-
-    private static boolean isDeclarationHelper(Node node) {
-      Node parent = node.getParent();
-
-      // Special case for class B extends A, A is not a declaration.
-      if (parent.isClass() && node != parent.getFirstChild()) {
-        return false;
-      }
-
-      // This condition can be true during InlineVariables.
-      if (parent.getParent() == null) {
-        return false;
-      }
-
-      if (NodeUtil.isNameDeclaration(parent.getParent())
-          && node == parent.getLastChild()) {
-        // This is the RHS of a var/let/const, so not a declaration.
-        return false;
-      }
-
-      // Special cases for destructuring patterns.
-      if (parent.isDestructuringPattern()
-          || (parent.isStringKey() && parent.getParent().isObjectPattern())
-          || (parent.isComputedProp() && parent.getParent().isObjectPattern()
-              && node == parent.getLastChild())
-          || (parent.isDefaultValue() && node == parent.getFirstChild())) {
-        return isDeclarationHelper(parent);
-      }
-
-      // Special case for arrow function
-      if (parent.isArrowFunction()) {
-        return node == parent.getFirstChild();
-      }
-
-      return DECLARATION_PARENTS.contains(parent.getType());
-    }
-
-    boolean isVarDeclaration() {
-      return getParent().isVar();
-    }
-
-    boolean isLetDeclaration() {
-      return getParent().isLet();
-    }
-
-    boolean isConstDeclaration() {
-      return getParent().isConst();
-    }
-
-    boolean isClassDeclaration() {
-      return getParent().isClass() && getNode() == getParent().getFirstChild();
-    }
-
-    boolean isHoistedFunction() {
-      return NodeUtil.isHoistedFunctionDeclaration(getParent());
-    }
-
-    /**
-     * Determines whether the variable is initialized at the declaration.
-     */
-    boolean isInitializingDeclaration() {
-      // VAR and LET are the only types of variable declarations that may not initialize
-      // their variables. Catch blocks, named functions, and parameters all do.
-      return (isDeclaration() && !getParent().isVar() && !getParent().isLet())
-        || nameNode.getFirstChild() != null;
-    }
-
-   /**
-    * @return For an assignment, variable declaration, or function declaration
-    * return the assigned value, otherwise null.
-    */
-    Node getAssignedValue() {
-      Node parent = getParent();
-      return (parent.isFunction())
-          ? parent : NodeUtil.getAssignedValue(nameNode);
-    }
-
-    BasicBlock getBasicBlock() {
-      return basicBlock;
-    }
-
-    Node getParent() {
-      return getNode().getParent();
-    }
-
-    Node getGrandparent() {
-      Node parent = getParent();
-      return parent == null ? null : parent.getParent();
-    }
-
-    private static boolean isLhsOfEnhancedForExpression(Node n) {
-      Node parent = n.getParent();
-      if (NodeUtil.isNameDeclaration(parent)) {
-        return isLhsOfEnhancedForExpression(parent);
-      }
-      return NodeUtil.isEnhancedFor(parent) && parent.getFirstChild() == n;
-    }
-
-    boolean isSimpleAssignmentToName() {
-      Node parent = getParent();
-      return parent.isAssign()
-          && parent.getFirstChild() == nameNode;
-    }
-
-    boolean isLvalue() {
-      Node parent = getParent();
-      int parentType = parent.getType();
-      return (parentType == Token.VAR && nameNode.getFirstChild() != null)
-          || (parentType == Token.LET && nameNode.getFirstChild() != null)
-          || (parentType == Token.CONST && nameNode.getFirstChild() != null)
-          || parentType == Token.INC
-          || parentType == Token.DEC
-          || parentType == Token.CATCH
-          || (NodeUtil.isAssignmentOp(parent) && parent.getFirstChild() == nameNode)
-          || isLhsOfEnhancedForExpression(nameNode);
-    }
-
-    Scope getScope() {
-      return scope;
-    }
-  }
-
-  /**
-   * Represents a section of code that is uninterrupted by control structures
-   * (conditional or iterative logic).
-   */
-  static final class BasicBlock {
-
-    private final BasicBlock parent;
-
-    private final Node root;
-
-    /**
-     * Whether this block denotes a function scope.
-     */
-    private final boolean isFunction;
-
-    /**
-     * Whether this block denotes a loop.
-     */
-    private final boolean isLoop;
-
-    /**
-     * Creates a new block.
-     * @param parent The containing block.
-     * @param root The root node of the block.
-     */
-    BasicBlock(BasicBlock parent, Node root) {
-      this.parent = parent;
-      this.root = root;
-
-      this.isFunction = root.isFunction();
-
-      if (root.getParent() != null) {
-        int pType = root.getParent().getType();
-        this.isLoop = pType == Token.DO ||
-            pType == Token.WHILE ||
-            pType == Token.FOR;
-      } else {
-        this.isLoop = false;
-      }
-    }
-
-    BasicBlock getParent() {
-      return parent;
-    }
-
-    /**
-     * Determines whether this block is equivalent to the very first block that
-     * is created when reference collection traversal enters global scope. Note
-     * that when traversing a single script in a hot-swap fashion a new instance
-     * of {@code BasicBlock} is created.
-     *
-     * @return true if this is global scope block.
-     */
-    boolean isGlobalScopeBlock() {
-      return getParent() == null;
-    }
-
-    /**
-     * Determines whether this block is guaranteed to begin executing before
-     * the given block does.
-     */
-    boolean provablyExecutesBefore(BasicBlock thatBlock) {
-      // If thatBlock is a descendant of this block, and there are no hoisted
-      // blocks between them, then this block must start before thatBlock.
-      BasicBlock currentBlock;
-      for (currentBlock = thatBlock;
-           currentBlock != null && currentBlock != this;
-           currentBlock = currentBlock.getParent()) { }
-
-      if (currentBlock == this) {
-        return true;
-      }
-      return isGlobalScopeBlock() && thatBlock.isGlobalScopeBlock();
-    }
-  }
 }

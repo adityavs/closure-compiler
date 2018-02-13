@@ -21,14 +21,17 @@ import com.google.debugging.sourcemap.FilePosition;
 import com.google.debugging.sourcemap.SourceMapFormat;
 import com.google.debugging.sourcemap.SourceMapGenerator;
 import com.google.debugging.sourcemap.SourceMapGeneratorFactory;
+import com.google.debugging.sourcemap.proto.Mapping.OriginalMapping;
 import com.google.javascript.rhino.Node;
-
-import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import javax.annotation.Nullable;
 
 /**
  * Collects information mapping the generated (compiled) source back to
@@ -42,6 +45,12 @@ import java.util.Map;
  */
 public final class SourceMap {
 
+  private static final Logger logger =
+      Logger.getLogger("com.google.javascript.jscomp");
+
+  /**
+   * An enumeration of available source map formats
+   */
   public static enum Format {
      DEFAULT {
        @Override SourceMap getInstance() {
@@ -85,16 +94,36 @@ public final class SourceMap {
     }
   }
 
-  public static class LocationMapping {
+  /**
+   * A simple pair of path prefixes to the desired "destination" location to use within the source
+   * map.
+   */
+  public static final class LocationMapping {
     final String prefix;
     final String replacement;
     public LocationMapping(String prefix, String replacement) {
       this.prefix = prefix;
       this.replacement = replacement;
     }
+
     @Override
     public String toString() {
       return "(" + prefix + "|" + replacement + ")";
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (other instanceof LocationMapping) {
+        return ((LocationMapping) other).prefix.equals(prefix)
+            && ((LocationMapping) other).replacement.equals(replacement);
+      } else {
+        return false;
+      }
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(prefix, replacement);
     }
   }
 
@@ -102,6 +131,13 @@ public final class SourceMap {
   private List<LocationMapping> prefixMappings = Collections.emptyList();
   private final Map<String, String> sourceLocationFixupCache =
        new HashMap<>();
+  /**
+   * A mapping derived from input source maps. Maps back to input sources that inputs to this
+   * compilation job have been generated from, and used to create a source map that maps all the way
+   * back to original inputs. {@code null} if no such mapping is wanted.
+   */
+  @Nullable
+  private SourceFileMapping mapping;
 
   private SourceMap(SourceMapGenerator generator) {
     this.generator = generator;
@@ -120,9 +156,21 @@ public final class SourceMap {
       return;
     }
 
-    sourceFile = fixupSourceLocation(sourceFile);
+    int lineNo = node.getLineno();
+    int charNo = node.getCharno();
+    String originalName = node.getOriginalName();
 
-    String originalName = (String) node.getProp(Node.ORIGINALNAME_PROP);
+    if (mapping != null) {
+      OriginalMapping sourceMapping = mapping.getSourceMapping(sourceFile, lineNo, charNo);
+      if (sourceMapping != null) {
+        sourceFile = sourceMapping.getOriginalFile();
+        lineNo = sourceMapping.getLineNumber();
+        charNo = sourceMapping.getColumnPosition();
+        originalName = sourceMapping.getIdentifier();
+      }
+    }
+
+    sourceFile = fixupSourceLocation(sourceFile);
 
     // Rhino source lines are one based but for v3 source maps, we make
     // them zero based.
@@ -130,8 +178,16 @@ public final class SourceMap {
 
     generator.addMapping(
         sourceFile, originalName,
-        new FilePosition(node.getLineno() - lineBaseOffset, node.getCharno()),
+        new FilePosition(lineNo - lineBaseOffset, charNo),
         outputStartPosition, outputEndPosition);
+  }
+
+  public void addSourceFile(SourceFile sourceFile) {
+    try {
+      generator.addSourcesContent(fixupSourceLocation(sourceFile.getName()), sourceFile.getCode());
+    } catch (IOException e) {
+      logger.log(Level.WARNING, "Exception while adding source content to source map.", e);
+    }
   }
 
   /**
@@ -139,11 +195,6 @@ public final class SourceMap {
    * @return a remapped source file.
    */
   private String fixupSourceLocation(String sourceFile) {
-    // Replace backslashes (the file separator used on Windows systems).
-    if (File.separatorChar == '\\') {
-      sourceFile = sourceFile.replace('\\', '/');
-    }
-
     if (prefixMappings.isEmpty()) {
       return sourceFile;
     }
@@ -197,5 +248,9 @@ public final class SourceMap {
    */
   public void setPrefixMappings(List<LocationMapping> sourceMapLocationMappings) {
      this.prefixMappings = sourceMapLocationMappings;
+  }
+
+  public void setSourceFileMapping(SourceFileMapping mapping) {
+    this.mapping = mapping;
   }
 }

@@ -116,10 +116,10 @@ public final class JSModuleTest extends TestCase {
         ImmutableList.of(e, f, d, b, c, a),
         ImmutableList.of(e, f, a, b, c, d));
     assertSortedInputs(
-        ImmutableList.of(e, d, b, c, a, f),
+        ImmutableList.of(d, b, c, a, e, f),
         ImmutableList.of(a, b, c, e, d, f));
     assertSortedInputs(
-        ImmutableList.of(e, f, d, b, c, a),
+        ImmutableList.of(e, d, b, c, a, f),
         ImmutableList.of(e, a, f, b, c, d));
   }
 
@@ -136,33 +136,5 @@ public final class JSModuleTest extends TestCase {
     mod.sortInputsByDeps(compiler);
 
     assertEquals(expected, mod.getInputs());
-  }
-
-  public void testSortJsModules() throws Exception {
-    // already in order:
-    assertThat(JSModule.sortJsModules(ImmutableList.of(mod1, mod2, mod3, mod4)))
-        .asList()
-        .containsExactly(mod1, mod2, mod3, mod4)
-        .inOrder();
-    assertThat(JSModule.sortJsModules(ImmutableList.of(mod1, mod3, mod2, mod4)))
-        .asList()
-        .containsExactly(mod1, mod3, mod2, mod4)
-        .inOrder();
-
-    // one out of order:
-    assertThat(JSModule.sortJsModules(ImmutableList.of(mod4, mod3, mod2, mod1)))
-        .asList()
-        .containsExactly(mod1, mod3, mod2, mod4)
-        .inOrder();
-    assertThat(JSModule.sortJsModules(ImmutableList.of(mod3, mod1, mod2, mod4)))
-        .asList()
-        .containsExactly(mod1, mod3, mod2, mod4)
-        .inOrder();
-
-    // more out of order:
-    assertThat(JSModule.sortJsModules(ImmutableList.of(mod4, mod3, mod1, mod2)))
-        .asList()
-        .containsExactly(mod1, mod3, mod2, mod4)
-        .inOrder();
   }
 }

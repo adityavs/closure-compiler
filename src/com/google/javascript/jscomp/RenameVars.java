@@ -16,24 +16,25 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Strings.nullToEmpty;
+
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ListMultimap;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.jscomp.NodeTraversal.ScopedCallback;
 import com.google.javascript.rhino.Node;
-
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
-
 import javax.annotation.Nullable;
 
 /**
@@ -57,6 +58,9 @@ final class RenameVars implements CompilerPass {
   /** List of local NAME nodes */
   private final ArrayList<Node> localNameNodes = new ArrayList<>();
 
+  /** Mapping of original names for change detection */
+  private final Map<Node, String> originalNameByNode = new HashMap<>();
+
   /**
    * Maps a name node to its pseudo name, null if we are not generating so
    * there will be no overhead unless we are debugging.
@@ -64,7 +68,7 @@ final class RenameVars implements CompilerPass {
   private final Map<Node, String> pseudoNameMap;
 
   /** Set of extern variable names */
-  private final Set<String> externNames = new HashSet<>();
+  private Set<String> externNames;
 
   /** Set of reserved variable names */
   private final Set<String> reservedNames;
@@ -81,22 +85,21 @@ final class RenameVars implements CompilerPass {
   /** Counter for each assignment */
   private int assignmentCount = 0;
 
-  /** Logs all name assignments */
-  private StringBuilder assignmentLog;
-
   // Logic for bleeding functions, where the name leaks into the outer
   // scope on IE but not on other browsers.
   private final Set<Var> localBleedingFunctions = new HashSet<>();
-  private final ArrayListMultimap<Scope, Var> localBleedingFunctionsPerScope =
+  private final ListMultimap<Scope, Var> localBleedingFunctionsPerScope =
       ArrayListMultimap.create();
 
   class Assignment {
+    final boolean isLocal;
     final String oldName;
     final int orderOfOccurrence;
     String newName;
     int count; // Number of times this is referenced
 
     Assignment(String name) {
+      this.isLocal = name.startsWith(LOCAL_VAR_PREFIX);
       this.oldName = name;
       this.newName = null;
       this.count = 0;
@@ -109,7 +112,7 @@ final class RenameVars implements CompilerPass {
      * Assigns the new name.
      */
     void setNewName(String newName) {
-      Preconditions.checkState(this.newName == null);
+      checkState(this.newName == null);
       this.newName = newName;
     }
   }
@@ -137,32 +140,25 @@ final class RenameVars implements CompilerPass {
   private final char[] reservedCharacters;
 
   /** A prefix to distinguish temporary local names from global names */
-  // TODO(user): No longer needs to be public when shadowing doesn't use it.
-  public static final String LOCAL_VAR_PREFIX = "L ";
+  private static final String LOCAL_VAR_PREFIX = "L ";
 
-  // TODO(user): Temporary. To make checking in / merging DefaultPassConfig
-  // easier.
-  private final NameGenerator nameGeneratorGiven;
-  RenameVars(AbstractCompiler compiler, String prefix,
-      boolean localRenamingOnly, boolean preserveFunctionExpressionNames,
-      boolean generatePseudoNames, boolean shouldShadow,
-      boolean preferStableNames, VariableMap prevUsedRenameMap,
-      @Nullable char[] reservedCharacters,
-      @Nullable Set<String> reservedNames) {
-    this(compiler, prefix, localRenamingOnly, preserveFunctionExpressionNames,
-        generatePseudoNames, shouldShadow, preferStableNames, prevUsedRenameMap,
-        reservedCharacters, reservedNames, null);
+  // Shared name generator
+  private final NameGenerator nameGenerator;
 
-  }
+  /*
+   * nameGenerator is a shared NameGenerator that this instance can use;
+   * the instance may reset or reconfigure it, so the caller should
+   * not expect any state to be preserved.
+   */
   RenameVars(AbstractCompiler compiler, String prefix,
       boolean localRenamingOnly, boolean preserveFunctionExpressionNames,
       boolean generatePseudoNames, boolean shouldShadow,
       boolean preferStableNames, VariableMap prevUsedRenameMap,
       @Nullable char[] reservedCharacters,
       @Nullable Set<String> reservedNames,
-      @Nullable NameGenerator nameGenerator) {
+      NameGenerator nameGenerator) {
     this.compiler = compiler;
-    this.prefix = prefix == null ? "" : prefix;
+    this.prefix = nullToEmpty(prefix);
     this.localRenamingOnly = localRenamingOnly;
     this.preserveFunctionExpressionNames = preserveFunctionExpressionNames;
     if (generatePseudoNames) {
@@ -179,17 +175,14 @@ final class RenameVars implements CompilerPass {
     } else {
       this.reservedNames = new HashSet<>(reservedNames);
     }
-    this.nameGeneratorGiven = nameGenerator;
+    this.nameGenerator = nameGenerator;
   }
 
   /**
    * Iterate through the nodes, collect all the NAME nodes that need to be
    * renamed, and count how many times each variable name is referenced.
    *
-   * There are 2 passes:
-   * - externs: keep track of the global vars in the externNames_ map.
-   * - source: keep track of all name references in globalNameNodes_, and
-   *   localNameNodes_.
+   * Keep track of all name references in globalNameNodes, and localNameNodes.
    *
    * To get shorter local variable renaming, we rename local variables to a
    * temporary name "LOCAL_VAR_PREFIX + index" where index is the index of the
@@ -205,27 +198,19 @@ final class RenameVars implements CompilerPass {
    * function x(a,b) { ... }
    * function y(a,b,c) { ... }
    */
-  class ProcessVars extends AbstractPostOrderCallback
-      implements ScopedCallback {
-    private final boolean isExternsPass_;
-
-    ProcessVars(boolean isExterns) {
-      isExternsPass_ = isExterns;
-    }
+  class ProcessVars extends AbstractPostOrderCallback implements ScopedCallback {
 
     @Override
     public void enterScope(NodeTraversal t) {
-      if (t.inGlobalScope() ||
-          !shouldTemporarilyRenameLocalsInScope(t.getScope())) {
+      if (t.inGlobalHoistScope() || !shouldTemporarilyRenameLocalsInScope(t.getScope())) {
         return;
       }
-      Iterator<Var> it = t.getScope().getVars();
-      while (it.hasNext()) {
-        Var current = it.next();
+      Scope scope = t.getScope();
+      for (Var current : scope.getVarIterable()) {
         if (current.isBleedingFunction()) {
           localBleedingFunctions.add(current);
           localBleedingFunctionsPerScope.put(
-              t.getScope().getParent(), current);
+              scope.getParent(), current);
         }
       }
     }
@@ -235,14 +220,20 @@ final class RenameVars implements CompilerPass {
 
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
-      if (!n.isName()) {
+      if (!(n.isName() || n.isImportStar())) {
         return;
       }
 
       String name = n.getString();
 
-      // Ignore anonymous functions
+      // Ignore anonymous functions and classes.
       if (name.isEmpty()) {
+        return;
+      }
+
+      // "import {x as y} from 'm';"
+      // Skip x because it's not a variable in this scope.
+      if (parent.isImportSpec() && parent.hasTwoChildren() && parent.getFirstChild() == n) {
         return;
       }
 
@@ -251,9 +242,16 @@ final class RenameVars implements CompilerPass {
       // scope, because IE has bugs in how it handles bleeding
       // functions.
       Var var = t.getScope().getVar(name);
-      boolean local = (var != null) && var.isLocal() &&
-          (!var.scope.getParent().isGlobal() ||
-           !var.isBleedingFunction());
+      boolean local =
+          var != null
+              && var.isLocal()
+              && (var.scope.getParent().isLocal() || !var.isBleedingFunction());
+
+      // Never rename references to the arguments array
+      if (var != null && var.isArguments()) {
+        reservedNames.add(name);
+        return;
+      }
 
       // Are we renaming global variables?
       if (!local && localRenamingOnly) {
@@ -271,20 +269,12 @@ final class RenameVars implements CompilerPass {
       // Check if we can rename this.
       if (!okToRenameVar(name, local)) {
         if (local) {
-          // Blindly de-uniquify for the Prototype library for issue 103.
-          String newName = MakeDeclaredNamesUnique.ContextualRenameInverter
-              .getOriginalName(name);
+          // Blindly de-uniquify for the Prototype library for
+          // http://blickly.github.io/closure-compiler-issues/#103
+          String newName = MakeDeclaredNamesUnique.ContextualRenameInverter.getOriginalName(name);
           if (!newName.equals(name)) {
             n.setString(newName);
           }
-        }
-        return;
-      }
-
-      if (isExternsPass_) {
-        // Keep track of extern globals.
-        if (!local) {
-          externNames.add(name);
         }
         return;
       }
@@ -300,6 +290,8 @@ final class RenameVars implements CompilerPass {
         String tempName = LOCAL_VAR_PREFIX + getLocalVarIndex(var);
         incCount(tempName);
         localNameNodes.add(n);
+        // Remember the original string in a name before it's temporarily filled with an "L".
+        originalNameByNode.put(n, n.getString());
         n.setString(tempName);
       } else if (var != null) { // Not an extern
         // If it's global, increment global count
@@ -350,11 +342,12 @@ final class RenameVars implements CompilerPass {
 
   @Override
   public void process(Node externs, Node root) {
-    assignmentLog = new StringBuilder();
+    this.externNames = NodeUtil.collectExternVariableNames(this.compiler, externs);
+
+    originalNameByNode.clear();
 
     // Do variable reference counting.
-    NodeTraversal.traverse(compiler, externs, new ProcessVars(true));
-    NodeTraversal.traverse(compiler, root, new ProcessVars(false));
+    NodeTraversal.traverseEs6(compiler, root, new ProcessVars());
 
     // Make sure that new names don't overlap with extern names.
     reservedNames.addAll(externNames);
@@ -378,36 +371,37 @@ final class RenameVars implements CompilerPass {
     // Assign names, sorted by descending frequency to minimize code size.
     assignNames(varsByFrequency);
 
-    boolean changed = false;
-
     // Rename the globals!
     for (Node n : globalNameNodes) {
-      String newName = getNewGlobalName(n);
-      // Note: if newName is null, then oldName is an extern.
-      if (newName != null) {
-        n.setString(newName);
-        changed = true;
-      }
+      setNameAndReport(n, getNewGlobalName(n));
     }
 
     // Rename the locals!
     for (Node n : localNameNodes) {
-      String newName = getNewLocalName(n);
-      if (newName != null) {
-        n.setString(newName);
-        changed = true;
-      }
+      setNameAndReport(n, getNewLocalName(n));
     }
-
-    if (changed) {
-      compiler.reportCodeChange();
-    }
-
-    // Lastly, write the name assignments to the debug log.
-    compiler.addToDebugLog("JS var assignments:\n" + assignmentLog);
-    assignmentLog = null;
   }
 
+  private void setNameAndReport(Node n, @Nullable String newName) {
+    // A null newName, indicates it should not be renamed.
+    if (newName != null && !newName.equals(n.getString())) {
+      n.setString(newName);
+
+      // Only mark changes if the final name change is different than it was original before being
+      // filled with the "L" temporary name.
+      if (!newName.equals(originalNameByNode.get(n))) {
+        compiler.reportChangeToEnclosingScope(n);
+        Node parent = n.getParent();
+        if (parent.isFunction() && NodeUtil.isFunctionDeclaration(parent)) {
+          // If we are renaming a function declaration, make sure the containing scope
+          // has the opportunity to act on the change.
+          compiler.reportChangeToEnclosingScope(parent);
+        }
+      }
+    }
+  }
+
+  @Nullable
   private String getNewGlobalName(Node n) {
     String oldName = n.getString();
     Assignment a = assignments.get(oldName);
@@ -421,6 +415,7 @@ final class RenameVars implements CompilerPass {
     }
   }
 
+  @Nullable
   private String getNewLocalName(Node n) {
     String oldTempName = n.getString();
     Assignment a = assignments.get(oldTempName);
@@ -448,14 +443,14 @@ final class RenameVars implements CompilerPass {
     // If prevUsedRenameMap had duplicate values then this pass would be
     // non-deterministic.
     // In such a case, the following will throw an IllegalArgumentException.
-    Preconditions.checkNotNull(prevUsedRenameMap.getNewNameToOriginalNameMap());
+    checkNotNull(prevUsedRenameMap.getNewNameToOriginalNameMap());
     for (Assignment a : assignments.values()) {
       String prevNewName = prevUsedRenameMap.lookupNewName(a.oldName);
       if (prevNewName == null || reservedNames.contains(prevNewName)) {
         continue;
       }
 
-      if (a.oldName.startsWith(LOCAL_VAR_PREFIX)
+      if (a.isLocal
           || (!externNames.contains(a.oldName)
               && prevNewName.startsWith(prefix))) {
         reservedNames.add(prevNewName);
@@ -471,18 +466,19 @@ final class RenameVars implements CompilerPass {
     NameGenerator globalNameGenerator = null;
     NameGenerator localNameGenerator = null;
 
-    if (nameGeneratorGiven != null) {
-      globalNameGenerator = localNameGenerator = nameGeneratorGiven;
-      nameGeneratorGiven.restartNaming();
-    } else {
-      globalNameGenerator =
-          new NameGenerator(reservedNames, prefix, reservedCharacters);
+    globalNameGenerator = nameGenerator;
+    nameGenerator.reset(reservedNames, prefix, reservedCharacters);
 
-      // Local variables never need a prefix.
-      localNameGenerator =
-          prefix.isEmpty() ? globalNameGenerator : new NameGenerator(
-              reservedNames, "", reservedCharacters);
-    }
+    // Local variables never need a prefix.
+    // Also, we need to avoid conflicts between global and local variable
+    // names; we do this by having using the same generator (not two
+    // instances). The case where global variables have a prefix (and
+    // therefore we use two different generators) but a local variable name
+    // might nevertheless conflict with a global one is not handled.
+    localNameGenerator =
+        prefix.isEmpty()
+        ? globalNameGenerator
+        : nameGenerator.clone(reservedNames, "", reservedCharacters);
 
     // Generated names and the assignments for non-local vars.
     List<Assignment> pendingAssignments = new ArrayList<>();
@@ -498,7 +494,7 @@ final class RenameVars implements CompilerPass {
       }
 
       String newName;
-      if (a.oldName.startsWith(LOCAL_VAR_PREFIX)) {
+      if (a.isLocal) {
         // For local variable, we make the assignment right away.
         newName = localNameGenerator.generateNextName();
         finalizeNameAssignment(a, newName);
@@ -555,9 +551,6 @@ final class RenameVars implements CompilerPass {
 
     // Keep track of the mapping
     renameMap.put(a.oldName, newName);
-
-    // Log the mapping
-    assignmentLog.append(a.oldName).append(" => ").append(newName).append('\n');
   }
 
   /**
@@ -586,8 +579,7 @@ final class RenameVars implements CompilerPass {
       throw new IllegalArgumentException("Var is not local");
     }
 
-    boolean isBleedingIntoScope = s.getParent() != null &&
-        localBleedingFunctions.contains(v);
+    boolean isBleedingIntoScope = s.getParent() != null && localBleedingFunctions.contains(v);
 
     while (s.getParent() != null) {
       if (isBleedingIntoScope) {
@@ -615,7 +607,6 @@ final class RenameVars implements CompilerPass {
    * be the same temporary name used when the rename map was created.
    */
   private boolean shouldTemporarilyRenameLocalsInScope(Scope s) {
-    return (!preferStableNames ||
-        s.getVarCount() <= MAX_LOCALS_IN_SCOPE_TO_TEMP_RENAME);
+    return (!preferStableNames || s.getVarCount() <= MAX_LOCALS_IN_SCOPE_TO_TEMP_RENAME);
   }
 }

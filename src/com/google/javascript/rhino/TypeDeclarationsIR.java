@@ -38,11 +38,12 @@
 
 package com.google.javascript.rhino;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.base.Splitter;
 import com.google.common.collect.Iterables;
 import com.google.javascript.rhino.Node.TypeDeclarationNode;
-
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -74,17 +75,6 @@ public class TypeDeclarationsIR {
    */
   public static TypeDeclarationNode booleanType() {
     return new TypeDeclarationNode(Token.BOOLEAN_TYPE);
-  }
-
-  /**
-   * We assume that types are non-nullable by default. Wrap a type in nullable
-   * to indicate that it should be allowed to take a null value.
-   * NB: this is not currently supported in TypeScript so it is not printed
-   * in the CodeGenerator for ES6_TYPED.
-   * @return a new node indicating that the nested type is nullable
-   */
-  public static TypeDeclarationNode nullable(TypeDeclarationNode type) {
-    return new TypeDeclarationNode(Token.NULLABLE_TYPE, type);
   }
 
   /**
@@ -189,7 +179,7 @@ public class TypeDeclarationsIR {
    *   STRING_KEY p1 [declared_type_expr: STRING_TYPE]
    *   STRING_KEY p2 [declared_type_expr: BOOLEAN_TYPE]
    * </pre>
-   * @param returnType the type returned by the function, possibly UNKNOWN_TYPE
+   * @param returnType the type returned by the function, possibly ANY_TYPE
    * @param requiredParams the names and types of the required parameters.
    * @param optionalParams the names and types of the optional parameters.
    * @param restName the name of the rest parameter, if any.
@@ -200,8 +190,8 @@ public class TypeDeclarationsIR {
       LinkedHashMap<String, TypeDeclarationNode> optionalParams,
       String restName, TypeDeclarationNode restType) {
     TypeDeclarationNode node = new TypeDeclarationNode(Token.FUNCTION_TYPE, returnType);
-    Preconditions.checkNotNull(requiredParams);
-    Preconditions.checkNotNull(optionalParams);
+    checkNotNull(requiredParams);
+    checkNotNull(optionalParams);
 
     for (Map.Entry<String, TypeDeclarationNode> param : requiredParams.entrySet()) {
       Node name = IR.name(param.getKey());
@@ -215,8 +205,8 @@ public class TypeDeclarationsIR {
     }
 
     if (restName != null) {
-      Node rest = Node.newString(Token.REST, restName);
-      node.addChildrenToBack(maybeAddType(rest, restType));
+      Node rest = new Node(Token.REST, IR.name(restName));
+      node.addChildToBack(maybeAddType(rest, restType));
     }
     return node;
   }
@@ -278,8 +268,7 @@ public class TypeDeclarationsIR {
    * @return a new node representing the union type
    */
   public static TypeDeclarationNode unionType(Iterable<TypeDeclarationNode> options) {
-    Preconditions.checkArgument(!Iterables.isEmpty(options),
-        "union must have at least one option");
+    checkArgument(!Iterables.isEmpty(options), "union must have at least one option");
     TypeDeclarationNode node = new TypeDeclarationNode(Token.UNION_TYPE);
     for (Node option : options) {
       node.addChildToBack(option);

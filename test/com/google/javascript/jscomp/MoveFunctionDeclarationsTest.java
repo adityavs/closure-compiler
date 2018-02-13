@@ -28,12 +28,25 @@ public final class MoveFunctionDeclarationsTest extends CompilerTestCase {
   }
 
   public void testFunctionDeclarations() {
-    test("a; function f(){} function g(){}", "function f(){} function g(){} a");
+    test("a; function f(){} function g(){}", "var f = function(){}; var g = function(){}; a;");
   }
 
   public void testFunctionDeclarationsInModule() {
     test(createModules("a; function f(){} function g(){}"),
-         new String[] { "function f(){} function g(){} a" });
+         new String[] { "var f = function(){}; var g = function(){}; a" });
+  }
+
+  public void testGeneratorDeclarations() {
+    test(
+        "a; function *f(){} function *g(){}", "var f = function* (){}; var g = function* (){}; a;");
+  }
+
+  public void testFunctionDeclarationsInEs6Module() {
+    // NOTE: Currently this pass always runs after module transpilation.
+    // No current uses of this pass would benefit from ES6 module support:
+    // a) RescopeGlobalSymbols, which relies on this pass, only cares about the global scope.
+    // b) ES6 module output cannot be wrapped in a try/catch.
+    testSame("a; function f(){} function g(){} export default 5;");
   }
 
   public void testFunctionsExpression() {
@@ -41,6 +54,7 @@ public final class MoveFunctionDeclarationsTest extends CompilerTestCase {
   }
 
   public void testNoMoveDeepFunctionDeclarations() {
+    setAcceptedLanguage(CompilerOptions.LanguageMode.ECMASCRIPT_2015);
     testSame("a; if (a) function f(){};");
     testSame("a; if (a) { function f(){} }");
   }

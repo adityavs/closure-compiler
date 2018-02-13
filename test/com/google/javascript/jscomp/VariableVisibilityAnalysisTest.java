@@ -16,7 +16,9 @@
 
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.jscomp.VariableVisibilityAnalysis.VariableVisibility;
 import com.google.javascript.rhino.Node;
@@ -27,14 +29,11 @@ import com.google.javascript.rhino.Node;
  * @author dcc@google.com (Devin Coughlin)
  */
 public final class VariableVisibilityAnalysisTest extends CompilerTestCase {
-
-  private Compiler lastCompiler;
   private VariableVisibilityAnalysis lastAnalysis;
 
   @Override
   protected CompilerPass getProcessor(Compiler compiler) {
     lastAnalysis = new VariableVisibilityAnalysis(compiler);
-    lastCompiler = compiler;
 
     return lastAnalysis;
   }
@@ -113,7 +112,7 @@ public final class VariableVisibilityAnalysisTest extends CompilerTestCase {
       VariableVisibility visibility) {
     Node labeledVariable = searchLabel(label);
 
-    Preconditions.checkState(labeledVariable.isVar());
+    checkState(labeledVariable.isVar());
 
     // VAR
     //   NAME
@@ -159,7 +158,7 @@ public final class VariableVisibilityAnalysisTest extends CompilerTestCase {
    * parameterName.
    */
   private Node searchForParameter(final String parameterName) {
-    Preconditions.checkArgument(parameterName != null);
+    checkArgument(parameterName != null);
 
     final Node[] foundNode = new Node[1];
 
@@ -175,8 +174,7 @@ public final class VariableVisibilityAnalysisTest extends CompilerTestCase {
       }
     };
 
-    new NodeTraversal(lastCompiler, findParameter)
-        .traverse(lastCompiler.jsRoot);
+    NodeTraversal.traverseEs6(getLastCompiler(), getLastCompiler().jsRoot, findParameter);
 
     return foundNode[0];
   }
@@ -188,23 +186,22 @@ public final class VariableVisibilityAnalysisTest extends CompilerTestCase {
    * parameterName.
    */
   private Node searchForFunction(final String functionName) {
-    Preconditions.checkArgument(functionName != null);
+    checkArgument(functionName != null);
 
     final Node[] foundNode = new Node[1];
 
-    AbstractPostOrderCallback findFunction = new AbstractPostOrderCallback() {
+    AbstractPostOrderCallback findFunction =
+        new AbstractPostOrderCallback() {
 
-      @Override
-      public void visit(NodeTraversal t, Node n, Node parent) {
-        if (n.isFunction()
-            && functionName.equals(NodeUtil.getFunctionName(n))) {
-          foundNode[0] = n;
-        }
-      }
-    };
+          @Override
+          public void visit(NodeTraversal t, Node n, Node parent) {
+            if (n.isFunction() && functionName.equals(NodeUtil.getName(n))) {
+              foundNode[0] = n;
+            }
+          }
+        };
 
-    new NodeTraversal(lastCompiler, findFunction)
-        .traverse(lastCompiler.jsRoot);
+    NodeTraversal.traverseEs6(getLastCompiler(), getLastCompiler().jsRoot, findFunction);
 
     return foundNode[0];
   }
@@ -213,7 +210,7 @@ public final class VariableVisibilityAnalysisTest extends CompilerTestCase {
   private Node searchLabel(String label) {
     LabeledVariableSearcher s = new LabeledVariableSearcher(label);
 
-    new NodeTraversal(lastCompiler, s).traverse(lastCompiler.jsRoot);
+    NodeTraversal.traverseEs6(getLastCompiler(), getLastCompiler().jsRoot, s);
     assertNotNull("Label " + label + " should be in the source code", s.found);
 
     return s.found;
@@ -225,7 +222,7 @@ public final class VariableVisibilityAnalysisTest extends CompilerTestCase {
    * Finds the variable for foo in:
    * foo: var a = ...
    */
-  private class LabeledVariableSearcher extends AbstractPostOrderCallback {
+  private static class LabeledVariableSearcher extends AbstractPostOrderCallback {
     Node found = null;
     final String target;
 
@@ -234,8 +231,7 @@ public final class VariableVisibilityAnalysisTest extends CompilerTestCase {
     }
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
-      if (n.isLabel() &&
-          target.equals(n.getFirstChild().getString())) {
+      if (n.isLabel() && target.equals(n.getFirstChild().getString())) {
 
         // LABEL
         //     VAR

@@ -16,11 +16,14 @@
 
 package com.google.javascript.jscomp;
 
+import com.google.common.annotations.GwtIncompatible;
 import com.google.common.collect.ImmutableList;
+
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
-import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.Callable;
 
 /**
  * Extracts messages and message comments from JS code.
@@ -44,6 +47,7 @@ import java.util.List;
  * across all JS files.
  *
  */
+@GwtIncompatible("JsMessage.Builder")
 public final class JsMessageExtractor {
 
   private final JsMessage.Style style;
@@ -77,7 +81,7 @@ public final class JsMessageExtractor {
     // Take into account that messages with the same id could be present in the
     // result list. Message could have the same id only in case if they are
     // unnamed and have the same text but located in different source files.
-    private final List<JsMessage> messages = new LinkedList<>();
+    private final List<JsMessage> messages = new ArrayList<>();
 
     private ExtractMessagesVisitor(AbstractCompiler compiler) {
       super(compiler, true, style, idGenerator);
@@ -119,13 +123,19 @@ public final class JsMessageExtractor {
    *     JS messages, or if two messages have the same key
    */
   public <T extends SourceFile> Collection<JsMessage> extractMessages(Iterable<T> inputs) {
-
-    Compiler compiler = new Compiler();
+    final Compiler compiler = new Compiler();
     compiler.init(
         ImmutableList.<SourceFile>of(),
         ImmutableList.copyOf(inputs),
         options);
-    compiler.parseInputs();
+    compiler.runInCompilerThread(
+        new Callable<Void>() {
+          @Override
+          public Void call() throws Exception {
+            compiler.parseInputs();
+            return null;
+          }
+        });
 
     ExtractMessagesVisitor extractCompilerPass =
         new ExtractMessagesVisitor(compiler);

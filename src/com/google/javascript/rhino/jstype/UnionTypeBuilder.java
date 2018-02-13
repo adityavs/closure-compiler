@@ -39,18 +39,18 @@
 
 package com.google.javascript.rhino.jstype;
 
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.javascript.rhino.jstype.JSTypeNative.ALL_TYPE;
 import static com.google.javascript.rhino.jstype.JSTypeNative.CHECKED_UNKNOWN_TYPE;
 import static com.google.javascript.rhino.jstype.JSTypeNative.NO_TYPE;
 import static com.google.javascript.rhino.jstype.JSTypeNative.UNKNOWN_TYPE;
+import static com.google.javascript.rhino.jstype.JSTypeNative.VOID_TYPE;
 
-import com.google.common.base.Preconditions;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
-
+import com.google.javascript.rhino.jstype.JSType.SubtypingMode;
 import java.io.Serializable;
 import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
@@ -68,6 +68,9 @@ public class UnionTypeBuilder implements Serializable {
 
   private final JSTypeRegistry registry;
   private final List<JSType> alternates = new ArrayList<>();
+  // If a union has ? or *, we do not care about any other types, except for undefined (for optional
+  // properties).
+  private boolean containsVoidType = false;
   private boolean isAllType = false;
   private boolean isNativeUnknownType = false;
   private boolean areAllUnknownsChecked = true;
@@ -105,12 +108,23 @@ public class UnionTypeBuilder implements Serializable {
     this.maxUnionSize = maxUnionSize;
   }
 
-  Collection<JSType> getAlternates() {
+  ImmutableList<JSType> getAlternates() {
     JSType specialCaseType = reduceAlternatesWithoutUnion();
     if (specialCaseType != null) {
       return ImmutableList.of(specialCaseType);
     }
-    return Collections.unmodifiableList(alternates);
+
+    JSType wildcard = getNativeWildcardType();
+    if (wildcard != null && containsVoidType) {
+      return ImmutableList.of(wildcard, registry.getNativeType(VOID_TYPE));
+    }
+    // This copy should be pretty cheap since in the common case alternates only contains 2-3 items
+    return ImmutableList.copyOf(alternates);
+  }
+
+  @VisibleForTesting
+  int getAlternatesCount() {
+    return alternates.size();
   }
 
   private boolean isSubtype(
@@ -140,6 +154,7 @@ public class UnionTypeBuilder implements Serializable {
     }
 
     isAllType = isAllType || alternate.isAllType();
+    containsVoidType = containsVoidType || alternate.isVoidType();
 
     boolean isAlternateUnknown = alternate instanceof UnknownType;
     isNativeUnknownType = isNativeUnknownType || isAlternateUnknown;
@@ -150,7 +165,10 @@ public class UnionTypeBuilder implements Serializable {
     if (!isAllType && !isNativeUnknownType) {
       if (alternate.isUnionType()) {
         UnionType union = alternate.toMaybeUnionType();
-        for (JSType unionAlt : union.getAlternatesWithoutStructuralTyping()) {
+        List<JSType> alternatesWithoutStructuralTyping =
+            union.getAlternatesWithoutStructuralTypingList();
+        for (int i = 0; i < alternatesWithoutStructuralTyping.size(); i++) {
+          JSType unionAlt = alternatesWithoutStructuralTyping.get(i);
           addAlternate(unionAlt);
         }
       } else {
@@ -190,7 +208,7 @@ public class UnionTypeBuilder implements Serializable {
               current.isNoResolvedType() ||
               alternate.hasAnyTemplateTypes() ||
               current.hasAnyTemplateTypes()) {
-            if (alternate.isEquivalentTo(current)) {
+            if (alternate.isEquivalentTo(current, isStructural)) {
               // Alternate is unnecessary.
               return this;
             }
@@ -234,15 +252,15 @@ public class UnionTypeBuilder implements Serializable {
                 }
                 // case 6: leave current, add alternate
               } else {
-                Preconditions.checkState(current.isTemplatizedType()
-                    && alternate.isTemplatizedType());
+                checkState(current.isTemplatizedType() && alternate.isTemplatizedType());
                 TemplatizedType templatizedAlternate = alternate.toMaybeTemplatizedType();
                 TemplatizedType templatizedCurrent = current.toMaybeTemplatizedType();
 
                 if (templatizedCurrent.wrapsSameRawType(templatizedAlternate)) {
                   if (alternate.getTemplateTypeMap().checkEquivalenceHelper(
                       current.getTemplateTypeMap(),
-                      EquivalenceMethod.IDENTITY)) {
+                      EquivalenceMethod.IDENTITY,
+                      SubtypingMode.NORMAL)) {
                     // case 8
                     return this;
                   } else {
@@ -260,9 +278,11 @@ public class UnionTypeBuilder implements Serializable {
               // Otherwise leave both templatized types.
             } else if (isSubtype(alternate, current, isStructural)) {
               // Alternate is unnecessary.
+              mayRegisterDroppedProperties(alternate, current);
               return this;
             } else if (isSubtype(current, alternate, isStructural)) {
               // Alternate makes current obsolete
+              mayRegisterDroppedProperties(current, alternate);
               removeCurrent = true;
             }
           }
@@ -282,7 +302,7 @@ public class UnionTypeBuilder implements Serializable {
 
         if (alternate.isFunctionType()) {
           // See the comments on functionTypePosition above.
-          Preconditions.checkState(functionTypePosition == -1);
+          checkState(functionTypePosition == -1);
           functionTypePosition = alternates.size();
         }
 
@@ -295,12 +315,16 @@ public class UnionTypeBuilder implements Serializable {
     return this;
   }
 
-  /**
-   * Adds an alternate to the union type under construction. Returns this
-   * for easy chaining.
-   */
+  /** Adds an alternate to the union type under construction. Returns this for easy chaining. */
   public UnionTypeBuilder addAlternate(JSType alternate) {
     return addAlternate(alternate, false);
+  }
+
+  private void mayRegisterDroppedProperties(JSType subtype, JSType supertype) {
+    if (subtype.toMaybeRecordType() != null && supertype.toMaybeRecordType() != null) {
+      this.registry.registerDroppedPropertiesInUnion(
+          subtype.toMaybeRecordType(), supertype.toMaybeRecordType());
+    }
   }
 
   /**
@@ -309,6 +333,24 @@ public class UnionTypeBuilder implements Serializable {
    * type, return null.
    */
   private JSType reduceAlternatesWithoutUnion() {
+    JSType wildcard = getNativeWildcardType();
+    if (wildcard != null) {
+      return containsVoidType ? null : wildcard;
+    }
+    int size = alternates.size();
+    if (size > maxUnionSize) {
+      return registry.getNativeType(UNKNOWN_TYPE);
+    } else if (size > 1) {
+      return null;
+    } else if (size == 1) {
+      return alternates.get(0);
+    } else {
+      return registry.getNativeType(NO_TYPE);
+    }
+  }
+
+  /** Returns ALL_TYPE, UNKNOWN_TYPE, or CHECKED_UNKNOWN_TYPE, as specified by the flags, or null */
+  private JSType getNativeWildcardType() {
     if (isAllType) {
       return registry.getNativeType(ALL_TYPE);
     } else if (isNativeUnknownType) {
@@ -317,18 +359,8 @@ public class UnionTypeBuilder implements Serializable {
       } else {
         return registry.getNativeType(UNKNOWN_TYPE);
       }
-    } else {
-      int size = alternates.size();
-      if (size > maxUnionSize) {
-        return registry.getNativeType(UNKNOWN_TYPE);
-      } else if (size > 1) {
-        return null;
-      } else if (size == 1) {
-        return alternates.get(0);
-      } else {
-        return registry.getNativeType(NO_TYPE);
-      }
     }
+    return null;
   }
 
   /**
@@ -340,13 +372,9 @@ public class UnionTypeBuilder implements Serializable {
     if (result == null) {
       result = reduceAlternatesWithoutUnion();
       if (result == null) {
-        result = new UnionType(registry, getAlternateListCopy());
+        result = new UnionType(registry, ImmutableList.copyOf(getAlternates()));
       }
     }
     return result;
-  }
-
-  private Collection<JSType> getAlternateListCopy() {
-    return ImmutableList.copyOf(alternates);
   }
 }

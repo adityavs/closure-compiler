@@ -39,23 +39,22 @@
 
 package com.google.javascript.rhino.jstype;
 
-import com.google.javascript.rhino.jstype.JSType;
-import com.google.javascript.rhino.jstype.JSTypeRegistry;
-import com.google.javascript.rhino.jstype.ModificationVisitor;
-import com.google.javascript.rhino.jstype.TemplateType;
-import com.google.javascript.rhino.jstype.TemplateTypeMap;
-
+import com.google.common.base.Preconditions;
 import java.util.ArrayDeque;
 
 /**
  * Uses a TemplateTypeMap to replace TemplateTypes with their associated JSType
  * values.
  *
+ * <p>Equality checks in this file are done with reference equality on purpose.
+ *
  * @author izaakr@google.com (Izaak Rubin)
  */
 public class TemplateTypeMapReplacer extends ModificationVisitor {
   private final TemplateTypeMap replacements;
-  private ArrayDeque<TemplateType> visitedTypes;
+  private final ArrayDeque<TemplateType> visitedTypes;
+  private TemplateType keyType = null;
+  private boolean replaceMissingTypesWithUnknown = false;
 
   public TemplateTypeMapReplacer(
       JSTypeRegistry registry, TemplateTypeMap replacements) {
@@ -64,21 +63,45 @@ public class TemplateTypeMapReplacer extends ModificationVisitor {
     this.visitedTypes = new ArrayDeque<>();
   }
 
+  public TemplateTypeMapReplacer(
+      JSTypeRegistry registry,
+      TemplateTypeMap replacements,
+      boolean replaceMissingTypesWithUnknown) {
+    this(registry, replacements);
+    this.replaceMissingTypesWithUnknown = replaceMissingTypesWithUnknown;
+  }
+
+  void setKeyType(TemplateType keyType) {
+    this.keyType = keyType;
+  }
+
   @Override
+  @SuppressWarnings("ReferenceEquality")
   public JSType caseTemplateType(TemplateType type) {
     if (replacements.hasTemplateKey(type)) {
-      if (hasVisitedType(type) || !replacements.hasTemplateType(type)) {
+      if (hasVisitedType(type)) {
         // If we have already encountered this TemplateType during replacement
-        // (i.e. there is a reference loop), or there is no JSType substitution
-        // for the TemplateType, return the TemplateType type itself.
+        // (i.e. there is a reference loop) then return the TemplateType type itself.
         return type;
+      } else if (!replacements.hasTemplateType(type)) {
+        // If there is no JSType substitution for the TemplateType, return either the
+        // UNKNOWN_TYPE or the TemplateType type itself, depending on configuration.
+        return replaceMissingTypesWithUnknown
+            ? registry.getNativeType(JSTypeNative.UNKNOWN_TYPE)
+            : type;
       } else {
-        JSType replacement = replacements.getTemplateType(type);
+        JSType replacement = replacements.getUnresolvedOriginalTemplateType(type);
+        if (replacement == keyType || isRecursive(type, replacement)) {
+          // Recursive templated type definition (e.g. T resolved to Foo<T>).
+          return type;
+        }
 
         visitedTypes.push(type);
         JSType visitedReplacement = replacement.visit(this);
         visitedTypes.pop();
 
+        Preconditions.checkState(
+            visitedReplacement != keyType, "Trying to replace key %s with the same value", keyType);
         return visitedReplacement;
       }
     } else {
@@ -87,9 +110,38 @@ public class TemplateTypeMapReplacer extends ModificationVisitor {
   }
 
   /**
+   * Returns whether the replacement type is a templatized type which contains the current type.
+   * e.g. current type T is being replaced with Foo<T>
+   */
+  private boolean isRecursive(TemplateType currentType, JSType replacementType) {
+    TemplatizedType replacementTemplatizedType =
+        replacementType.restrictByNotNullOrUndefined().toMaybeTemplatizedType();
+    if (replacementTemplatizedType == null) {
+      return false;
+    }
+
+    Iterable<JSType> replacementTemplateTypes = replacementTemplatizedType.getTemplateTypes();
+    for (JSType replacementTemplateType : replacementTemplateTypes) {
+      if (replacementTemplateType.isTemplateType()
+          && isSameType(currentType, replacementTemplateType.toMaybeTemplateType())) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  @SuppressWarnings("ReferenceEquality")
+  private boolean isSameType(TemplateType currentType, TemplateType replacementType) {
+    return currentType == replacementType
+        || currentType == replacements.getUnresolvedOriginalTemplateType(replacementType);
+  }
+
+  /**
    * Checks if the specified type has already been visited during the Visitor's
    * traversal of a JSType.
    */
+  @SuppressWarnings("ReferenceEquality")
   private boolean hasVisitedType(TemplateType type) {
     for (TemplateType visitedType : visitedTypes) {
       if (visitedType == type) {

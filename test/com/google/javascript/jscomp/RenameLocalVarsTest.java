@@ -16,8 +16,6 @@
 
 package com.google.javascript.jscomp;
 
-import java.util.HashSet;
-
 /**
  * Tests for {@link RenameVars}.
  * @see RenameVarsTest
@@ -27,18 +25,28 @@ public final class RenameLocalVarsTest extends CompilerTestCase {
 
   private String prefix = DEFAULT_PREFIX;
 
-  private NameGenerator nameGenerator = null;
+  // NameGenerator to use, or null for a default.
+  private DefaultNameGenerator nameGenerator = null;
 
   @Override
   protected CompilerPass getProcessor(Compiler compiler) {
-    return new RenameVars(
-        compiler, prefix, true, false, false, false, false,
-        null, null, null, nameGenerator);
+    if (nameGenerator != null) {
+      return new RenameVars(
+          compiler, prefix, true, false, false, false, false,
+          null, null, null, nameGenerator);
+    } else {
+      return new RenameVars(
+          compiler, prefix, true, false, false, false, false,
+          null, null, null,
+          new DefaultNameGenerator());
+    }
   }
 
   @Override
-  protected void setUp() {
+  protected void setUp() throws Exception {
+    super.setUp();
     nameGenerator = null;
+    disableValidateAstChangeMarking();
   }
 
   public void testRenameSimple() {
@@ -72,20 +80,21 @@ public final class RenameLocalVarsTest extends CompilerTestCase {
 
   public void testRenameWithExterns1() {
     String externs = "var bar; function alert() {}";
-    test(externs,
-        "function foo(bar) { alert(bar); } foo(3)",
-        "function foo(a) { alert(a); } foo(3)", null, null);
+    test(
+        externs(externs),
+        srcs("function foo(bar) { alert(bar); } foo(3)"),
+        expected("function foo(a) { alert(a); } foo(3)"));
   }
 
   public void testRenameWithExterns2() {
-    test("var a; function alert() {}",
-        "function foo(bar) { alert(a);alert(bar); } foo(3);",
-        "function foo(b) { alert(a);alert(b); } foo(3);",
-        null, null);
+    test(
+        externs("var a; function alert() {}"),
+        srcs("function foo(bar) { alert(a);alert(bar); } foo(3);"),
+        expected("function foo(b) { alert(a);alert(b); } foo(3);"));
   }
 
   public void testDoNotRenameExportedName() {
-    test("_foo()", "_foo()");
+    testSame("_foo()");
   }
 
   public void testRenameWithNameOverlap() {
@@ -126,13 +135,13 @@ public final class RenameLocalVarsTest extends CompilerTestCase {
   }
 
   public void testBias() {
-    nameGenerator = new NameGenerator(new HashSet<String>(0), "", null);
+    nameGenerator = new DefaultNameGenerator();
     nameGenerator.favors("AAAAAAAAHH");
     test("function foo(x,y){}", "function foo(A,H){}");
   }
 
   public void testBias2() {
-    nameGenerator = new NameGenerator(new HashSet<String>(0), "", null);
+    nameGenerator = new DefaultNameGenerator();
     nameGenerator.favors("AAAAAAAAHH");
     test("function foo(x,y){ var z = z + z + z}",
          "function foo(H,a){ var A = A + A + A}");

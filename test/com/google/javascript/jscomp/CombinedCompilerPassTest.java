@@ -22,14 +22,12 @@ import com.google.javascript.jscomp.NodeTraversal.Callback;
 import com.google.javascript.jscomp.NodeTraversal.ScopedCallback;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-
-import junit.framework.TestCase;
-
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import junit.framework.TestCase;
 
 /**
  */
@@ -67,9 +65,9 @@ public final class CombinedCompilerPassTest extends TestCase  {
     d.addChildToBack(b);
     d.addChildToBack(c);
 
-    h.addChildrenToBack(e);
-    h.addChildrenToBack(f);
-    h.addChildrenToBack(g);
+    h.addChildToBack(e);
+    h.addChildToBack(f);
+    h.addChildToBack(g);
 
     l.addChildToBack(i);
     l.addChildToBack(j);
@@ -86,6 +84,7 @@ public final class CombinedCompilerPassTest extends TestCase  {
   public void setUp() throws Exception {
     super.setUp();
     compiler = new Compiler();
+    compiler.initOptions(new CompilerOptions());
   }
 
   /**
@@ -94,9 +93,9 @@ public final class CombinedCompilerPassTest extends TestCase  {
    * rooted with specified strings.
    */
   private static class ConcatTraversal implements Callback {
-    private StringBuilder visited = new StringBuilder();
-    private StringBuilder shouldTraversed = new StringBuilder();
-    private Set<String> ignoring = new HashSet<>();
+    private final StringBuilder visited = new StringBuilder();
+    private final StringBuilder shouldTraversed = new StringBuilder();
+    private final Set<String> ignoring = new HashSet<>();
 
     ConcatTraversal ignore(String s) {
       ignoring.add(s);
@@ -105,13 +104,13 @@ public final class CombinedCompilerPassTest extends TestCase  {
 
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
-      assertEquals(Token.STRING, n.getType());
+      assertEquals(Token.STRING, n.getToken());
       visited.append(n.getString());
     }
 
     @Override
     public boolean shouldTraverse(NodeTraversal t, Node n, Node parent) {
-      assertEquals(Token.STRING, n.getType());
+      assertEquals(Token.STRING, n.getToken());
       shouldTraversed.append(n.getString());
       return !ignoring.contains(n.getString());
     }
@@ -136,9 +135,9 @@ public final class CombinedCompilerPassTest extends TestCase  {
    * and the expected pre- and post-order traversal results.
    */
   private static class TestHelper {
-    private ConcatTraversal traversal;
-    private String expectedVisited;
-    private String shouldTraverseExpected;
+    private final ConcatTraversal traversal;
+    private final String expectedVisited;
+    private final String shouldTraverseExpected;
 
     TestHelper(ConcatTraversal traversal, String expectedVisited,
          String shouldTraverseExpected) {
@@ -256,7 +255,7 @@ public final class CombinedCompilerPassTest extends TestCase  {
     pass.process(null, root);
 
     assertThat(c1.getVisitedScopes()).hasSize(1);
-    assertThat(c2.getVisitedScopes()).hasSize(2);
-    assertThat(c3.getVisitedScopes()).hasSize(3);
+    assertThat(c2.getVisitedScopes()).hasSize(3);
+    assertThat(c3.getVisitedScopes()).hasSize(5);
   }
 }

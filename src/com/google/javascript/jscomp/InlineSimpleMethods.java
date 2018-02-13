@@ -13,16 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package com.google.javascript.jscomp;
+
+import static com.google.common.base.Preconditions.checkState;
 
 import com.google.javascript.jscomp.NodeTraversal.Callback;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-
-import java.util.ArrayList;
 import java.util.Collection;
-import java.util.List;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -49,6 +48,11 @@ import java.util.logging.Logger;
  * call sites. For examples, calls of the form foo["bar"] are not
  * detected.
  *
+ * This pass is not on by default because it is not safe in simple mode.
+ * If the prototype method is mutated and we don't detect that, inlining it is
+ * unsafe.
+ * We enable it whenever function inlining is enabled.
+ *
  */
 class InlineSimpleMethods extends MethodCompilerPass {
 
@@ -59,6 +63,12 @@ class InlineSimpleMethods extends MethodCompilerPass {
     super(compiler);
   }
 
+  @Override
+  public void process(Node externs, Node root) {
+    checkState(compiler.getLifeCycleStage().isNormalized(), compiler.getLifeCycleStage());
+    super.process(externs, root);
+  }
+
   /**
    * For each method call, see if it is a candidate for inlining.
    * TODO(kushal): Cache the results of the checks
@@ -67,8 +77,7 @@ class InlineSimpleMethods extends MethodCompilerPass {
 
     @Override
     void visit(NodeTraversal t, Node callNode, Node parent, String callName) {
-      if (externMethods.contains(callName) ||
-          nonMethodProperties.contains(callName)) {
+      if (externMethods.contains(callName) || nonMethodProperties.contains(callName)) {
         return;
       }
 
@@ -89,23 +98,29 @@ class InlineSimpleMethods extends MethodCompilerPass {
           Node returned = returnedExpression(firstDefinition);
           if (returned != null) {
             if (isPropertyTree(returned)) {
-              logger.fine("Inlining property accessor: " + callName);
+              if (logger.isLoggable(Level.FINE)) {
+                logger.fine("Inlining property accessor: " + callName);
+              }
               inlinePropertyReturn(parent, callNode, returned);
-            } else if (NodeUtil.isLiteralValue(returned, false) &&
-              !NodeUtil.mayHaveSideEffects(
-                  callNode.getFirstChild(), compiler)) {
-              logger.fine("Inlining constant accessor: " + callName);
+            } else if (NodeUtil.isLiteralValue(returned, false)
+                && !NodeUtil.mayHaveSideEffects(callNode.getFirstChild(), compiler)) {
+              if (logger.isLoggable(Level.FINE)) {
+                logger.fine("Inlining constant accessor: " + callName);
+              }
               inlineConstReturn(parent, callNode, returned);
             }
-          } else if (isEmptyMethod(firstDefinition) &&
-              !NodeUtil.mayHaveSideEffects(
-                  callNode.getFirstChild(), compiler)) {
-            logger.fine("Inlining empty method: " + callName);
-            inlineEmptyMethod(parent, callNode);
+          } else if (isEmptyMethod(firstDefinition)
+              && !NodeUtil.mayHaveSideEffects(callNode.getFirstChild(), compiler)) {
+            if (logger.isLoggable(Level.FINE)) {
+              logger.fine("Inlining empty method: " + callName);
+            }
+            inlineEmptyMethod(t, parent, callNode);
           }
         }
       } else {
-        logger.fine("Method '" + callName + "' has conflicting definitions.");
+        if (logger.isLoggable(Level.FINE)) {
+          logger.fine("Method '" + callName + "' has conflicting definitions.");
+        }
       }
     }
   }
@@ -126,8 +141,7 @@ class InlineSimpleMethods extends MethodCompilerPass {
     }
 
     Node leftChild = expectedGetprop.getFirstChild();
-    if (!leftChild.isThis() &&
-        !isPropertyTree(leftChild)) {
+    if (!leftChild.isThis() && !isPropertyTree(leftChild)) {
       return false;
     }
 
@@ -153,7 +167,7 @@ class InlineSimpleMethods extends MethodCompilerPass {
    * by the method, given a FUNCTION node.
    */
   private static Node returnedExpression(Node fn) {
-    Node expectedBlock = getMethodBlock(fn);
+    Node expectedBlock = NodeUtil.getFunctionBody(fn);
     if (!expectedBlock.hasOneChild()) {
       return null;
     }
@@ -167,7 +181,7 @@ class InlineSimpleMethods extends MethodCompilerPass {
       return null;
     }
 
-    return expectedReturn.getLastChild();
+    return expectedReturn.getOnlyChild();
   }
 
 
@@ -177,39 +191,18 @@ class InlineSimpleMethods extends MethodCompilerPass {
    * Must be private, or moved to NodeUtil.
    */
   private static boolean isEmptyMethod(Node fn) {
-    Node expectedBlock = getMethodBlock(fn);
-    return expectedBlock == null ?
-        false : NodeUtil.isEmptyBlock(expectedBlock);
+    return NodeUtil.isEmptyBlock(NodeUtil.getFunctionBody(fn));
   }
 
-  /**
-   * Return a BLOCK node if the given FUNCTION node is a valid method
-   * definition, null otherwise.
-   *
-   * Must be private, or moved to NodeUtil.
-   */
-  private static Node getMethodBlock(Node fn) {
-    if (fn.getChildCount() != 3) {
-      return null;
-    }
-
-    Node expectedBlock = fn.getLastChild();
-    return  expectedBlock.isBlock() ?
-        expectedBlock : null;
-  }
-
-  /**
-   * Given a set of method definitions, verify they are the same.
-   */
-  private boolean allDefinitionsEquivalent(
-      Collection<Node> definitions) {
-    List<Node> list = new ArrayList<>();
-    list.addAll(definitions);
-    Node node0 = list.get(0);
-    for (int i = 1; i < list.size(); i++) {
-      if (!compiler.areNodesEqualForInlining(list.get(i), node0)) {
+  /** Given a set of method definitions, verify they are the same. */
+  private boolean allDefinitionsEquivalent(Collection<Node> definitions) {
+    Node first = null;
+    for (Node n : definitions) {
+      if (first == null) {
+        first = n;
+      } else if (!compiler.areNodesEqualForInlining(first, n)) {
         return false;
-      }
+      } // else continue
     }
     return true;
   }
@@ -224,12 +217,11 @@ class InlineSimpleMethods extends MethodCompilerPass {
    *       obj
    *       string
    */
-  private void inlinePropertyReturn(Node parent, Node call,
-      Node returnedValue) {
+  private void inlinePropertyReturn(Node parent, Node call, Node returnedValue) {
     Node getProp = returnedValue.cloneTree();
     replaceThis(getProp, call.getFirstChild().removeFirstChild());
     parent.replaceChild(call, getProp);
-    compiler.reportCodeChange();
+    compiler.reportChangeToEnclosingScope(getProp);
   }
 
   /**
@@ -237,26 +229,28 @@ class InlineSimpleMethods extends MethodCompilerPass {
    * in returnedValue. Should be called only if the object reference has
    * no side effects.
    */
-  private void inlineConstReturn(Node parent, Node call,
-      Node returnedValue) {
+  private void inlineConstReturn(Node parent, Node call, Node returnedValue) {
     Node retValue = returnedValue.cloneTree();
     parent.replaceChild(call, retValue);
-    compiler.reportCodeChange();
+    compiler.reportChangeToEnclosingScope(retValue);
   }
 
   /**
    * Remove the provided object and its method call.
    */
-  private void inlineEmptyMethod(Node parent, Node call) {
+  private void inlineEmptyMethod(NodeTraversal t, Node parent, Node call) {
     // If the return value of the method call is read,
     // replace it with "void 0". Otherwise, remove the call entirely.
+
     if (NodeUtil.isExprCall(parent)) {
-      parent.getParent().replaceChild(parent, IR.empty());
+      parent.replaceWith(IR.empty());
+      NodeUtil.markFunctionsDeleted(parent, compiler);
     } else {
       Node srcLocation = call;
       parent.replaceChild(call, NodeUtil.newUndefinedNode(srcLocation));
+      NodeUtil.markFunctionsDeleted(call, compiler);
     }
-    compiler.reportCodeChange();
+    t.reportCodeChange();
   }
 
   /**
@@ -264,7 +258,7 @@ class InlineSimpleMethods extends MethodCompilerPass {
    * @param call The call node of a method invocation.
    */
   private boolean argsMayHaveSideEffects(Node call) {
-    for (Node currentChild = call.getFirstChild().getNext();
+    for (Node currentChild = call.getSecondChild();
          currentChild != null;
          currentChild = currentChild.getNext()) {
       if (NodeUtil.mayHaveSideEffects(currentChild, compiler)) {

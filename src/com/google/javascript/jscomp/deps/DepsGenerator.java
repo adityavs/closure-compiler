@@ -19,27 +19,30 @@ package com.google.javascript.jscomp.deps;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.base.Function;
-import com.google.common.base.Joiner;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
 import com.google.javascript.jscomp.CheckLevel;
+import com.google.javascript.jscomp.Compiler;
+import com.google.javascript.jscomp.CompilerOptions;
 import com.google.javascript.jscomp.DiagnosticType;
 import com.google.javascript.jscomp.ErrorManager;
 import com.google.javascript.jscomp.JSError;
+import com.google.javascript.jscomp.JsAst;
+import com.google.javascript.jscomp.LazyParsedDependencyInfo;
 import com.google.javascript.jscomp.SourceFile;
-
 import java.io.ByteArrayOutputStream;
-import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -56,14 +59,14 @@ public class DepsGenerator {
     DO_NOT_DUPLICATE
   }
 
-  private static Logger logger =
-      Logger.getLogger(DepsGenerator.class.getName());
+  private static final Logger logger = Logger.getLogger(DepsGenerator.class.getName());
 
   // See the Flags in MakeJsDeps for descriptions of these.
   private final Collection<SourceFile> srcs;
   private final Collection<SourceFile> deps;
   private final String closurePathAbs;
   private final InclusionStrategy mergeStrategy;
+  private final ModuleLoader loader;
   final ErrorManager errorManager;
 
   static final DiagnosticType SAME_FILE_WARNING = DiagnosticType.warning(
@@ -98,12 +101,14 @@ public class DepsGenerator {
       Collection<SourceFile> srcs,
       InclusionStrategy mergeStrategy,
       String closurePathAbs,
-      ErrorManager errorManager) {
+      ErrorManager errorManager,
+      ModuleLoader loader) {
     this.deps = deps;
     this.srcs = srcs;
     this.mergeStrategy = mergeStrategy;
     this.closurePathAbs = closurePathAbs;
     this.errorManager = errorManager;
+    this.loader = loader;
   }
 
   /**
@@ -115,8 +120,9 @@ public class DepsGenerator {
   public String computeDependencyCalls() throws IOException {
     // Build a map of closure-relative path -> DepInfo.
     Map<String, DependencyInfo> depsFiles = parseDepsFiles();
-    logger.fine("preparsedFiles: " + depsFiles);
-
+    if (logger.isLoggable(Level.FINE)) {
+      logger.fine("preparsedFiles: " + depsFiles);
+    }
     // Find all goog.provides & goog.requires in src files
     Map<String, DependencyInfo> jsFiles = parseSources(depsFiles.keySet());
 
@@ -178,7 +184,7 @@ public class DepsGenerator {
       Iterable<DependencyInfo> parsedFileDependencies) {
     // Create a map of namespace -> file providing it.
     // Also report any duplicate provides.
-    Map<String, DependencyInfo> providesMap = new HashMap<>();
+    Map<String, DependencyInfo> providesMap = new LinkedHashMap<>();
     addToProvideMap(preparsedFileDepedencies, providesMap);
     addToProvideMap(parsedFileDependencies, providesMap);
     // For each require in the parsed sources:
@@ -275,7 +281,7 @@ public class DepsGenerator {
    */
   private Map<String, DependencyInfo> parseDepsFiles() throws IOException {
     DepsFileParser depsParser = createDepsFileParser();
-    Map<String, DependencyInfo> depsFiles = new HashMap<>();
+    Map<String, DependencyInfo> depsFiles = new LinkedHashMap<>();
     for (SourceFile file : deps) {
       if (!shouldSkipDepsFile(file)) {
         List<DependencyInfo>
@@ -295,8 +301,7 @@ public class DepsGenerator {
     // into srcs.  So we need to scan all the src files for addDependency
     // calls as well.
     for (SourceFile src : srcs) {
-      if ((new File(src.getName())).exists() &&
-          !shouldSkipDepsFile(src)) {
+      if (!shouldSkipDepsFile(src)) {
         List<DependencyInfo> srcInfos =
             depsParser.parseFileReader(src.getName(), src.getCodeReader());
         for (DependencyInfo info : srcInfos) {
@@ -318,21 +323,26 @@ public class DepsGenerator {
    */
   private Map<String, DependencyInfo> parseSources(
       Set<String> preparsedFiles) throws IOException {
-    Map<String, DependencyInfo> parsedFiles = new HashMap<>();
-    JsFileParser jsParser = new JsFileParser(errorManager);
+    Map<String, DependencyInfo> parsedFiles = new LinkedHashMap<>();
+    JsFileParser jsParser = new JsFileParser(errorManager).setModuleLoader(loader);
+    Compiler compiler = new Compiler();
+    compiler.init(
+        ImmutableList.<SourceFile>of(), ImmutableList.<SourceFile>of(), new CompilerOptions());
 
     for (SourceFile file : srcs) {
       String closureRelativePath =
           PathUtil.makeRelative(
               closurePathAbs, PathUtil.makeAbsolute(file.getName()));
-      logger.fine("Closure-relative path: " + closureRelativePath);
-
+      if (logger.isLoggable(Level.FINE)) {
+        logger.fine("Closure-relative path: " + closureRelativePath);
+      }
       if (InclusionStrategy.WHEN_IN_SRCS == mergeStrategy ||
           !preparsedFiles.contains(closureRelativePath)) {
         DependencyInfo depInfo =
             jsParser.parseFile(
                 file.getName(), closureRelativePath,
                 file.getCode());
+        depInfo = new LazyParsedDependencyInfo(depInfo, new JsAst(file), compiler);
 
         // Kick the source out of memory.
         file.clearCachedSource();
@@ -383,47 +393,15 @@ public class DepsGenerator {
     return path;
   }
 
-  /**
-   * Writes goog.addDependency() lines for each DependencyInfo in depInfos.
-   */
-  private void writeDepInfos(PrintStream out, Collection<DependencyInfo> depInfos) {
+  /** Writes goog.addDependency() lines for each DependencyInfo in depInfos. */
+  private static void writeDepInfos(PrintStream out, Collection<DependencyInfo> depInfos)
+      throws IOException {
     // Print dependencies.
     // Lines look like this:
     // goog.addDependency('../../path/to/file.js', ['goog.Delay'],
     //     ['goog.Disposable', 'goog.Timer']);
     for (DependencyInfo depInfo : depInfos) {
-      Collection<String> provides = depInfo.getProvides();
-      Collection<String> requires = depInfo.getRequires();
-
-      out.print("goog.addDependency('" +
-          depInfo.getPathRelativeToClosureBase() + "', ");
-      writeJsArray(out, provides);
-      out.print(", ");
-      writeJsArray(out, requires);
-      // While transitioning, only write "module" for goog.module 
-      if (depInfo.isModule()) {
-        out.print(", ");
-        writeJsBoolean(out, depInfo.isModule());
-      }
-      out.println(");");
-    }
-  }
-
-  private void writeJsBoolean(PrintStream out, boolean value) {
-    out.print(value ? "true" : "false");
-  }
-
-  /**
-   * Prints a list of strings formatted as a JavaScript array of string
-   * literals.
-   */
-  private static void writeJsArray(PrintStream out, Collection<String> values) {
-    if (values.isEmpty()) {
-      out.print("[]");
-    } else {
-      out.print("['");
-      out.print(Joiner.on("', '").join(values));
-      out.print("']");
+      DependencyInfo.Util.writeAddDependency(out, depInfo);
     }
   }
 
@@ -436,8 +414,16 @@ public class DepsGenerator {
     return files;
   }
 
-  static List<SourceFile> createSourceFilesFromPaths(
-      String ... paths) {
+  static List<SourceFile> createSourceFilesFromPaths(String... paths) {
     return createSourceFilesFromPaths(Arrays.asList(paths));
+  }
+
+  static List<SourceFile> createSourceFilesFromZipPaths(
+      Collection<String> paths) throws IOException {
+    List<SourceFile> zipSourceFiles = new ArrayList<>();
+    for (String path : paths) {
+      zipSourceFiles.addAll(SourceFile.fromZipFile(path, UTF_8));
+    }
+    return zipSourceFiles;
   }
 }

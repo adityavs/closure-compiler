@@ -23,9 +23,6 @@
  *     $cookieStore
  *     $document
  *     $httpBackend
- *     $interpolate
- *     $locale
- *     $resource
  *     $rootElement
  *     $rootScope
  *     $rootScopeProvider
@@ -221,54 +218,126 @@ angular.uppercase = function(s) {};
 
 /**
  * @typedef {{
- *   enter: (function(!angular.JQLite, !Function): (!Function|undefined)|
- *       undefined),
- *   leave: (function(!angular.JQLite, !Function): (!Function|undefined)|
- *       undefined),
- *   move: (function(!angular.JQLite, !Function): (!Function|undefined)|
- *       undefined),
- *   addClass: (function(!angular.JQLite, !Function): (!Function|undefined)|
- *       undefined),
- *   removeClass: (function(!angular.JQLite, !Function): (!Function|undefined)|
- *       undefined)
+ *   animate: (function(!angular.JQLite, string, !Object, !Object, !Function,
+ *       !Object=):(!Function|undefined)|undefined),
+ *   enter: (function(!angular.JQLite, !Function, !Object=):
+ *       (!Function|undefined)|undefined),
+ *   leave: (function(!angular.JQLite, !Function, !Object=):
+ *       (!Function|undefined)|undefined),
+ *   move: (function(!angular.JQLite, !Function, !Object=):
+ *       (!Function|undefined)|undefined),
+ *   beforeAddClass: (function(!angular.JQLite, string, !Function, !Object=):
+ *       (!Function|undefined)|undefined),
+ *   addClass: (function(!angular.JQLite, string, !Function, !Object=):
+ *       (!Function|undefined)|undefined),
+ *   beforeRemoveClass: (function(!angular.JQLite, string, !Function, !Object=):
+ *       (!Function|undefined)|undefined),
+ *   removeClass: (function(!angular.JQLite, string, !Function, !Object=):
+ *       (!Function|undefined)|undefined),
+ *   beforeSetClass: (function(!angular.JQLite, string, string, !Function,
+ *       !Object=):(!Function|undefined)|undefined),
+ *   setClass: (function(!angular.JQLite, string, string, !Function, !Object=):
+ *       (!Function|undefined)|undefined)
  *   }}
  */
 angular.Animation;
 
 /**
  * @param {!angular.JQLite} element
- * @param {!Function} done
- * @return {(!Function|undefined)}
+ * @param {string} className
+ * @param {!Object} from
+ * @param {!Object} to
+ * @param {!Function} doneFn
+ * @param {!Object=} opt_options
  */
-angular.Animation.enter = function(element, done) {};
+angular.Animation.animate =
+    function(element, className, from, to, doneFn, opt_options) {};
 
 /**
  * @param {!angular.JQLite} element
- * @param {!Function} done
+ * @param {!Function} doneFn
+ * @param {!Object=} opt_options
  * @return {(!Function|undefined)}
  */
-angular.Animation.leave = function(element, done) {};
+angular.Animation.enter = function(element, doneFn, opt_options) {};
 
 /**
  * @param {!angular.JQLite} element
- * @param {!Function} done
+ * @param {!Function} doneFn
+ * @param {!Object=} opt_options
  * @return {(!Function|undefined)}
  */
-angular.Animation.move = function(element, done) {};
+angular.Animation.leave = function(element, doneFn, opt_options) {};
 
 /**
  * @param {!angular.JQLite} element
- * @param {!Function} done
+ * @param {!Function} doneFn
+ * @param {!Object=} opt_options
  * @return {(!Function|undefined)}
  */
-angular.Animation.addClass = function(element, done) {};
+angular.Animation.move = function(element, doneFn, opt_options) {};
 
 /**
  * @param {!angular.JQLite} element
- * @param {!Function} done
+ * @param {string} className
+ * @param {!Function} doneFn
+ * @param {!Object=} opt_options
  * @return {(!Function|undefined)}
  */
-angular.Animation.removeClass = function(element, done) {};
+angular.Animation.beforeAddClass =
+    function(element, className, doneFn, opt_options) {};
+
+/**
+ * @param {!angular.JQLite} element
+ * @param {string} className
+ * @param {!Function} doneFn
+ * @param {!Object=} opt_options
+ * @return {(!Function|undefined)}
+ */
+angular.Animation.addClass =
+    function(element, className, doneFn, opt_options) {};
+
+/**
+ * @param {!angular.JQLite} element
+ * @param {string} className
+ * @param {!Function} doneFn
+ * @param {!Object=} opt_options
+ * @return {(!Function|undefined)}
+ */
+angular.Animation.beforeRemoveClass =
+    function(element, className, doneFn, opt_options) {};
+
+/**
+ * @param {!angular.JQLite} element
+ * @param {string} className
+ * @param {!Function} doneFn
+ * @param {!Object=} opt_options
+ * @return {(!Function|undefined)}
+ */
+angular.Animation.removeClass =
+    function(element, className, doneFn, opt_options) {};
+
+/**
+ * @param {!angular.JQLite} element
+ * @param {string} addedClass
+ * @param {string} removedClass
+ * @param {!Function} doneFn
+ * @param {!Object=} opt_options
+ * @return {(!Function|undefined)}
+ */
+angular.Animation.beforeSetClass =
+    function(element, addedClass, removedClass, doneFn, opt_options) {};
+
+/**
+ * @param {!angular.JQLite} element
+ * @param {string} addedClass
+ * @param {string} removedClass
+ * @param {!Function} doneFn
+ * @param {!Object=} opt_options
+ * @return {(!Function|undefined)}
+ */
+angular.Animation.setClass =
+    function(element, addedClass, removedClass, doneFn, opt_options) {};
 
 /**
  * @typedef {{
@@ -379,7 +448,7 @@ angular.LinkingFunctions.post = function(scope, iElement, iAttrs, controller) {
  *       function(!angular.JQLite=,!angular.Attributes=): string|
  *       undefined),
  *   templateNamespace: (string|undefined),
- *   templateUrl: (string|
+ *   templateUrl: (string|!Object|
  *       function(!angular.JQLite=,!angular.Attributes=)|
  *       undefined),
  *   terminal: (boolean|undefined),
@@ -453,7 +522,8 @@ angular.Directive.scope;
 angular.Directive.template;
 
 /**
- * @type {(string|function(!angular.JQLite=, !angular.Attributes=)|undefined)}
+ * @type {(string|!Object|function(!angular.JQLite=,
+ * !angular.Attributes=)|undefined)}
  */
 angular.Directive.templateUrl;
 
@@ -540,7 +610,7 @@ angular.JQLite.append = function(element) {};
 
 /**
  * @param {string} name
- * @param {(string|boolean)=} opt_value
+ * @param {(string|boolean|null)=} opt_value
  * @return {!angular.JQLite|string|boolean}
  */
 angular.JQLite.attr = function(name, opt_value) {};
@@ -745,7 +815,7 @@ angular.JQLite.wrap = function(element) {};
 /**
  * @typedef {{
  *   animation:
- *       function(string, function(...*):angular.Animation):!angular.Module,
+ *       function(string, angular.Injectable):!angular.Module,
  *   config: function(angular.Injectable):!angular.Module,
  *   constant: function(string, *):angular.Module,
  *   controller:
@@ -772,7 +842,7 @@ angular.Module;
 
 /**
  * @param {string} name
- * @param {function(...*):angular.Animation} animationFactory
+ * @param {angular.Injectable} animationFactory
  */
 angular.Module.animation = function(name, animationFactory) {};
 
@@ -1049,7 +1119,7 @@ angular.$anchorScrollProvider.disableAutoScrolling = function() {};
 /**
  * @constructor
  */
-angular.$animate;
+angular.$animate = function() {};
 
 /**
  * @param {JQLiteSelector} element
@@ -1136,7 +1206,7 @@ angular.$animate.prototype.cancel = function(animationPromise) {};
 /**
  * @constructor
  */
-angular.$animateProvider;
+angular.$animateProvider = function() {};
 
 /**
  * @param {string} name
@@ -1151,6 +1221,31 @@ angular.$animateProvider.prototype.classNameFilter = function(
     opt_expression) {};
 
 /******************************************************************************
+ * $ariaProvider Service
+ *****************************************************************************/
+
+/**
+ * @constructor
+ */
+angular.$ariaProvider = function() {};
+
+/**
+ * @param {!{
+ *   ariaHidden: (boolean|undefined),
+ *   ariaChecked: (boolean|undefined),
+ *   ariaDisabled: (boolean|undefined),
+ *   ariaRequired: (boolean|undefined),
+ *   ariaInvalid: (boolean|undefined),
+ *   ariaMultiline: (boolean|undefined),
+ *   ariaValue: (boolean|undefined),
+ *   tabindex: (boolean|undefined),
+ *   bindKeypress: (boolean|undefined),
+ *   bindRoleForClick: (boolean|undefined)
+ * }} config
+ */
+angular.$ariaProvider.prototype.config = function(config) {};
+
+/******************************************************************************
  * $compile Service
  *****************************************************************************/
 
@@ -1160,16 +1255,26 @@ angular.$animateProvider.prototype.classNameFilter = function(
  *       (JQLiteSelector|Object),
  *       function(!angular.Scope, Function=)=, number=):
  *           function(!angular.Scope,
- *               function(!angular.JQLite, !angular.Scope=)=): !angular.JQLite}
+ *               function(!angular.JQLite, !angular.Scope=)=,
+ *                   angular.$compile.LinkOptions=): !angular.JQLite}
  */
 angular.$compile;
+
+/**
+ * @typedef {{
+ *   parentBoundTranscludeFn: (Function|undefined),
+ *   transcludeControllers: (Object|undefined),
+ *   futureParentElement: (angular.JQLite|undefined)
+ * }}
+ */
+angular.$compile.LinkOptions;
 
 // TODO(martinprobst): remaining $compileProvider methods.
 
 /**
  * @constructor
  */
-angular.$compileProvider;
+angular.$compileProvider = function() {};
 
 /**
  * @param {boolean=} opt_enabled
@@ -1286,6 +1391,13 @@ angular.$filter;
  *     boolean=): Array}
  */
 angular.$filter.orderBy;
+
+/**
+ * @typedef {function(Array,
+ *     (string|Object|function(?):*),
+ *     (function(?):*|boolean)=): Array}
+ */
+angular.$filter.filter;
 
 /******************************************************************************
  * $filterProvider Service
@@ -1435,7 +1547,7 @@ angular.$http.Interceptor;
 /**
  * @typedef {{
  *   defaults: !angular.$http.Config,
- *   interceptors: !Array.<string|function(...*): !angular.$http.Interceptor>,
+ *   interceptors: !Array.<string|function(...?): !angular.$http.Interceptor>,
  *   useApplyAsync: function(boolean=):(boolean|!angular.$HttpProvider)
  * }}
  */
@@ -1447,7 +1559,7 @@ angular.$HttpProvider;
 angular.$HttpProvider.defaults;
 
 /**
- * @type {!Array.<string|function(...*): !angular.$http.Interceptor>}
+ * @type {!Array.<string|function(...?): !angular.$http.Interceptor>}
  */
 angular.$HttpProvider.interceptors;
 
@@ -1524,6 +1636,15 @@ angular.$interpolateProvider.startSymbol;
 angular.$interpolateProvider.endSymbol;
 
 /******************************************************************************
+ * $interpolate Service
+ *****************************************************************************/
+
+/**
+ * @typedef {function(string, boolean=, string=, boolean=):?function(Object):*}
+ */
+angular.$interpolate;
+
+/******************************************************************************
  * $interval Service
  *****************************************************************************/
 
@@ -1549,6 +1670,20 @@ angular.$interval_;
  * @type {function(!angular.$q.Promise):boolean}
  */
 angular.$interval_.cancel = function(promise) {};
+
+/******************************************************************************
+ * $locale Service
+ *****************************************************************************/
+
+/**
+ * @interface
+ */
+angular.$locale = function() {};
+
+/**
+ * @type {string}
+ */
+angular.$locale.prototype.id;
 
 /******************************************************************************
  * $location Service
@@ -1608,7 +1743,8 @@ angular.$location.protocol = function() {};
 angular.$location.replace = function() {};
 
 /**
- * @param {(string|Object.<string, string>)=} opt_search
+ * @param {(string|Object.<string, string>|Object.<string, Array.<string>>)=}
+ *     opt_search
  * @param {?(string|Array.<string>|boolean|number)=} opt_paramValue
  * @return {(!Object|angular.$location)}
  */
@@ -1655,6 +1791,19 @@ angular.$locationProvider.hashPrefix = function(opt_prefix) {};
  * @return {boolean|!angular.$locationProvider}
  */
 angular.$locationProvider.html5Mode = function(opt_mode) {};
+
+/******************************************************************************
+ * $logProvider Service
+ *****************************************************************************/
+
+/** @constructor */
+angular.$logProvider = function() {};
+
+/**
+ * @param {boolean=} opt_debugEnabled
+ * @return {*}
+ */
+angular.$logProvider.prototype.debugEnabled = function(opt_debugEnabled) {};
 
 /******************************************************************************
  * $log Service
@@ -1821,6 +1970,11 @@ angular.NgModelController.prototype.$validate = function() {};
  * @type {function()}
  */
 angular.NgModelController.prototype.$commitViewValue = function() {};
+
+/**
+ * @type {!Object.<string, boolean>|undefined}
+ */
+angular.NgModelController.prototype.$pending;
 
 /******************************************************************************
  * FormController
@@ -2114,7 +2268,7 @@ angular.$routeProvider.when = function(path, route) {};
  *   controller: (angular.Injectable|string|undefined),
  *   controllerAs: (string|undefined),
  *   template: (string|undefined),
- *   templateUrl: (string|function(!Object.<string,string>=)|undefined),
+ *   templateUrl: (string|!Object|function(!Object.<string,string>=)|undefined),
  *   resolve: (Object.<string, (
  *       string|angular.Injectable|!angular.$q.Promise
  *       )>|undefined),

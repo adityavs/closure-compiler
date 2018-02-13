@@ -21,14 +21,13 @@ import com.google.common.collect.Multimap;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.jscomp.NodeTraversal.Callback;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
-
 import java.util.HashSet;
 import java.util.Set;
 
 /**
  * Finds all method declarations and pulls them into data structures
  * for use during cleanups such as arity checks or inlining.
+ *
  *
  */
 abstract class MethodCompilerPass implements CompilerPass {
@@ -44,8 +43,7 @@ abstract class MethodCompilerPass implements CompilerPass {
   // Use a linked map here to keep the output deterministic.  Otherwise,
   // the choice of method bodies is random when multiple identical definitions
   // are found which causes problems in the source maps.
-  final Multimap<String, Node> methodDefinitions =
-      LinkedHashMultimap.create();
+  final Multimap<String, Node> methodDefinitions = LinkedHashMultimap.create();
 
   final AbstractCompiler compiler;
 
@@ -71,11 +69,11 @@ abstract class MethodCompilerPass implements CompilerPass {
     methodDefinitions.clear();
 
     if (externs != null) {
-      NodeTraversal.traverse(compiler, externs, new GetExternMethods());
+      NodeTraversal.traverseEs6(compiler, externs, new GetExternMethods());
     }
 
-    NodeTraversal.traverseRoots(compiler, new GatherSignatures(), externs, root);
-    NodeTraversal.traverseRoots(compiler, getActingCallback(), externs, root);
+    NodeTraversal.traverseRootsEs6(compiler, new GatherSignatures(), externs, root);
+    NodeTraversal.traverseRootsEs6(compiler, getActingCallback(), externs, root);
   }
 
   /**
@@ -121,10 +119,10 @@ abstract class MethodCompilerPass implements CompilerPass {
 
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
-      switch (n.getType()) {
-        case Token.GETPROP:
-        case Token.GETELEM: {
-          Node dest = n.getFirstChild().getNext();
+      switch (n.getToken()) {
+        case GETPROP:
+        case GETELEM: {
+          Node dest = n.getSecondChild();
 
           if (!dest.isString()) {
             return;
@@ -138,9 +136,8 @@ abstract class MethodCompilerPass implements CompilerPass {
           //          name methods
           //          string setTimeout
           //      function
-          if (parent.isAssign() &&
-              parent.getFirstChild() == n &&
-              n.getNext().isFunction()) {
+          if (parent.isAssign() && parent.getFirstChild() == n && n.getNext().isFunction()) {
+
             addSignature(name, n.getNext(), t.getSourceName());
           } else {
             getSignatureStore().removeSignature(name);
@@ -148,14 +145,15 @@ abstract class MethodCompilerPass implements CompilerPass {
           }
 
           externMethods.add(name);
-        } break;
+        }
+        break;
 
-        case Token.OBJECTLIT: {
+        case CLASS_MEMBERS:
+        case OBJECTLIT: {
           for (Node key = n.getFirstChild(); key != null; key = key.getNext()) {
             Node value = key.getFirstChild();
             String name = key.getString();
-            if (key.isStringKey()
-                && value.isFunction()) {
+            if (key.isStringKey() && value.isFunction()) {
               addSignature(name, value, t.getSourceName());
             } else {
               getSignatureStore().removeSignature(name);
@@ -164,6 +162,8 @@ abstract class MethodCompilerPass implements CompilerPass {
             externMethods.add(name);
           }
         } break;
+        default:
+          break;
       }
     }
   }
@@ -175,10 +175,10 @@ abstract class MethodCompilerPass implements CompilerPass {
 
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
-      switch (n.getType()) {
-        case Token.GETPROP:
-        case Token.GETELEM:
-          Node dest = n.getFirstChild().getNext();
+      switch (n.getToken()) {
+        case GETPROP:
+        case GETELEM:
+          Node dest = n.getSecondChild();
 
           if (dest.isString()) {
             if (dest.getString().equals("prototype")) {
@@ -192,29 +192,33 @@ abstract class MethodCompilerPass implements CompilerPass {
               //          name Foo
               //          string bar
               //      function or name  <- n.getNext()
-              if (parent.isAssign() &&
-                  parent.getFirstChild() == n) {
+              if (parent.isAssign() && parent.getFirstChild() == n) {
                 addPossibleSignature(dest.getString(), n.getNext(), t);
               }
             }
           }
           break;
 
-        case Token.OBJECTLIT:
+        case OBJECTLIT:
+        case CLASS_MEMBERS:
           for (Node key = n.getFirstChild(); key != null; key = key.getNext()) {
-            switch(key.getType()) {
-              case Token.STRING_KEY:
+            switch (key.getToken()) {
+              case MEMBER_FUNCTION_DEF:
+              case STRING_KEY:
                 addPossibleSignature(key.getString(), key.getFirstChild(), t);
                 break;
-              case Token.SETTER_DEF:
-              case Token.GETTER_DEF:
+              case SETTER_DEF:
+              case GETTER_DEF:
                 nonMethodProperties.add(key.getString());
                 break;
+              case COMPUTED_PROP: // complicated
+                break;
               default:
-                throw new IllegalStateException(
-                    "unexpect OBJECTLIT key: " + key);
+                throw new IllegalStateException("unexpected OBJECTLIT key: " + key);
             }
           }
+          break;
+        default:
           break;
       }
     }
@@ -225,7 +229,7 @@ abstract class MethodCompilerPass implements CompilerPass {
      * an assignment (in the case of Foo.prototype = ...).
      */
     private void processPrototypeParent(NodeTraversal t, Node n) {
-      switch (n.getType()) {
+      switch (n.getToken()) {
         // Foo.prototype.getBar = function() { ... } or
         // Foo.prototype.getBar = getBaz (where getBaz is a function)
         // parse tree looks like:
@@ -236,17 +240,18 @@ abstract class MethodCompilerPass implements CompilerPass {
         //             string prototype
         //         string getBar
         //     function or name            <- assignee
-        case Token.GETPROP:
-        case Token.GETELEM:
-          Node dest = n.getFirstChild().getNext();
-          Node parent = n.getParent().getParent();
+        case GETPROP:
+        case GETELEM:
+          Node dest = n.getSecondChild();
+          Node parent = n.getGrandparent();
 
-          if (dest.isString() &&
-              parent.isAssign()) {
-            Node assignee = parent.getFirstChild().getNext();
+          if (dest.isString() && parent.isAssign()) {
+            Node assignee = parent.getSecondChild();
 
             addPossibleSignature(dest.getString(), assignee, t);
           }
+          break;
+        default:
           break;
       }
     }

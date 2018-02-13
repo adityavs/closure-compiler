@@ -15,34 +15,28 @@
  */
 package com.google.javascript.jscomp;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableSet;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
-import com.google.javascript.jscomp.TypeValidator.TypeMismatch;
+import com.google.javascript.rhino.FunctionTypeI;
 import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.TypeIRegistry;
-import com.google.javascript.rhino.jstype.FunctionType;
-import com.google.javascript.rhino.jstype.JSType;
+import com.google.javascript.rhino.TypeI;
 import com.google.javascript.rhino.jstype.JSTypeNative;
-import com.google.javascript.rhino.jstype.ObjectType;
-
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 
 /**
- * InlineProperties attempts to find references to properties that are known to
- * be constants and inline the known value.
+ * InlineProperties attempts to find references to properties that are known to be constants and
+ * inline the known value.
  *
- * This pass relies on type information to find these property references and
- * properties are assumed to be constant if either:
- *   - the property is assigned unconditionally in the instance constructor
- *   - the property is assigned unconditionally to the type's prototype
+ * <p>This pass relies on type information to find these property references and properties are
+ * assumed to be constant if they are assigned exactly once, unconditionally, in either of the
+ * following contexts: (1) statically on a constructor, or (2) on a class's prototype.
  *
- * The current implementation only inlines immutable values (as defined by
+ * <p>The current implementation only inlines immutable values (as defined by
  * NodeUtil.isImmutableValue).
  *
  * @author johnlenz@google.com (John Lenz)
@@ -51,53 +45,34 @@ final class InlineProperties implements CompilerPass {
 
   private final AbstractCompiler compiler;
 
-  static class PropertyInfo {
-    PropertyInfo(JSType type, Node value) {
+  private static class PropertyInfo {
+    PropertyInfo(TypeI type, Node value) {
       this.type = type;
       this.value = value;
     }
-    final JSType type;
+    final TypeI type;
     final Node value;
   }
 
-  private static final PropertyInfo INVALIDATED = new PropertyInfo(
-      null, null);
+  private static final PropertyInfo INVALIDATED = new PropertyInfo(null, null);
 
   private final Map<String, PropertyInfo> props = new HashMap<>();
 
-  private Set<JSType> invalidatingTypes;
+  private final InvalidatingTypes invalidatingTypes;
 
   InlineProperties(AbstractCompiler compiler) {
     this.compiler = compiler;
-    buildInvalidatingTypeSet();
+    this.invalidatingTypes = new InvalidatingTypes.Builder(compiler.getTypeIRegistry())
+        // TODO(sdh): consider allowing inlining properties of global this
+        // (we already reserve extern'd names, so this should be safe).
+        .disallowGlobalThis()
+        .addTypesInvalidForPropertyRenaming()
+        // NOTE: Mismatches are less important to this pass than to (dis)ambiguate properties.
+        // This pass doesn't remove values (it only inlines them when the type is known), so
+        // it isn't necessary to invalidate due to implicit interface uses.
+        .addAllTypeMismatches(compiler.getTypeMismatches())
+        .build();
     invalidateExternProperties();
-  }
-
-  // TODO(johnlenz): this is a direct copy of the invalidation code
-  // from AmbiguateProperties, if in the end we don't need to modify it
-  // we should move it to a common location.
-  private void buildInvalidatingTypeSet() {
-    TypeIRegistry registry = compiler.getTypeIRegistry();
-    invalidatingTypes = new HashSet<>(ImmutableSet.of(
-        (JSType) registry.getNativeType(JSTypeNative.ALL_TYPE),
-        (JSType) registry.getNativeType(JSTypeNative.NO_OBJECT_TYPE),
-        (JSType) registry.getNativeType(JSTypeNative.NO_TYPE),
-        (JSType) registry.getNativeType(JSTypeNative.NULL_TYPE),
-        (JSType) registry.getNativeType(JSTypeNative.VOID_TYPE),
-        (JSType) registry.getNativeType(JSTypeNative.FUNCTION_FUNCTION_TYPE),
-        (JSType) registry.getNativeType(JSTypeNative.FUNCTION_INSTANCE_TYPE),
-        (JSType) registry.getNativeType(JSTypeNative.FUNCTION_PROTOTYPE),
-        (JSType) registry.getNativeType(JSTypeNative.GLOBAL_THIS),
-        (JSType) registry.getNativeType(JSTypeNative.OBJECT_TYPE),
-        (JSType) registry.getNativeType(JSTypeNative.OBJECT_PROTOTYPE),
-        (JSType) registry.getNativeType(JSTypeNative.OBJECT_FUNCTION_TYPE),
-        (JSType) registry.getNativeType(JSTypeNative.TOP_LEVEL_PROTOTYPE),
-        (JSType) registry.getNativeType(JSTypeNative.UNKNOWN_TYPE)));
-
-    for (TypeMismatch mis : compiler.getTypeMismatches()) {
-      addInvalidatingType(mis.typeA);
-      addInvalidatingType(mis.typeB);
-    }
   }
 
   private void invalidateExternProperties() {
@@ -107,65 +82,21 @@ final class InlineProperties implements CompilerPass {
     }
   }
 
-  /**
-   * Invalidates the given type, so that no properties on it will be renamed.
-   */
-  private void addInvalidatingType(JSType type) {
-    type = type.restrictByNotNullOrUndefined();
-    if (type.isUnionType()) {
-      for (JSType alt : type.toMaybeUnionType().getAlternatesWithoutStructuralTyping()) {
-        addInvalidatingType(alt);
-      }
-    }
-
-    invalidatingTypes.add(type);
-    ObjectType objType = ObjectType.cast(type);
-    if (objType != null && objType.isInstanceType()) {
-      invalidatingTypes.add(objType.getImplicitPrototype());
-    }
-  }
-
-  /** Returns true if properties on this type should not be renamed. */
-  private boolean isInvalidatingType(JSType type) {
-    if (type.isUnionType()) {
-      type = type.restrictByNotNullOrUndefined();
-      if (type.isUnionType()) {
-        for (JSType alt : type.toMaybeUnionType().getAlternatesWithoutStructuralTyping()) {
-          if (isInvalidatingType(alt)) {
-            return true;
-          }
-        }
-        return false;
-      }
-    }
-    ObjectType objType = ObjectType.cast(type);
-    return objType == null
-        || invalidatingTypes.contains(objType)
-        || !objType.hasReferenceName()
-        || objType.isUnknownType()
-        || objType.isEmptyType() /* unresolved types */
-        || objType.isEnumType()
-        || objType.autoboxesTo() != null;
-  }
-
-  /**
-   * This method gets the JSType from the Node argument and verifies that it is
-   * present.
-   */
-  private JSType getJSType(Node n) {
-    JSType jsType = n.getJSType();
-    if (jsType == null) {
+  /** This method gets the JSType from the Node argument and verifies that it is present. */
+  private TypeI getTypeI(Node n) {
+    TypeI type = n.getTypeI();
+    if (type == null) {
       return compiler.getTypeIRegistry().getNativeType(JSTypeNative.UNKNOWN_TYPE);
     } else {
-      return jsType;
+      return type;
     }
   }
 
   @Override
   public void process(Node externs, Node root) {
     // Find and replace the properties in non-extern AST.
-    NodeTraversal.traverse(compiler, root, new GatherCandidates());
-    NodeTraversal.traverse(compiler, root, new ReplaceCandidates());
+    NodeTraversal.traverseEs6(compiler, root, new GatherCandidates());
+    NodeTraversal.traverseEs6(compiler, root, new ReplaceCandidates());
   }
 
   class GatherCandidates extends AbstractPostOrderCallback {
@@ -177,7 +108,7 @@ final class InlineProperties implements CompilerPass {
       if (n.isGetProp()) {
         propName = n.getLastChild().getString();
         if (parent.isAssign()) {
-          invalidatingPropRef = !maybeCandidateDefinition(t, n, parent);
+          invalidatingPropRef = !isValidCandidateDefinition(t, n, parent);
         } else if (NodeUtil.isLValue(n)) {
           // Other LValue references invalidate
           invalidatingPropRef = true;
@@ -193,22 +124,19 @@ final class InlineProperties implements CompilerPass {
         // For now, any object literal key invalidates
         // TODO(johnlenz): support prototype properties like:
         //   foo.prototype = { a: 1, b: 2 };
+        // TODO(johnlenz): Object.create(), Object.createProperty
         invalidatingPropRef = true;
       }
 
       if (invalidatingPropRef) {
-        Preconditions.checkNotNull(propName);
+        checkNotNull(propName);
         invalidateProperty(propName);
       }
     }
 
-    /**
-     * @return Whether this is a valid definition for a candidate property.
-     */
-    private boolean maybeCandidateDefinition(
-        NodeTraversal t, Node n, Node parent) {
-      Preconditions.checkState(n.isGetProp() && parent.isAssign());
-      boolean isCandidate = false;
+    /** @return Whether this is a valid definition for a candidate property. */
+    private boolean isValidCandidateDefinition(NodeTraversal t, Node n, Node parent) {
+      checkState(n.isGetProp() && parent.isAssign(), n);
       Node src = n.getFirstChild();
       String propName = n.getLastChild().getString();
 
@@ -218,27 +146,32 @@ final class InlineProperties implements CompilerPass {
         //    this.foo = 1;
         if (inConstructor(t)) {
           // This maybe a valid assignment.
-          isCandidate = maybeStoreCandidateValue(
-              getJSType(src), propName, value);
+          return maybeStoreCandidateValue(getTypeI(src), propName, value);
         }
-      } else if (t.inGlobalScope()
+      } else if (t.inGlobalHoistScope()
           && src.isGetProp()
           && src.getLastChild().getString().equals("prototype")) {
         // This is a prototype assignment like:
         //    x.prototype.foo = 1;
-        JSType instanceType = maybeGetInstanceTypeFromPrototypeRef(src);
+        TypeI instanceType = maybeGetInstanceTypeFromPrototypeRef(src);
         if (instanceType != null) {
-          isCandidate = maybeStoreCandidateValue(
-              instanceType, propName, value);
+          return maybeStoreCandidateValue(instanceType, propName, value);
+        }
+      } else if (t.inGlobalHoistScope()) {
+        // This is a static assignment like:
+        //    x.foo = 1;
+        TypeI targetType = getTypeI(src);
+        if (targetType != null && targetType.isConstructor()) {
+          return maybeStoreCandidateValue(targetType, propName, value);
         }
       }
-      return isCandidate;
+      return false;
     }
 
-    private JSType maybeGetInstanceTypeFromPrototypeRef(Node src) {
-      JSType ownerType = getJSType(src.getFirstChild());
-      if (ownerType.isFunctionType() && ownerType.isConstructor()) {
-        FunctionType functionType = ((FunctionType) ownerType);
+    private TypeI maybeGetInstanceTypeFromPrototypeRef(Node src) {
+      TypeI ownerType = getTypeI(src.getFirstChild());
+      if (ownerType.isConstructor()) {
+        FunctionTypeI functionType = ownerType.toMaybeFunctionType();
         return functionType.getInstanceType();
       }
       return null;
@@ -248,11 +181,18 @@ final class InlineProperties implements CompilerPass {
       props.put(propName, INVALIDATED);
     }
 
-    private boolean maybeStoreCandidateValue(
-        JSType type, String propName, Node value) {
-      Preconditions.checkNotNull(value);
+    /**
+     * Adds the candidate property to the map if it meets all constness and immutability criteria,
+     * and is not already present in the map. If the property was already present, it is
+     * invalidated. Returns true if the property was successfully added.
+     */
+    private boolean maybeStoreCandidateValue(TypeI type, String propName, Node value) {
+      checkNotNull(value);
+      if (type.toMaybeObjectType() != null) {
+        type = type.toMaybeObjectType().withoutStrayProperties();
+      }
       if (!props.containsKey(propName)
-          && !isInvalidatingType(type)
+          && !invalidatingTypes.isInvalidating(type)
           && NodeUtil.isImmutableValue(value)
           && NodeUtil.isExecutedExactlyOnce(value)) {
         props.put(propName, new PropertyInfo(type, value));
@@ -262,7 +202,10 @@ final class InlineProperties implements CompilerPass {
     }
 
     private boolean inConstructor(NodeTraversal t) {
-      Node root = t.getScopeRoot();
+      Node root = t.getEnclosingFunction();
+      if (root == null) {
+        return false;
+      }
       JSDocInfo info = NodeUtil.getBestJSDocInfo(root);
       return info != null && info.isConstructor();
     }
@@ -283,15 +226,27 @@ final class InlineProperties implements CompilerPass {
             replacement = IR.comma(n.removeFirstChild(), replacement).srcref(n);
           }
           parent.replaceChild(n, replacement);
-          compiler.reportCodeChange();
+          compiler.reportChangeToEnclosingScope(replacement);
         }
       }
     }
 
-    private boolean isMatchingType(Node n, JSType src) {
+    private boolean isMatchingType(Node n, TypeI src) {
       src = src.restrictByNotNullOrUndefined();
-      JSType dest = getJSType(n).restrictByNotNullOrUndefined();
-      return !isInvalidatingType(dest) && dest.isSubtype(src);
+      TypeI dest = getTypeI(n).restrictByNotNullOrUndefined();
+      if (!invalidatingTypes.isInvalidating(dest)) {
+        if (dest.isConstructor() || src.isConstructor()) {
+          // Don't inline constructor properties referenced from
+          // subclass constructor references. This would be appropriate
+          // for ES6 class with Class-side inheritence but not
+          // traditional Closure classes from which subclass constructor
+          // don't inherit the super-classes constructor properties.
+          return dest.equals(src);
+        } else {
+          return dest.isSubtypeOf(src);
+        }
+      }
+      return false;
     }
   }
 }

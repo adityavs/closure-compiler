@@ -16,6 +16,7 @@
 
 package com.google.javascript.jscomp;
 
+import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
 
 /**
  * Tests {@link ConstCheck}.
@@ -23,18 +24,25 @@ package com.google.javascript.jscomp;
  */
 public final class ConstCheckTest extends CompilerTestCase {
 
-  public ConstCheckTest() {
+  @Override
+  protected void setUp() throws Exception {
+    super.setUp();
     enableNormalize();
+    setAcceptedLanguage(LanguageMode.ECMASCRIPT_2017);
   }
 
   @Override
-  public CompilerPass getProcessor(Compiler compiler) {
+  protected CompilerPass getProcessor(Compiler compiler) {
     return new ConstCheck(compiler);
   }
 
   @Override
-  public int getNumRepetitions() {
+  protected int getNumRepetitions() {
     return 1;
+  }
+
+  private void testWarning(String js){
+    testWarning(js, ConstCheck.CONST_REASSIGNED_VALUE_ERROR);
   }
 
   public void testConstantDefinition1() {
@@ -43,6 +51,15 @@ public final class ConstCheckTest extends CompilerTestCase {
 
   public void testConstantDefinition2() {
     testSame("var a$b$XYZ = 1;");
+  }
+
+  public void testConstantDefinition3() {
+    testNoWarning("const xyz=1;");
+  }
+
+  public void testConstantDefinition4() {
+    System.out.println("HELLO");
+    testNoWarning("const a$b$xyz = 1;");
   }
 
   public void testConstantInitializedInAnonymousNamespace1() {
@@ -65,12 +82,22 @@ public final class ConstCheckTest extends CompilerTestCase {
     testError("var XYZ = {}; XYZ = 2;");
   }
 
+  public void testObjectRedefined2() {
+    testError("const xyz = {}; xyz = 2;");
+  }
+
   public void testConstantRedefined1() {
     testError("var XYZ = 1; XYZ = 2;");
   }
 
   public void testConstantRedefined2() {
     testError("var a$b$XYZ = 1; a$b$XYZ = 2;");
+  }
+
+  // test will be caught be earlier pass, but demonstrates that it returns error upon const
+  // reassigning
+  public void testConstantRedefined3() {
+    testWarning("const xyz = 1; xyz = 2;");
   }
 
   public void testConstantRedefinedInLocalScope1() {
@@ -117,12 +144,20 @@ public final class ConstCheckTest extends CompilerTestCase {
     testError("var a$b$XYZ = 1; --a$b$XYZ;");
   }
 
+  public void testConstantPreDecremented3() {
+    testWarning("const xyz = 1; --xyz;");
+  }
+
   public void testAbbreviatedArithmeticAssignment1() {
     testError("var XYZ = 1; XYZ += 2;");
   }
 
   public void testAbbreviatedArithmeticAssignment2() {
     testError("var a$b$XYZ = 1; a$b$XYZ %= 2;");
+  }
+
+  public void testAbbreviatedArithmeticAssignment3() {
+    testError("var a$b$XYZ = 1; a$b$XYZ **= 2;");
   }
 
   public void testAbbreviatedBitAssignment1() {
@@ -141,8 +176,12 @@ public final class ConstCheckTest extends CompilerTestCase {
     testError("var a$b$XYZ = 1; a$b$XYZ <<= 2;");
   }
 
-  public void testConstAnnotation() {
-    testError("/** @const */ var xyz = 1; xyz = 3;");
+  public void testConstAnnotation1() {
+    testWarning("/** @const */ var XYZ = 1; XYZ = 2;");
+  }
+
+  public void testConstAnnotation3() {
+    testWarning("/** @const */ const xyz = 1; xyz = 2;");
   }
 
   public void testConstSuppressionInFileJsDoc() {
@@ -176,7 +215,7 @@ public final class ConstCheckTest extends CompilerTestCase {
   public void testConstSuppressionOnVarFromExterns() {
     String externs = "/** @const */ var xyz;";
     String js = "/** @suppress {const} */ var xyz = 3;";
-    test(externs, js, js, null, null);
+    testSame(externs, js);
   }
 
   public void testConstSuppressionOnInc() {
@@ -186,10 +225,10 @@ public final class ConstCheckTest extends CompilerTestCase {
   public void testConstNameInExterns() {
     String externs = "/** @const */ var FOO;";
     String js = "FOO = 1;";
-    test(externs, js, (String) null, ConstCheck.CONST_REASSIGNED_VALUE_ERROR, null);
+    testWarning(externs, js, ConstCheck.CONST_REASSIGNED_VALUE_ERROR);
   }
 
   private void testError(String js) {
-    testError(js, ConstCheck.CONST_REASSIGNED_VALUE_ERROR);
+    testWarning(js, ConstCheck.CONST_REASSIGNED_VALUE_ERROR);
   }
 }

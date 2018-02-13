@@ -16,6 +16,9 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.base.Preconditions;
 import com.google.javascript.jscomp.TypeMatchingStrategy.MatchResult;
 import com.google.javascript.rhino.IR;
@@ -23,8 +26,8 @@ import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.JSTypeExpression;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
-import com.google.javascript.rhino.jstype.JSType;
-
+import com.google.javascript.rhino.TypeI;
+import com.google.javascript.rhino.TypeIRegistry;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -39,10 +42,11 @@ import java.util.Map;
  */
 public final class TemplateAstMatcher {
   // Custom Token types for to use as placeholders in the template AST.
-  private static final int TEMPLATE_TYPE_PARAM = Token.PLACEHOLDER1;
-  private static final int TEMPLATE_LOCAL_NAME = Token.PLACEHOLDER2;
+  private static final Token TEMPLATE_TYPE_PARAM = Token.PLACEHOLDER1;
+  private static final Token TEMPLATE_LOCAL_NAME = Token.PLACEHOLDER2;
+  private static final Token TEMPLATE_STRING_LITERAL = Token.PLACEHOLDER3;
 
-  private final AbstractCompiler compiler;
+  private final TypeIRegistry typeRegistry;
 
   /**
    * The head of the Node list that should be used to start the matching
@@ -69,15 +73,23 @@ public final class TemplateAstMatcher {
   private final ArrayList<String> localVarMatches = new ArrayList<>();
 
   /**
+   * The names of all matched string literals, in order.
+   *
+   * <p>This re-uses strings already present in the AST, which is faster and simpler than keeping an
+   * additional layer of indirection.
+   */
+  private final HashMap<String, Node> stringLiteralMatches = new HashMap<>();
+
+  /**
    * Record whether the last successful was a loosely matched type, only valid
    * for the last match if it was successful.
    */
   private boolean isLooseMatch = false;
 
   /**
-   * The strategy to use when matching the {@code JSType} of nodes.
+   * The strategy to use when matching the {@code TypeI} of nodes.
    */
-  private TypeMatchingStrategy typeMatchingStrategy;
+  private final TypeMatchingStrategy typeMatchingStrategy;
 
   /**
    * Constructs this matcher with a Function node that serves as the template
@@ -85,28 +97,18 @@ public final class TemplateAstMatcher {
    * to match against.
    */
   public TemplateAstMatcher(
-      AbstractCompiler compiler, Node templateFunctionNode) {
-    this(compiler, templateFunctionNode, TypeMatchingStrategy.DEFAULT);
-  }
-
-  /**
-   * Constructs this matcher with a Function node that serves as the template
-   * to match all other nodes against. The body of the function will be used
-   * to match against.
-   */
-  public TemplateAstMatcher(
-      AbstractCompiler compiler,
+      TypeIRegistry typeRegistry,
       Node templateFunctionNode,
       TypeMatchingStrategy typeMatchingStrategy) {
-    Preconditions.checkNotNull(compiler);
+    checkNotNull(typeRegistry);
     Preconditions.checkState(
         templateFunctionNode.isFunction(),
         "Template node must be a function node. Received: %s",
         templateFunctionNode);
 
-    this.compiler = compiler;
+    this.typeRegistry = typeRegistry;
     this.templateStart = initTemplate(templateFunctionNode);
-    this.typeMatchingStrategy = typeMatchingStrategy;
+    this.typeMatchingStrategy = checkNotNull(typeMatchingStrategy);
   }
 
   /**
@@ -140,7 +142,7 @@ public final class TemplateAstMatcher {
    * template.
    */
   public Map<String, Node> getTemplateNodeToMatchMap() {
-    Map<String, Node> map = new HashMap<>();
+    Map<String, Node> map = new HashMap<>(stringLiteralMatches);
 
     for (int i = 0; i < templateParams.size(); i++) {
       String name = templateParams.get(i);
@@ -171,7 +173,7 @@ public final class TemplateAstMatcher {
     if (body.hasOneChild() && body.getFirstChild().isExprResult()) {
       // When matching an expression, don't require it to be a complete
       // statement.
-      startNode = body.getFirstChild().getFirstChild();
+      startNode = body.getFirstFirstChild();
     } else {
       startNode = body.getFirstChild();
     }
@@ -196,14 +198,14 @@ public final class TemplateAstMatcher {
   private void prepTemplatePlaceholders(Node fn) {
     final List<String> locals = templateLocals;
     final List<String> params = templateParams;
-    final Map<String, JSType> paramTypes = new HashMap<>();
+    final Map<String, TypeI> paramTypes = new HashMap<>();
 
     // drop the function name so it isn't include in the name maps
     String fnName = fn.getFirstChild().getString();
     fn.getFirstChild().setString("");
 
     // Build a list of parameter names and types.
-    Node templateParametersNode = fn.getFirstChild().getNext();
+    Node templateParametersNode = fn.getSecondChild();
     JSDocInfo info = NodeUtil.getBestJSDocInfo(fn);
     if (templateParametersNode.hasChildren()) {
       Preconditions.checkNotNull(info,
@@ -215,34 +217,37 @@ public final class TemplateAstMatcher {
       Preconditions.checkNotNull(expression,
           "Missing JSDoc for parameter %s of template function %s",
           name, fnName);
-      JSType type = expression.evaluate(null, compiler.getTypeIRegistry());
-      Preconditions.checkNotNull(type);
+      TypeI type = typeRegistry.evaluateTypeExpressionInGlobalScope(expression);
+      checkNotNull(type);
       params.add(name);
       paramTypes.put(name, type);
     }
 
-    // Find references to local variables and parameters and replace them.
-    traverse(fn, new Visitor() {
-      @Override
-      public void visit(Node n) {
-        if (n.isName()) {
-          Node parent = n.getParent();
-          String name = n.getString();
-          if (!name.isEmpty() && parent.isVar() && !locals.contains(name)) {
-            locals.add(n.getString());
-          }
+    // Find references to string literals, local variables and parameters and replace them.
+    traverse(
+        fn,
+        new Visitor() {
+          @Override
+          public void visit(Node n) {
+            if (n.isName()) {
+              Node parent = n.getParent();
+              String name = n.getString();
+              if (!name.isEmpty() && parent.isVar() && !locals.contains(name)) {
+                locals.add(n.getString());
+              }
 
-          if (params.contains(name)) {
-            JSType type = paramTypes.get(name);
-            replaceNodeInPlace(n,
-                createTemplateParameterNode(params.indexOf(name), type));
-          } else if (locals.contains(name)) {
-            replaceNodeInPlace(n,
-                createTemplateLocalNameNode(locals.indexOf(name)));
+              if (params.contains(name)) {
+                TypeI type = paramTypes.get(name);
+                boolean isStringLiteral =
+                    type.isStringValueType() && name.startsWith("string_literal");
+                replaceNodeInPlace(
+                    n, createTemplateParameterNode(params.indexOf(name), type, isStringLiteral));
+              } else if (locals.contains(name)) {
+                replaceNodeInPlace(n, createTemplateLocalNameNode(locals.indexOf(name)));
+              }
+            }
           }
-        }
-      }
-    });
+        });
   }
 
   void replaceNodeInPlace(Node n, Node replacement) {
@@ -276,31 +281,37 @@ public final class TemplateAstMatcher {
   }
 
   private boolean isTemplateParameterNode(Node n) {
-    return (n.getType() == TEMPLATE_TYPE_PARAM);
+    return (n.getToken() == TEMPLATE_TYPE_PARAM);
   }
 
-  private Node createTemplateParameterNode(int index, JSType type) {
-    Preconditions.checkState(index >= 0);
-    Preconditions.checkNotNull(type);
+  private boolean isTemplateParameterStringLiteralNode(Node n) {
+    return (n.getToken() == TEMPLATE_STRING_LITERAL);
+  }
+
+  /** Creates a template parameter or string literal template node. */
+  private Node createTemplateParameterNode(int index, TypeI type, boolean isStringLiteral) {
+    checkState(index >= 0);
+    checkNotNull(type);
     Node n = Node.newNumber(index);
-    n.setType(TEMPLATE_TYPE_PARAM);
-    n.setJSType(type);
+    if (isStringLiteral) {
+      n.setToken(TEMPLATE_STRING_LITERAL);
+    } else {
+      n.setToken(TEMPLATE_TYPE_PARAM);
+    }
+    n.setTypeI(type);
     return n;
   }
 
   private boolean isTemplateLocalNameNode(Node n) {
-    return (n.getType() == TEMPLATE_LOCAL_NAME);
+    return (n.getToken() == TEMPLATE_LOCAL_NAME);
   }
 
   private Node createTemplateLocalNameNode(int index) {
-    Preconditions.checkState(index >= 0);
+    checkState(index >= 0);
     Node n = Node.newNumber(index);
-    n.setType(TEMPLATE_LOCAL_NAME);
+    n.setToken(TEMPLATE_LOCAL_NAME);
     return n;
   }
-
-
-
 
   /**
    * Returns whether the template matches an AST structure node starting with
@@ -324,11 +335,13 @@ public final class TemplateAstMatcher {
     if (isTemplateParameterNode(template)) {
       // Match the entire expression but only if it is an expression.
       return !NodeUtil.isStatement(ast);
-    } else  if (isTemplateLocalNameNode(template)) {
+    } else if (isTemplateLocalNameNode(template)) {
       // Match any name. Maybe match locals here.
       if (!ast.isName()) {
         return false;
       }
+    } else if (isTemplateParameterStringLiteralNode(template)) {
+      return NodeUtil.isStringLiteralValue(ast);
     } else if (template.isCall()) {
       // Loosely match CALL nodes. isEquivalentToShallow checks free calls against non-free calls,
       // but the template should ignore that distinction.
@@ -366,12 +379,12 @@ public final class TemplateAstMatcher {
   }
 
   /**
-   * Returns whether two nodes are equivalent, taking into account the template
-   * parameters that were provided to this matcher. If the template comparison
-   * node is a parameter node, then only the types of the node must match.
-   * Otherwise, the node must be equal and the child nodes must be equivalent
-   * according to the same function. This differs from the built in
-   * Node equivalence function with the special comparison.
+   * Returns whether two nodes are equivalent, taking into account the template parameters that were
+   * provided to this matcher. If the template comparison node is a parameter node, then only the
+   * types of the node must match. If the template node is a string literal, only match string
+   * literals. Otherwise, the node must be equal and the child nodes must be equivalent according to
+   * the same function. This differs from the built in Node equivalence function with the special
+   * comparison.
    */
   private boolean matchesNode(Node template, Node ast) {
     if (isTemplateParameterNode(template)) {
@@ -385,18 +398,18 @@ public final class TemplateAstMatcher {
 
       // Only the types need to match for the template parameters, which allows
       // the template function to express arbitrary expressions.
-      JSType templateType = template.getJSType();
+      TypeI templateType = template.getTypeI();
 
-      Preconditions.checkNotNull(templateType, "null template parameter type.");
+      checkNotNull(templateType, "null template parameter type.");
 
       // TODO(johnlenz): We shouldn't spend time checking template whose
       // types whose definitions aren't included (NoResolvedType). Alternately
       // we should treat them as "unknown" and perform loose matches.
-      if (templateType.isNoResolvedType()) {
+      if (isUnresolvedType(templateType)) {
         return false;
       }
 
-      MatchResult matchResult = typeMatchingStrategy.match(templateType, ast.getJSType());
+      MatchResult matchResult = typeMatchingStrategy.match(templateType, ast.getTypeI());
       isLooseMatch = matchResult.isLooseMatch();
       boolean isMatch = matchResult.isMatch();
       if (isMatch && previousMatch == null) {
@@ -427,8 +440,22 @@ public final class TemplateAstMatcher {
         // subsequent usages of the same named node are equivalent.
         return ast.getString().equals(this.localVarMatches.get(paramIndex));
       } else {
-        this.localVarMatches.set(paramIndex, ast.getString());
+        String originalName = ast.getOriginalName();
+        String name = (originalName != null) ? originalName : ast.getString();
+        this.localVarMatches.set(paramIndex, name);
       }
+    } else if (isTemplateParameterStringLiteralNode(template)) {
+      int paramIndex = (int) (template.getDouble());
+      Node previousMatch = paramNodeMatches.get(paramIndex);
+      if (previousMatch != null) {
+        return ast.isEquivalentTo(previousMatch);
+      }
+
+      if (NodeUtil.isStringLiteralValue(ast)) {
+        paramNodeMatches.set(paramIndex, ast);
+        return true;
+      }
+      return false;
     }
 
     // Template and AST shape has already been checked, but continue look for
@@ -444,5 +471,24 @@ public final class TemplateAstMatcher {
     }
 
     return true;
+  }
+
+  private boolean isUnresolvedType(TypeI type) {
+    // TODO(mknichel): When types are used in templates that do not appear in the
+    // compilation unit being processed, the template type will be a named type
+    // that resolves to unknown instead of being a no resolved type. This should
+    // be fixed in the compiler such that it resolves to a no resolved type, and
+    // then this code can be simplified to use that.
+    if (type.isUnresolvedOrResolvedUnknown()) {
+      return true;
+    }
+    if (type.isUnionType()) {
+      for (TypeI alternate : type.getUnionMembers()) {
+        if (isUnresolvedType(alternate)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 }

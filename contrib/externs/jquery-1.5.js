@@ -289,7 +289,7 @@ jQuery.prototype.click = function(arg1, handler) {};
  * @param {boolean=} withDataAndEvents
  * @param {boolean=} deepWithDataAndEvents
  * @return {jQuery}
- * @suppress {checkTypes} http://code.google.com/p/closure-compiler/issues/detail?id=583
+ * @suppress {checkTypes} http://blickly.github.io/closure-compiler-issues/#583
  */
 jQuery.prototype.clone = function(withDataAndEvents, deepWithDataAndEvents) {};
 
@@ -1309,13 +1309,13 @@ jQuery.noConflict = function(removeAll) {};
 $.noConflict = function(removeAll) {};
 
 /**
- * @return {function()}
+ * @return {undefined}
  * @nosideeffects
  */
 jQuery.noop = function() {};
 
 /**
- * @return {function()}
+ * @return {undefined}
  * @nosideeffects
  */
 $.noop = function() {};

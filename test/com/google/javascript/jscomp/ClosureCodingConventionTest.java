@@ -22,14 +22,14 @@ import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.jstype.FunctionType;
 import com.google.javascript.rhino.jstype.JSTypeRegistry;
-
+import com.google.javascript.rhino.jstype.NominalTypeBuilderOti;
 import junit.framework.TestCase;
 
 /**
  * Test class for {@link GoogleCodingConvention}.
  */
 public final class ClosureCodingConventionTest extends TestCase {
-  private ClosureCodingConvention conv = new ClosureCodingConvention();
+  private final ClosureCodingConvention conv = new ClosureCodingConvention();
 
   public void testVarAndOptionalParams() {
     Node args = new Node(Token.PARAM_LIST,
@@ -103,7 +103,7 @@ public final class ClosureCodingConventionTest extends TestCase {
   }
 
   public void testInheritanceDetection3() {
-    assertDefinesClasses("A.inherits(B);", "A", "B");
+    assertNotClassDefining("A.inherits(B);");
   }
 
   public void testInheritanceDetection4() {
@@ -111,7 +111,7 @@ public final class ClosureCodingConventionTest extends TestCase {
   }
 
   public void testInheritanceDetection5() {
-    assertDefinesClasses("goog.A.inherits(goog.B);", "goog.A", "goog.B");
+    assertNotClassDefining("goog.A.inherits(goog.B);");
   }
 
   public void testInheritanceDetection6() {
@@ -127,8 +127,7 @@ public final class ClosureCodingConventionTest extends TestCase {
   }
 
   public void testInheritanceDetection9() {
-    assertDefinesClasses("A.mixin(B.prototype);",
-        "A", "B");
+    assertNotClassDefining("A.mixin(B.prototype);");
   }
 
   public void testInheritanceDetection10() {
@@ -170,6 +169,11 @@ public final class ClosureCodingConventionTest extends TestCase {
     assertNotObjectLiteralCast("goog.reflect.object(A);");
     assertNotObjectLiteralCast("goog.reflect.object(1, {});");
     assertObjectLiteralCast("goog.reflect.object(A, {});");
+
+    assertNotObjectLiteralCast("$jscomp.reflectObject();");
+    assertNotObjectLiteralCast("$jscomp.reflectObject(A);");
+    assertNotObjectLiteralCast("$jscomp.reflectObject(1, {});");
+    assertObjectLiteralCast("$jscomp.reflectObject(A, {});");
   }
 
   public void testFunctionBind() {
@@ -213,20 +217,34 @@ public final class ClosureCodingConventionTest extends TestCase {
     JSTypeRegistry registry = new JSTypeRegistry(null);
 
     Node nodeA = new Node(Token.FUNCTION);
-    FunctionType ctorA = registry.createConstructorType("A", nodeA,
-        new Node(Token.PARAM_LIST), null, null);
+    FunctionType ctorA =
+        registry.createConstructorType("A", nodeA, new Node(Token.PARAM_LIST), null, null, false);
 
     Node nodeB = new Node(Token.FUNCTION);
-    FunctionType ctorB = registry.createConstructorType("B", nodeB,
-        new Node(Token.PARAM_LIST), null, null);
+    FunctionType ctorB =
+        registry.createConstructorType("B", nodeB, new Node(Token.PARAM_LIST), null, null, false);
 
-    conv.applySubclassRelationship(ctorA, ctorB, SubclassType.INHERITS);
+    conv.applySubclassRelationship(
+        new NominalTypeBuilderOti(ctorA, ctorA.getInstanceType()),
+        new NominalTypeBuilderOti(ctorB, ctorB.getInstanceType()),
+        SubclassType.INHERITS);
 
     assertTrue(ctorB.getPrototype().hasOwnProperty("constructor"));
     assertEquals(nodeB, ctorB.getPrototype().getPropertyNode("constructor"));
 
     assertTrue(ctorB.hasOwnProperty("superClass_"));
     assertEquals(nodeB, ctorB.getPropertyNode("superClass_"));
+  }
+
+  public void testDescribeCachingCall() {
+    assertCachingCall("goog.reflect.cache(obj, 10, function() {})");
+    assertCachingCall("goog.reflect.cache(obj, 10, function() {}, function() {})");
+    assertCachingCall("goog$reflect$cache(obj, 10, function() {})");
+    assertCachingCall("goog$reflect$cache(obj, 10, function() {}, function() {})");
+    assertNotCachingCall("goog.reflect.cache()");
+    assertNotCachingCall("goog.reflect.cache(obj)");
+    assertNotCachingCall("goog.reflect.cache(obj, 10)");
+    assertNotCachingCall("foo.cache(obj, 10, function() {}, function() {})");
   }
 
   private void assertFunctionBind(String code) {
@@ -272,6 +290,16 @@ public final class ClosureCodingConventionTest extends TestCase {
     assertNotNull(classes);
     assertEquals(subclassName, classes.subclassName);
     assertEquals(superclassName, classes.superclassName);
+  }
+
+  private void assertCachingCall(String code) {
+    Node node = parseTestCode(code);
+    assertNotNull(conv.describeCachingCall(node.getFirstChild()));
+  }
+
+  private void assertNotCachingCall(String code) {
+    Node node = parseTestCode(code);
+    assertNull(conv.describeCachingCall(node.getFirstChild()));
   }
 
   private Node parseTestCode(String code) {

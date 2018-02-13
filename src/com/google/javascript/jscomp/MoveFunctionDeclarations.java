@@ -16,53 +16,67 @@
 
 package com.google.javascript.jscomp;
 
+import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Multimaps;
 import com.google.javascript.jscomp.NodeTraversal.Callback;
+import com.google.javascript.rhino.IR;
 import com.google.javascript.rhino.Node;
-
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Map.Entry;
 
 /**
- * Moves top-level function declarations to the top.
+ * Moves top-level function declarations to the top of the enclosing JSModule.
  *
- * Enable this pass if a try catch block wraps the output after compilation,
- * and the output runs on Firefox because function declarations are only
- * defined when reached inside a try catch block on Firefox.
+ * <p>Enable this pass if a try catch block wraps the output after compilation, and the output runs
+ * on Firefox because function declarations are only defined when reached inside a try catch block
+ * on older versions of Firefox.
  *
- * On Firefox, this code works:
+ * <p>On Firefox versions <= 45, this code works:
  *
- * var g = f;
- * function f() {}
+ * <p>var g = f; function f() {}
  *
- * but this code does not work:
+ * <p>but this code does not work:
  *
- * try {
- *   var g = f;
- *   function f() {}
- * } catch(e) {}
+ * <p>try { var g = f; function f() {} } catch(e) {}
+ *
+ * <p>NOTE(lharker): As of Firefox version 46 the above code works. Projects not supporting older
+ * versions of Firefox shouldn't need this pass.
+ *
+ * <p>RescopeGlobalSymbols still depends on this pass running first to preserve function hoisting
+ * semantics.
+ *
+ * <p>NOTE(dimvar): This pass is safe to turn on by default and delete the associated compiler
+ * option. However, we don't do that because the pass is only useful for code wrapped in a
+ * try/catch, and otherwise it makes debugging harder because it moves code around.
  *
  */
 class MoveFunctionDeclarations implements Callback, CompilerPass {
   private final AbstractCompiler compiler;
-  private final Map<JSModule, List<Node>> functions;
+  private final ListMultimap<JSModule, Node> functions;
 
   MoveFunctionDeclarations(AbstractCompiler compiler) {
     this.compiler = compiler;
-    functions = new HashMap<>();
+    functions = ArrayListMultimap.create();
   }
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverse(compiler, root, this);
-    for (Entry<JSModule, List<Node>> entry : functions.entrySet()) {
-      JSModule module = entry.getKey();
-      Node addingRoot = compiler.getNodeForCodeInsertion(module);
-      for (Node n : Lists.reverse(entry.getValue())) {
-        addingRoot.addChildToFront(n);
+    NodeTraversal.traverseEs6(compiler, root, this);
+    for (Entry<JSModule, List<Node>> entry : Multimaps.asMap(functions).entrySet()) {
+      Node addingRoot = compiler.getNodeForCodeInsertion(entry.getKey());
+      List<Node> fnNodes = Lists.reverse(entry.getValue());
+      if (!fnNodes.isEmpty()) {
+        for (Node n : fnNodes) {
+          Node nameNode = n.getFirstChild();
+          String name = nameNode.getString();
+          nameNode.setString("");
+          addingRoot.addChildToFront(
+              IR.var(IR.name(name), n).useSourceInfoIfMissingFromForTree(n));
+          compiler.reportChangeToEnclosingScope(nameNode);
+        }
+        compiler.reportChangeToEnclosingScope(addingRoot);
       }
     }
   }
@@ -81,15 +95,9 @@ class MoveFunctionDeclarations implements Callback, CompilerPass {
 
     if (NodeUtil.isFunctionDeclaration(n)) {
       parent.removeChild(n);
-      compiler.reportCodeChange();
+      compiler.reportChangeToEnclosingScope(parent);
 
-      JSModule module = t.getModule();
-      List<Node> moduleFunctions = functions.get(module);
-      if (moduleFunctions == null) {
-        moduleFunctions = new ArrayList<>();
-        functions.put(module, moduleFunctions);
-      }
-      moduleFunctions.add(n);
+      functions.put(t.getModule(), n);
     }
   }
 }

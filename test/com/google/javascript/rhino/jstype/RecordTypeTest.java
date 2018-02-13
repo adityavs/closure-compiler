@@ -38,6 +38,7 @@
 
 package com.google.javascript.rhino.jstype;
 
+import com.google.javascript.rhino.TypeI.Nullability;
 import com.google.javascript.rhino.testing.Asserts;
 import com.google.javascript.rhino.testing.BaseJSTypeTestCase;
 
@@ -50,33 +51,51 @@ public class RecordTypeTest extends BaseJSTypeTestCase {
         .addProperty("number", NUMBER_TYPE, null)
         .addProperty("string", STRING_TYPE, null)
         .build();
-    assertEquals("{loop: number, number: number, string: string}",
+    assertEquals("{\n  loop: number,\n  number: number,\n  string: string\n}",
         record.toString());
 
     loop.setReferencedType(record);
-    assertEquals("{loop: {...}, number: number, string: string}",
+    assertEquals("{\n  loop: {...},\n  number: number,\n  string: string\n}",
         record.toString());
     assertEquals("{loop: ?, number: number, string: string}",
-        record.toAnnotationString());
+        record.toAnnotationString(Nullability.EXPLICIT));
 
     Asserts.assertEquivalenceOperations(record, loop);
   }
 
   public void testLongToString() {
     JSType record = new RecordTypeBuilder(registry)
-        .addProperty("a1", NUMBER_TYPE, null)
-        .addProperty("a2", NUMBER_TYPE, null)
-        .addProperty("a3", NUMBER_TYPE, null)
-        .addProperty("a4", NUMBER_TYPE, null)
-        .addProperty("a5", NUMBER_TYPE, null)
-        .addProperty("a6", NUMBER_TYPE, null)
+        .addProperty("a01", NUMBER_TYPE, null)
+        .addProperty("a02", NUMBER_TYPE, null)
+        .addProperty("a03", NUMBER_TYPE, null)
+        .addProperty("a04", NUMBER_TYPE, null)
+        .addProperty("a05", NUMBER_TYPE, null)
+        .addProperty("a06", NUMBER_TYPE, null)
+        .addProperty("a07", NUMBER_TYPE, null)
+        .addProperty("a08", NUMBER_TYPE, null)
+        .addProperty("a09", NUMBER_TYPE, null)
+        .addProperty("a10", NUMBER_TYPE, null)
+        .addProperty("a11", NUMBER_TYPE, null)
         .build();
-    assertEquals("{a1: number, a2: number, a3: number, a4: number, ...}",
+    assertEquals(
+        LINE_JOINER.join(
+            "{",
+            "  a01: number,",
+            "  a02: number,",
+            "  a03: number,",
+            "  a04: number,",
+            "  a05: number,",
+            "  a06: number,",
+            "  a07: number,",
+            "  a08: number,",
+            "  a09: number,",
+            "  a10: number, ...",
+            "}"),
         record.toString());
     assertEquals(
-        "{a1: number, a2: number, a3: number, a4: number," +
-        " a5: number, a6: number}",
-        record.toAnnotationString());
+        "{a01: number, a02: number, a03: number, a04: number, a05: number, a06: number," +
+        " a07: number, a08: number, a09: number, a10: number, a11: number}",
+        record.toAnnotationString(Nullability.EXPLICIT));
   }
 
   public void testSupAndInf() {

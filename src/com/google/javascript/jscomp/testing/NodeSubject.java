@@ -15,13 +15,14 @@
  */
 package com.google.javascript.jscomp.testing;
 
-import static com.google.common.truth.Truth.THROW_ASSERTION_ERROR;
+import static com.google.common.truth.Truth.assertAbout;
 import static org.junit.Assert.assertEquals;
 
-import com.google.common.truth.FailureStrategy;
+import com.google.common.truth.FailureMetadata;
 import com.google.common.truth.Subject;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
+import javax.annotation.CheckReturnValue;
 
 /**
  * A Truth Subject for the Node class. Usage:
@@ -33,32 +34,36 @@ import com.google.javascript.rhino.Token;
  * </pre>
  */
 public final class NodeSubject extends Subject<NodeSubject, Node> {
+  @CheckReturnValue
   public static NodeSubject assertNode(Node node) {
-    return new NodeSubject(THROW_ASSERTION_ERROR, node);
+    return assertAbout(NodeSubject::new).that(node);
   }
 
-  public NodeSubject(FailureStrategy fs, Node node) {
-    super(fs, node);
+  public NodeSubject(FailureMetadata failureMetadata, Node node) {
+    super(failureMetadata, node);
   }
 
   public void isEqualTo(Node node) {
-    String treeDiff = node.checkTreeEquals(getSubject());
+    String treeDiff = node.checkTreeEquals(actual());
     if (treeDiff != null) {
       failWithRawMessage("%s", treeDiff);
     }
   }
 
-  public void hasType(int type) {
-    String message = "Node is of type " + Token.name(getSubject().getType())
-        + " not of type " + Token.name(type);
-    assertEquals(message, type, getSubject().getType());
+  public void hasType(Token type) {
+    String message = "Node is of type " + actual().getToken() + " not of type " + type;
+    assertEquals(message, type, actual().getToken());
   }
 
   public void hasCharno(int charno) {
-    assertEquals(charno, getSubject().getCharno());
+    assertEquals(charno, actual().getCharno());
+  }
+
+  public void hasLineno(int lineno) {
+    assertEquals(lineno, actual().getLineno());
   }
 
   public void hasLength(int length) {
-    assertEquals(length, getSubject().getLength());
+    assertEquals(length, actual().getLength());
   }
 }

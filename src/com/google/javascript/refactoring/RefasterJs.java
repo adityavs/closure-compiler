@@ -16,19 +16,15 @@
 
 package com.google.javascript.refactoring;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
-import com.google.common.collect.ImmutableList;
 import com.google.javascript.jscomp.CommandLineRunner;
+import com.google.javascript.jscomp.CompilerOptions;
 import com.google.javascript.jscomp.ErrorManager;
-import com.google.javascript.jscomp.SourceFile;
-
-import org.kohsuke.args4j.Argument;
-import org.kohsuke.args4j.CmdLineParser;
-import org.kohsuke.args4j.Option;
-import org.kohsuke.args4j.spi.BooleanOptionHandler;
-
+import com.google.javascript.jscomp.TypeMatchingStrategy;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -38,6 +34,10 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import org.kohsuke.args4j.Argument;
+import org.kohsuke.args4j.CmdLineParser;
+import org.kohsuke.args4j.Option;
+import org.kohsuke.args4j.spi.BooleanOptionHandler;
 
 /**
  * Main binary that drives a RefasterJS refactoring.
@@ -67,9 +67,14 @@ final class RefasterJs {
       usage = "Location of the JS file to use as the RefasterJS template.")
   private String refasterJsTemplate = null;
 
-  @Option(name = "--include_default_externs",
-      usage = "Whether to include the standard JavaScript externs. Defaults to true.")
-  private boolean includeDefaultExterns = true;
+  @Option(name = "--env",
+      usage = "Which set of externs to include. Defaults to BROWSER.")
+  private CompilerOptions.Environment environment =
+      CompilerOptions.Environment.BROWSER;
+
+  @Option(name = "--type_matching",
+    usage = "Which type matching strategy to use. Defaults to SUBTYPES.")
+  private TypeMatchingStrategy typeMatchingStrategy = TypeMatchingStrategy.SUBTYPES;
 
   @Option(name = "--dry_run",
       usage = "Use this to display what changes would be made without applying the changes.")
@@ -89,10 +94,10 @@ final class RefasterJs {
       p.printUsage(System.out);
       return;
     }
-    Preconditions.checkArgument(
+    checkArgument(
         !Strings.isNullOrEmpty(refasterJsTemplate), "--refasterjs_template must be provided");
     List<String> fileInputs = getInputs();
-    Preconditions.checkArgument(
+    checkArgument(
         !fileInputs.isEmpty(), "At least one input must be provided in the --inputs flag.");
     for (String input : fileInputs) {
       Preconditions.checkArgument(
@@ -107,15 +112,19 @@ final class RefasterJs {
     }
 
     RefasterJsScanner scanner = new RefasterJsScanner();
+    scanner.setTypeMatchingStrategy(typeMatchingStrategy);
     scanner.loadRefasterJsTemplate(refasterJsTemplate);
-    RefactoringDriver driver = new RefactoringDriver.Builder(scanner)
-        .addExterns(includeDefaultExterns
-            ? CommandLineRunner.getDefaultExterns() : ImmutableList.<SourceFile>of())
-        .addExternsFromFile(getExterns())
-        .addInputsFromFile(fileInputs)
-        .build();
+    CompilerOptions options = new CompilerOptions();
+    options.setEnvironment(environment);
+    RefactoringDriver driver =
+        new RefactoringDriver.Builder()
+            .addExterns(CommandLineRunner.getBuiltinExterns(environment))
+            .addExternsFromFile(getExterns())
+            .addInputsFromFile(fileInputs)
+            .build();
     System.out.println("Compiling JavaScript code and searching for suggested fixes.");
-    List<SuggestedFix> fixes = driver.drive();
+    // TODO(bangert): allow picking a non-default choice in RefasterJS, e.g. via a switch.
+    List<SuggestedFix> fixes = driver.drive(scanner);
 
     if (!verbose) {
       // When running in quiet mode, the Compiler's error manager will not have printed

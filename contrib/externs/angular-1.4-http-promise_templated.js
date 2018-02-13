@@ -33,13 +33,16 @@ angular.HttpCallback;
  * @constructor
  * @template T
  */
-angular.$http.Response;
+angular.$http.Response = function() {};
 
 /** @type {T} */
 angular.$http.Response.prototype.data;
 
 /** @type {number} */
 angular.$http.Response.prototype.status;
+
+/** @type {string} */
+angular.$http.Response.prototype.statusText;
 
 /**
  * @param {string=} name
@@ -55,33 +58,7 @@ angular.$http.Response.prototype.config;
  * @extends {angular.$q.Promise.<!angular.$http.Response.<T>>}
  * @template T
  */
-angular.$http.HttpPromise;
-
-/**
- * @param {?(function(T):
- *             (RESULT|IThenable.<RESULT>|Thenable))=} opt_onFulfilled
- * @param {?(function(*): *)=} opt_onRejected
- * @param {?(function(*): *)=} opt_notifyCallback
- * @return {!angular.$http.HttpPromise.<RESULT>}
- * @template RESULT
- * @override
- */
-angular.$http.HttpPromise.prototype.then =
-    function(opt_onFulfilled, opt_onRejected, opt_notifyCallback) {};
-
-/**
- * @param {?function(?)} callback
- * @return {!angular.$http.HttpPromise.<T>}
- * @override
- */
-angular.$http.HttpPromise.prototype.catch = function(callback) {};
-
-/**
- * @param {?function(?)} callback
- * @return {!angular.$http.HttpPromise.<T>}
- * @override
- */
-angular.$http.HttpPromise.prototype.finally = function(callback) {};
+angular.$http.HttpPromise = function() {};
 
 /**
  * @param {function(T, number, function(string=):
@@ -91,7 +68,7 @@ angular.$http.HttpPromise.prototype.finally = function(callback) {};
 angular.$http.HttpPromise.prototype.success = function(callback) {};
 
 /**
- * @param {function(*, number, function(string=):
+ * @param {function(?, number, function(string=):
  *     (string|Object|null), angular.$http.Config)} callback
  * @return {!angular.$http.HttpPromise.<T>} Promise for chaining.
  */

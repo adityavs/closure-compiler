@@ -16,6 +16,8 @@
 
 package com.google.javascript.jscomp.newtypes;
 
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.javascript.rhino.Node;
 
 /**
@@ -24,26 +26,27 @@ import com.google.javascript.rhino.Node;
  * @author dimvar@google.com (Dimitris Vardoulakis)
  */
 public final class NamespaceLit extends Namespace {
-  public NamespaceLit(String name) {
-    this.name = name;
+  // For when window is used as a namespace
+  private NominalType window = null;
+
+  public NamespaceLit(JSTypes commonTypes, String name, Node defSite) {
+    super(commonTypes, name, defSite);
+  }
+
+  NominalType getWindowType() {
+    return this.window;
+  }
+
+  public void setWindowType(NominalType window) {
+    this.window = window;
   }
 
   @Override
-  public boolean finalizeNamespace(Node constDeclNode) {
-    if (!this.isNamespaceFinalized) {
-      this.constDeclNode = constDeclNode;
-      this.isNamespaceFinalized = true;
-      if (!finalizeSubnamespaces(constDeclNode)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  @Override
-  protected JSType computeJSType(JSTypes commonTypes) {
-    ObjectType obj = ObjectType.makeObjectType(
-        null, otherProps, null, false, ObjectKind.UNRESTRICTED);
-    return withNamedTypes(commonTypes, obj);
+  protected JSType computeJSType() {
+    checkState(this.namespaceType == null);
+    return JSType.fromObjectType(ObjectType.makeObjectType(
+        this.commonTypes,
+        this.window == null ? this.commonTypes.getLiteralObjNominalType() : this.window,
+        null, null, this, false, ObjectKind.UNRESTRICTED));
   }
 }

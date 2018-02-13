@@ -19,8 +19,6 @@ package com.google.javascript.jscomp;
 import com.google.javascript.jscomp.NodeTraversal.Callback;
 import com.google.javascript.jscomp.graph.LinkedDirectedGraph;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.Token;
-
 import java.util.Comparator;
 
 /**
@@ -148,28 +146,29 @@ public class ControlFlowGraph<N> extends
    */
   public static boolean isEnteringNewCfgNode(Node n) {
     Node parent = n.getParent();
-    switch (parent.getType()) {
-      case Token.BLOCK:
-      case Token.SCRIPT:
-      case Token.TRY:
+    switch (parent.getToken()) {
+      case BLOCK:
+      case ROOT:
+      case SCRIPT:
+      case TRY:
         return true;
-      case Token.FUNCTION:
+      case FUNCTION:
         // A function node represents the start of a function where the name
         // bleeds into the local scope and parameters are assigned
         // to the formal argument names. The node includes the name of the
-        // function and the LP list since we assume the whole set up process
+        // function and the PARAM_LIST since we assume the whole set up process
         // is atomic without change in control flow. The next change of
         // control is going into the function's body, represented by the second
         // child.
-        return n != parent.getFirstChild().getNext();
-      case Token.WHILE:
-      case Token.DO:
-      case Token.IF:
+        return n != parent.getSecondChild();
+      case WHILE:
+      case DO:
+      case IF:
         // These control structures are represented by a node that holds the
         // condition. Each of them is a branch node based on its condition.
         return NodeUtil.getConditionExpression(parent) != n;
 
-      case Token.FOR:
+      case FOR:
         // The FOR(;;) node differs from other control structures in that
         // it has an initialization and an increment statement. Those
         // two statements have corresponding CFG nodes to represent them.
@@ -177,17 +176,15 @@ public class ControlFlowGraph<N> extends
         // That way the following:
         // for(var x = 0; x < 10; x++) { } has a graph that is isomorphic to
         // var x = 0; while(x<10) {  x++; }
-        if (NodeUtil.isForIn(parent)) {
-          // TODO(user): Investigate how we should handle the case where
-          // we have a very complex expression inside the FOR-IN header.
-          return n != parent.getFirstChild();
-        } else {
-          return NodeUtil.getConditionExpression(parent) != n;
-        }
-      case Token.SWITCH:
-      case Token.CASE:
-      case Token.CATCH:
-      case Token.WITH:
+        return NodeUtil.getConditionExpression(parent) != n;
+      case FOR_IN:
+        // TODO(user): Investigate how we should handle the case where
+        // we have a very complex expression inside the FOR-IN header.
+        return n != parent.getFirstChild();
+      case SWITCH:
+      case CASE:
+      case CATCH:
+      case WITH:
         return n != parent.getFirstChild();
       default:
         return false;

@@ -17,24 +17,22 @@
 package com.google.javascript.jscomp;
 
 import com.google.common.collect.ImmutableSet;
-
 import java.io.Serializable;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 
 /**
- * Group a set of related diagnostic types together, so that they can
- * be toggled on and off as one unit.
+ * Group a set of related diagnostic types together, so that they can be toggled on and off as one
+ * unit.
+ *
  * @author nicksantos@google.com (Nick Santos)
  */
-public class DiagnosticGroup implements Serializable {
+public final class DiagnosticGroup implements Serializable {
   private static final long serialVersionUID = 1;
 
   // The set of types represented by this group, hashed by key.
-  private final Set<DiagnosticType> types;
+  private final ImmutableSet<DiagnosticType> types;
 
   // A human-readable name for the group.
   private final String name;
@@ -62,9 +60,25 @@ public class DiagnosticGroup implements Serializable {
     this.types = ImmutableSet.of(type);
   }
 
+  /** Create a composite group. */
+  public DiagnosticGroup(DiagnosticGroup... groups) {
+    this(null, groups);
+  }
+
+  /** Create a composite group. */
+  public DiagnosticGroup(String name, DiagnosticGroup... groups) {
+    ImmutableSet.Builder<DiagnosticType> set = ImmutableSet.builder();
+
+    for (DiagnosticGroup group : groups) {
+      set.addAll(group.types);
+    }
+
+    this.name = name;
+    this.types = set.build();
+  }
+
   // DiagnosticGroups with only a single DiagnosticType.
-  private static final Map<DiagnosticType, DiagnosticGroup> singletons =
-       new HashMap<>();
+  private static final Map<DiagnosticType, DiagnosticGroup> singletons = new HashMap<>();
 
   /** Create a diagnostic group that matches only the given type. */
   public static synchronized DiagnosticGroup forType(DiagnosticType type) {
@@ -72,27 +86,6 @@ public class DiagnosticGroup implements Serializable {
       singletons.put(type, new DiagnosticGroup(type));
     }
     return singletons.get(type);
-  }
-
-  /**
-   * Create a composite group.
-   */
-  public DiagnosticGroup(DiagnosticGroup ...groups) {
-    this(null, groups);
-  }
-
-  /**
-   * Create a composite group.
-   */
-  public DiagnosticGroup(String name, DiagnosticGroup ...groups) {
-    Set<DiagnosticType> set = new HashSet<>();
-
-    for (DiagnosticGroup group : groups) {
-      set.addAll(group.types);
-    }
-
-    this.name = name;
-    this.types = ImmutableSet.copyOf(set);
   }
 
   /**
@@ -122,11 +115,13 @@ public class DiagnosticGroup implements Serializable {
     return true;
   }
 
-  /**
-   * Returns an iterable over all the types in this group.
-   */
-  public Iterable<DiagnosticType> getTypes() {
+  /** Returns all the types in this group. */
+  public ImmutableSet<DiagnosticType> getTypes() {
     return types;
+  }
+
+  String getName() {
+    return this.name;
   }
 
   @Override
