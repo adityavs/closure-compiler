@@ -15,6 +15,7 @@
  */
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.javascript.jscomp.PolymerPassErrors.POLYMER_INVALID_DECLARATION;
@@ -44,8 +45,7 @@ import java.util.Set;
  * @author jlklein@google.com (Jeremy Klein)
  */
 final class PolymerPass extends AbstractPostOrderCallback implements HotSwapCompilerPass {
-
-  static final String VIRTUAL_FILE = "<PolymerPass.java>";
+  private static final String VIRTUAL_FILE = "<PolymerPass.java>";
 
   private final AbstractCompiler compiler;
   private final ImmutableMap<String, String> tagNameMap;
@@ -74,7 +74,7 @@ final class PolymerPass extends AbstractPostOrderCallback implements HotSwapComp
   @Override
   public void process(Node externs, Node root) {
     PolymerPassFindExterns externsCallback = new PolymerPassFindExterns();
-    NodeTraversal.traverseEs6(compiler, externs, externsCallback);
+    NodeTraversal.traverse(compiler, externs, externsCallback);
     polymerElementExterns = externsCallback.getPolymerElementExterns();
     polymerElementProps = externsCallback.getPolymerElementProps();
 
@@ -95,10 +95,10 @@ final class PolymerPass extends AbstractPostOrderCallback implements HotSwapComp
 
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
-    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
+    NodeTraversal.traverse(compiler, scriptRoot, this);
     PolymerPassSuppressBehaviors suppressBehaviorsCallback =
         new PolymerPassSuppressBehaviors(compiler);
-    NodeTraversal.traverseEs6(compiler, scriptRoot, suppressBehaviorsCallback);
+    NodeTraversal.traverse(compiler, scriptRoot, suppressBehaviorsCallback);
   }
 
   @Override
@@ -225,6 +225,11 @@ final class PolymerPass extends AbstractPostOrderCallback implements HotSwapComp
       this.info = info;
       this.name = name;
       this.value = value;
+    }
+
+    @Override
+    public String toString() {
+      return toStringHelper(this).add("name", name).add("value", value).toString();
     }
   }
 }

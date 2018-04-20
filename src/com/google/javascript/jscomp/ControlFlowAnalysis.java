@@ -19,6 +19,7 @@ package com.google.javascript.jscomp;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Comparator.comparingInt;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.HashMultimap;
@@ -70,13 +71,7 @@ public final class ControlFlowAnalysis implements Callback, CompilerPass {
   // CFG nodes that come first lexically should be visited first, because
   // they will often be executed first in the source program.
   private final Comparator<DiGraphNode<Node, Branch>> priorityComparator =
-      new Comparator<DiGraphNode<Node, Branch>>() {
-    @Override
-    public int compare(
-        DiGraphNode<Node, Branch> a, DiGraphNode<Node, Branch> b) {
-      return astPosition.get(a.getValue()) - astPosition.get(b.getValue());
-    }
-  };
+      comparingInt(digraphNode -> astPosition.get(digraphNode.getValue()));
 
   private int astPositionCounter;
   private int priorityCounter;
@@ -161,7 +156,7 @@ public final class ControlFlowAnalysis implements Callback, CompilerPass {
     astPosition = new HashMap<>();
     nodePriorities = new HashMap<>();
     cfg = new AstControlFlowGraph(computeFallThrough(root), nodePriorities, edgeAnnotations);
-    NodeTraversal.traverseEs6(compiler, root, this);
+    NodeTraversal.traverse(compiler, root, this);
     astPosition.put(null, ++astPositionCounter); // the implicit return is last.
 
     // Now, generate the priority of nodes by doing a depth-first
@@ -186,9 +181,7 @@ public final class ControlFlowAnalysis implements Callback, CompilerPass {
     // Presumably, it doesn't really matter what priority they get, since
     // this shouldn't happen in real code.
     for (DiGraphNode<Node, Branch> candidate : cfg.getDirectedGraphNodes()) {
-      if (!nodePriorities.containsKey(candidate)) {
-        nodePriorities.put(candidate, ++priorityCounter);
-      }
+      nodePriorities.computeIfAbsent(candidate, k -> ++priorityCounter);
     }
 
     // Again, the implicit return node is always last.
@@ -977,6 +970,7 @@ public final class ControlFlowAnalysis implements Callback, CompilerPass {
       case DEC:
       case INSTANCEOF:
       case IN:
+      case YIELD:
         return true;
       case FUNCTION:
         return false;
@@ -1077,21 +1071,9 @@ public final class ControlFlowAnalysis implements Callback, CompilerPass {
     public Comparator<DiGraphNode<Node, Branch>> getOptionalNodeComparator(
         boolean isForward) {
       if (isForward) {
-        return new Comparator<DiGraphNode<Node, Branch>>() {
-          @Override
-          public int compare(
-              DiGraphNode<Node, Branch> n1, DiGraphNode<Node, Branch> n2) {
-            return getPosition(n1) - getPosition(n2);
-          }
-        };
+        return comparingInt(this::getPosition);
       } else {
-        return new Comparator<DiGraphNode<Node, Branch>>() {
-          @Override
-          public int compare(
-              DiGraphNode<Node, Branch> n1, DiGraphNode<Node, Branch> n2) {
-            return getPosition(n2) - getPosition(n1);
-          }
-        };
+        return comparingInt(this::getPosition).reversed();
       }
     }
 

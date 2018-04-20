@@ -24,25 +24,48 @@ import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.StaticScope;
 import java.io.Serializable;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Scope contains information about a variable scope in JavaScript.
- * Scopes can be nested, a scope points back to its parent scope.
- * A Scope contains information about variables defined in that scope.
+ * Scope contains information about a variable scope in JavaScript. Scopes can be nested, a scope
+ * points back to its parent scope. A Scope contains information about variables defined in that
+ * scope.
+ *
+ * <p>ES 2015 introduces new scoping rules, which adds some complexity to this class. In particular,
+ * scopes fall into two mutually exclusive categories: <i>block</i> and <i>container</i>. Block
+ * scopes are all scopes whose roots are blocks, as well as any control structures whose optional
+ * blocks are omitted. These scopes did not exist at all prior to ES 2015. Container scopes comprise
+ * function scopes, global scopes, and module scopes, and (aside from modules, which didn't exist in
+ * ES5) corresponds to the ES5 scope rules. This corresponds roughly to one container scope per CFG
+ * root (but not exactly, due to SCRIPT-level CFGs).
+ *
+ * <p>All container scopes, plus the outermost block scope within a function (i.e. the <i>function
+ * block scope</i>) are considered <i>hoist scopes</i>. All functions thus have two hoist scopes:
+ * the function scope and the function block scope. Hoist scopes are relevant because "var"
+ * declarations are hoisted to the closest hoist scope, as opposed to "let" and "const" which always
+ * apply to the specific scope in which they occur.
+ *
+ * <p>Note that every function actually has two distinct hoist scopes: a container scope on the
+ * FUNCTION node, and a block-scope on the top-level BLOCK in the function (the "function block").
+ * Local variables are declared on the function block, while parameters and optionally the function
+ * name (if it bleeds, i.e. from a named function expression) are declared on the container scope.
+ * This is required so that default parameter initializers can refer to names from outside the
+ * function that could possibly be shadowed in the function block.  But these scopes are not fully
+ * independent of one another, since the language does not allow a top-level local variable to
+ * shadow a parameter name - so in some situations these scopes must be treated as a single scope.
  *
  * @see NodeTraversal
- *
  */
 abstract class AbstractScope<S extends AbstractScope<S, V>, V extends AbstractVar<S, V>>
     implements StaticScope, Serializable {
   private final Map<String, V> vars = new LinkedHashMap<>();
+  private final Map<ImplicitVar, V> implicitVars = new EnumMap<>(ImplicitVar.class);
   private final Node rootNode;
-  private V arguments;
 
   AbstractScope(Node rootNode) {
-    this.rootNode = rootNode;
+    this.rootNode = checkNotNull(rootNode);
   }
 
   /** The depth of the scope. The global scope has depth 0. */
@@ -102,7 +125,7 @@ abstract class AbstractScope<S extends AbstractScope<S, V>, V extends AbstractVa
     return getParent();
   }
 
-  abstract V makeArgumentsVar();
+  abstract V makeImplicitVar(ImplicitVar type);
 
   /**
    * Undeclares a variable, to be used when the compiler optimizes out
@@ -120,6 +143,7 @@ abstract class AbstractScope<S extends AbstractScope<S, V>, V extends AbstractVa
   }
 
   final void declareInternal(String name, V var) {
+    checkState(hasOwnSlot(name) || canDeclare(name), "Illegal shadow: %s", var.getNode());
     vars.put(name, var);
   }
 
@@ -129,6 +153,9 @@ abstract class AbstractScope<S extends AbstractScope<S, V>, V extends AbstractVa
 
   @Override
   public final V getSlot(String name) {
+    // TODO(sdh): This behavior is inconsistent with getOwnSlot, hasSlot, and hasOwnSlot
+    // when it comes to implicit vars.  The other three methods all exclude implicits,
+    // but this one returns them.  It would be good to clean this up one way or the other.
     return getVar(name);
   }
 
@@ -142,14 +169,15 @@ abstract class AbstractScope<S extends AbstractScope<S, V>, V extends AbstractVa
    */
   // Non-final for jsdev tests
   public V getVar(String name) {
+    ImplicitVar implicit = name != null ? ImplicitVar.of(name) : null;
+    if (implicit != null) {
+      return getImplicitVar(implicit, true);
+    }
     S scope = thisScope();
     while (scope != null) {
       V var = scope.getOwnSlot(name);
       if (var != null) {
         return var;
-      }
-      if (Var.ARGUMENTS.equals(name) && NodeUtil.isVanillaFunction(scope.getRootNode())) {
-        return scope.getArgumentsVar();
       }
       // Recurse up the parent Scope
       scope = scope.getParent();
@@ -158,52 +186,70 @@ abstract class AbstractScope<S extends AbstractScope<S, V>, V extends AbstractVa
   }
 
   /**
-   * Get a unique VAR object to represent "arguments" within this scope
+   * Get a unique Var object to represent "arguments" within this scope
    */
   public final V getArgumentsVar() {
-    if (isGlobal() || isModuleScope()) {
-      return null;
-    }
-
-    if (!isFunctionScope() || rootNode.isArrowFunction()) {
-      return getParent().getArgumentsVar();
-    }
-
-    if (arguments == null) {
-      arguments = makeArgumentsVar();
-    }
-    return arguments;
+    return getImplicitVar(ImplicitVar.ARGUMENTS, false);
   }
 
-  /**
-   * Use only when in a function block scope and want to tell if a name is either at the top of the
-   * function block scope or the function parameter scope.  This obviously only applies to ES6 block
-   * scopes.
-   */
-  public final boolean isDeclaredInFunctionBlockOrParameter(String name) {
-    // In ES6, we create a separate "function parameter scope" above the function block scope to
-    // handle default parameters. Since nothing in the function block scope is allowed to shadow
-    // the variables in the function scope, we treat the two scopes as one in this method.
-    checkState(isFunctionBlockScope());
-    return isDeclared(name, false) || (getParent().isDeclared(name, false));
-  }
-
-  /**
-   * Returns true if a variable is declared.
-   */
-  public final boolean isDeclared(String name, boolean recurse) {
+  /** Get a unique Var object of the given implicit var type. */
+  private final V getImplicitVar(ImplicitVar var, boolean allowDeclaredVars) {
     S scope = thisScope();
-    while (true) {
-      if (scope.getOwnSlot(name) != null) {
+    while (scope != null) {
+      if (var.isMadeByScope(scope)) {
+        V result = ((AbstractScope<S, V>) scope).implicitVars.get(var);
+        if (result == null) {
+          ((AbstractScope<S, V>) scope).implicitVars.put(var, result = scope.makeImplicitVar(var));
+        }
+        return result;
+      }
+      V result = allowDeclaredVars ? scope.getOwnSlot(var.name) : null;
+      if (result != null) {
+        return result;
+      }
+      // Recurse up the parent Scope
+      scope = scope.getParent();
+    }
+    return null;
+  }
+
+  /** Returns true if a variable is declared in this scope, with no recursion. */
+  public final boolean hasOwnSlot(String name) {
+    return vars.containsKey(name);
+  }
+
+  /** Returns true if a variable is declared in this or any parent scope. */
+  public final boolean hasSlot(String name) {
+    S scope = thisScope();
+    while (scope != null) {
+      if (scope.hasOwnSlot(name)) {
         return true;
       }
-
-      if (scope.getParent() != null && recurse) {
-        scope = scope.getParent();
-        continue;
-      }
-      return false;
+      scope = scope.getParent();
     }
+    return false;
+  }
+
+  /**
+   * Returns true if the name can be declared on this scope without causing illegal shadowing.
+   * Specifically, this is aware of the connection between function container scopes and function
+   * block scopes and returns false for redeclaring parameters on the block scope.
+   */
+  final boolean canDeclare(String name) {
+    return !hasOwnSlot(name)
+        && (!isFunctionBlockScope()
+            || !getParent().hasOwnSlot(name)
+            || isBleedingFunctionName(name));
+  }
+
+  /**
+   * Returns true if the given name is a bleeding function name in this scope. Local variables in
+   * the function block are not allowed to shadow parameters, but they are allowed to shadow a
+   * bleeding function name.
+   */
+  private boolean isBleedingFunctionName(String name) {
+    V var = getVar(name);
+    return var != null && var.getNode().getParent().isFunction();
   }
 
   /**
@@ -233,9 +279,7 @@ abstract class AbstractScope<S extends AbstractScope<S, V>, V extends AbstractVa
 
     while (s != null) {
       for (V v : s.getVarIterable()) {
-        if (!accessibleVars.containsKey(v.getName())){
-          accessibleVars.put(v.getName(), v);
-        }
+        accessibleVars.putIfAbsent(v.getName(), v);
       }
       s = s.getParent();
     }
@@ -308,11 +352,11 @@ abstract class AbstractScope<S extends AbstractScope<S, V>, V extends AbstractVa
   /**
    * If a var were declared in this scope, return the scope it would be hoisted to.
    *
-   * For function scopes, we return back the scope itself, since even though there is no way
-   * to declare a var inside function parameters, it would make even less sense to say that
-   * such declarations would be "hoisted" somewhere else.
+   * <p>For function scopes, we return back the scope itself, since even though there is no way to
+   * declare a var inside function parameters, it would make even less sense to say that such
+   * declarations would be "hoisted" somewhere else.
    */
-  public final S getClosestHoistScope() {
+  final S getClosestHoistScope() {
     S current = thisScope();
     while (current != null) {
       if (current.isHoistScope()) {
@@ -321,6 +365,19 @@ abstract class AbstractScope<S extends AbstractScope<S, V>, V extends AbstractVa
       current = current.getParent();
     }
     return null;
+  }
+
+  /**
+   * Returns the closest container scope. This is equivalent to what the current scope would have
+   * been for non-ES6 scope creators, and is thus useful for migrating code to use block scopes.
+   */
+  public final S getClosestContainerScope() {
+    S scope = getClosestHoistScope();
+    if (scope.isBlockScope()) {
+      scope = scope.getParent();
+      checkState(!scope.isBlockScope());
+    }
+    return scope;
   }
 
   // This is safe because any concrete subclass of AbstractScope<S> should be assignable to S.
@@ -345,5 +402,73 @@ abstract class AbstractScope<S extends AbstractScope<S, V>, V extends AbstractVa
     // TODO(tbreisacher): Can we tighten this to just NodeUtil.createsScope?
     checkArgument(
         NodeUtil.createsScope(rootNode) || rootNode.isScript() || rootNode.isRoot(), rootNode);
+  }
+
+  /** Returns the nearest common parent between two scopes. */
+  S getCommonParent(S other) {
+    S left = thisScope();
+    S right = other;
+    while (left != null && right != null && left != right) {
+      int leftDepth = left.getDepth();
+      int rightDepth = right.getDepth();
+      if (leftDepth >= rightDepth) {
+        left = left.getParent();
+      }
+      if (leftDepth <= rightDepth) {
+        right = right.getParent();
+      }
+    }
+
+    checkState(left != null && left == right);
+    return left;
+  }
+
+  /**
+   * Whether {@code this} and the {@code other} scope have the same container scope (i.e. are in the
+   * same function, or else both in the global hoist scope). This is equivalent to asking whether
+   * the two scopes would be equivalent in a pre-ES2015-block-scopes view of the world.
+   */
+  boolean hasSameContainerScope(S other) {
+    return getClosestContainerScope() == other.getClosestContainerScope();
+  }
+
+  /**
+   * The three implicit var types, which are defined implicitly (at least) in
+   * every vanilla function scope without actually being declared.
+   */
+  enum ImplicitVar {
+    ARGUMENTS("arguments"),
+    SUPER("super"),
+    // TODO(sdh): Expand THIS.isMadeByScope to check super.isMadeByScope(scope) || scope.isGlobal()
+    // Currently this causes a number of problems (see b/74980936), but could eventually lead to
+    // better type information.  We might also want to restrict this so that module-root scopes
+    // explicitly *don't* have access to the global this, though I think this is more than just
+    // returning false in isMadeByScope - rather, getVar() needs to stop checking and immediately
+    // return null.
+    THIS("this");
+
+    final String name;
+
+    ImplicitVar(String name) {
+      this.name = name;
+    }
+
+    /** Whether this kind of implicit variable is created/owned by the given scope. */
+    boolean isMadeByScope(AbstractScope<?, ?> scope) {
+      return NodeUtil.isVanillaFunction(scope.getRootNode());
+    }
+
+    static ImplicitVar of(String name) {
+      switch (name) {
+        case "arguments":
+          return ARGUMENTS;
+        case "super":
+          return SUPER;
+        case "this":
+          return THIS;
+        default:
+          return null;
+      }
+    }
   }
 }

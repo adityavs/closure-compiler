@@ -332,6 +332,46 @@ public final class InlineObjectLiteralsTest extends CompilerTestCase {
          "new JSCompiler_object_inline_b_0.c");
   }
 
+  public void testInlineObjectWithLet() {
+    testLocal(
+        "let a = {x:x(), y:y()}; f(a.x, a.y);",
+        lines(
+            "var JSCompiler_object_inline_x_0=x();",
+            "var JSCompiler_object_inline_y_1=y();",
+            "f(JSCompiler_object_inline_x_0, JSCompiler_object_inline_y_1);"));
+  }
+
+  public void testInlineObjectWithConst() {
+    testLocal(
+        "const a = {x:x(), y:y()}; f(a.x, a.y);",
+        "var JSCompiler_object_inline_x_0=x();"
+            + "var JSCompiler_object_inline_y_1=y();"
+            + "f(JSCompiler_object_inline_x_0, JSCompiler_object_inline_y_1);");
+  }
+
+  public void testDontInlineLetInForLoopInit() {
+    // Handling this case should be possible, but we don't currently have that logic in place.
+    testSameLocal("var i; for(let a = {x:x(), y:y()}; i < 0; i++) { f(a.x, a.y); }");
+  }
+
+  public void testDontInlineConstInForLoopInit() {
+    testSameLocal("var i; for(const a = {x:x(), y:y()}; i < 0; i++) { f(a.x, a.y); }");
+  }
+
+
+  public void testDoInlineObjectWithVarInForLoop() {
+    // The Normalize pass actually moves "var a = {x: x(), y: y()}" out of the for loop initializer
+    // before this pass runs, which is why this works.
+    testLocal(
+        "var i; for(var a = {x:x(), y:y()}; i < 0; i++) { f(a.x, a.y); }",
+        "var i;"
+            + "var JSCompiler_object_inline_x_0=x();"
+            + "var JSCompiler_object_inline_y_1=y();"
+            + "for(; i < 0; i++) {"
+            + "f(JSCompiler_object_inline_x_0, JSCompiler_object_inline_y_1);"
+            + "}");
+  }
+
   public void testBug545a() {
     testLocal("var a = {}", "");
   }
@@ -369,26 +409,28 @@ public final class InlineObjectLiteralsTest extends CompilerTestCase {
             "g(object.f);"));
 
     testSame(
-        lines(
-            "var protoObject = {",
-            "  f: function() {",
-            "    return 1;",
-            "  }",
-            "};",
-            "var object = {",
-            "  __proto__: protoObject,",
-            "  g: false",
-            "};",
-            "g(object.g);"),
-        lines(
-            "var protoObject = {",
-            "  f: function() {",
-            "    return 1;",
-            "  }",
-            "};",
-            "var JSCompiler_object_inline___proto___0=protoObject;",
-            "var JSCompiler_object_inline_g_1=false;",
-            "g(JSCompiler_object_inline_g_1)"));
+        externs(
+            lines(
+                "var protoObject = {",
+                "  f: function() {",
+                "    return 1;",
+                "  }",
+                "};",
+                "var object = {",
+                "  __proto__: protoObject,",
+                "  g: false",
+                "};",
+                "g(object.g);")),
+        srcs(
+            lines(
+                "var protoObject = {",
+                "  f: function() {",
+                "    return 1;",
+                "  }",
+                "};",
+                "var JSCompiler_object_inline___proto___0=protoObject;",
+                "var JSCompiler_object_inline_g_1=false;",
+                "g(JSCompiler_object_inline_g_1)")));
   }
 
   public void testSuper() {

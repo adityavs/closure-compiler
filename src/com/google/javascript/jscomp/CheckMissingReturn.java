@@ -98,6 +98,12 @@ class CheckMissingReturn implements ScopedCallback {
       return;
     }
 
+    if (n.isGeneratorFunction()) {
+      // Generator functions always return a Generator. No need to check return statements.
+      // TODO(b/73387406): Investigate adding a warning for generators with no yields.
+      return;
+    }
+
     if (n.isArrowFunction()) {
       Node functionBody = NodeUtil.getFunctionBody(n);
       if (!functionBody.isNormalBlock()) {
@@ -199,8 +205,8 @@ class CheckMissingReturn implements ScopedCallback {
    *     with an empty body
    */
   private static boolean isEmptyFunction(Node function) {
-    return function.getChildCount() == 3 &&
-           !function.getSecondChild().getNext().hasChildren();
+    return function.getChildCount() == 3
+           && !function.getSecondChild().getNext().hasChildren();
   }
 
   /**
@@ -208,7 +214,7 @@ class CheckMissingReturn implements ScopedCallback {
    *     containing void or unknown
    */
   private boolean isVoidOrUnknown(JSType returnType) {
-    final JSType voidType = compiler.getTypeIRegistry().getNativeType(JSTypeNative.VOID_TYPE);
-    return voidType.isSubtype(returnType);
+    final JSType voidType = compiler.getTypeRegistry().getNativeType(JSTypeNative.VOID_TYPE);
+    return voidType.isSubtypeOf(returnType);
   }
 }

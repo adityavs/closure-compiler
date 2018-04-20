@@ -178,15 +178,15 @@ class VariableReferenceCheck implements HotSwapCompilerPass {
 
     private void checkDefaultParam(
         Var param, final Scope scope, final Set<String> varsInFunctionBody) {
-      NodeTraversal.traverseEs6(
+      NodeTraversal.traverse(
           compiler,
           param.getParentNode().getSecondChild(),
           /**
-           * Do a shallow check since cases like:
+           * Do a shallow check since cases like: {@code
            *   function f(y = () => x, x = 5) { return y(); }
-           * is legal. We are going to miss cases like:
+           * } is legal. We are going to miss cases like: {@code
            *   function f(y = (() => x)(), x = 5) { return y(); }
-           * but this should be rare.
+           * } but this should be rare.
            */
           new AbstractShallowCallback() {
             @Override
@@ -195,7 +195,7 @@ class VariableReferenceCheck implements HotSwapCompilerPass {
                 return;
               }
               String refName = n.getString();
-              if (varsInFunctionBody.contains(refName) && !scope.isDeclared(refName, true)) {
+              if (varsInFunctionBody.contains(refName) && !scope.hasSlot(refName)) {
                 compiler.report(JSError.make(n, EARLY_REFERENCE_ERROR, refName));
               }
             }

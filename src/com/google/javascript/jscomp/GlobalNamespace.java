@@ -230,11 +230,11 @@ class GlobalNamespace
   private void process() {
     if (hasExternsRoot()) {
       inExterns = true;
-      NodeTraversal.traverseEs6(compiler, externsRoot, new BuildGlobalNamespace());
+      NodeTraversal.traverse(compiler, externsRoot, new BuildGlobalNamespace());
     }
     inExterns = false;
 
-    NodeTraversal.traverseEs6(compiler, root, new BuildGlobalNamespace());
+    NodeTraversal.traverse(compiler, root, new BuildGlobalNamespace());
     generated = true;
     externsScope = null;
   }
@@ -1110,6 +1110,11 @@ class GlobalNamespace
       return null;
     }
 
+    @Override
+    public StaticTypedScope<TypeI> getScope() {
+      throw new UnsupportedOperationException();
+    }
+
     void addRef(Ref ref) {
       addRefInternal(ref);
       switch (ref.type) {
@@ -1199,7 +1204,7 @@ class GlobalNamespace
     }
 
     List<Ref> getRefs() {
-      return refs == null ? ImmutableList.<Ref>of() : refs;
+      return refs == null ? ImmutableList.of() : refs;
     }
 
     void addRefInternal(Ref ref) {

@@ -16,7 +16,6 @@
 package com.google.javascript.jscomp;
 
 import com.google.common.collect.ImmutableList;
-import com.google.javascript.jscomp.NodeTraversal.Callback;
 import com.google.javascript.jscomp.lint.CheckDuplicateCase;
 import com.google.javascript.jscomp.lint.CheckEmptyStatements;
 import com.google.javascript.jscomp.lint.CheckEnums;
@@ -25,6 +24,7 @@ import com.google.javascript.jscomp.lint.CheckJSDocStyle;
 import com.google.javascript.jscomp.lint.CheckMissingSemicolon;
 import com.google.javascript.jscomp.lint.CheckPrimitiveAsObject;
 import com.google.javascript.jscomp.lint.CheckPrototypeProperties;
+import com.google.javascript.jscomp.lint.CheckRedundantNullabilityModifier;
 import com.google.javascript.jscomp.lint.CheckRequiresAndProvidesSorted;
 import com.google.javascript.jscomp.lint.CheckUnusedLabels;
 import com.google.javascript.jscomp.lint.CheckUselessBlocks;
@@ -42,7 +42,8 @@ class LintPassConfig extends PassConfig.PassConfigDelegate {
     super(new DefaultPassConfig(options));
   }
 
-  @Override protected List<PassFactory> getChecks() {
+  @Override
+  protected List<PassFactory> getChecks() {
     return ImmutableList.of(
         earlyLintChecks,
         checkRequires,
@@ -51,7 +52,8 @@ class LintPassConfig extends PassConfig.PassConfigDelegate {
         lateLintChecks);
   }
 
-  @Override protected List<PassFactory> getOptimizations() {
+  @Override
+  protected List<PassFactory> getOptimizations() {
     return ImmutableList.of();
   }
 
@@ -61,7 +63,7 @@ class LintPassConfig extends PassConfig.PassConfigDelegate {
         protected CompilerPass create(AbstractCompiler compiler) {
           return new CombinedCompilerPass(
               compiler,
-              ImmutableList.<Callback>of(
+              ImmutableList.of(
                   new CheckDuplicateCase(compiler),
                   new CheckEmptyStatements(compiler),
                   new CheckEnums(compiler),
@@ -71,6 +73,7 @@ class LintPassConfig extends PassConfig.PassConfigDelegate {
                   new CheckSuper(compiler),
                   new CheckPrimitiveAsObject(compiler),
                   new ClosureCheckModule(compiler),
+                  new CheckRedundantNullabilityModifier(compiler),
                   new CheckRequiresAndProvidesSorted(compiler),
                   new CheckSideEffects(
                       compiler, /* report */ true, /* protectSideEffectFreeCode */ false),
@@ -130,9 +133,8 @@ class LintPassConfig extends PassConfig.PassConfigDelegate {
         protected CompilerPass create(AbstractCompiler compiler) {
           return new CombinedCompilerPass(
               compiler,
-              ImmutableList.<Callback>of(
-                  new CheckInterfaces(compiler),
-                  new CheckPrototypeProperties(compiler)));
+              ImmutableList.of(
+                  new CheckInterfaces(compiler), new CheckPrototypeProperties(compiler)));
         }
 
         @Override

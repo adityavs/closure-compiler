@@ -102,6 +102,8 @@ public final class ParserTest extends BaseJSTypeTestCase {
     parse("x**-y");
     parse("x/y**z");
 
+    parse("2 ** 3 > 3");
+
     mode = LanguageMode.ECMASCRIPT6;
     strictMode = SLOPPY;
     parseWarning(
@@ -919,6 +921,48 @@ public final class ParserTest extends BaseJSTypeTestCase {
     assertThat(info.getType().isVarArgs()).isTrue();
   }
 
+  public void testInlineJSDocReturnType() {
+    Node fn = parse("function /** string */ f(x) {}").getFirstChild();
+    assertNode(fn).hasType(Token.FUNCTION);
+
+    JSDocInfo info = fn.getFirstChild().getJSDocInfo();
+    assertThat(info.hasType()).isTrue();
+    assertTypeEquals(STRING_TYPE, info.getType());
+  }
+
+  public void testInlineJSDocReturnType_generator1() {
+    mode = LanguageMode.ECMASCRIPT6;
+
+    Node fn = parse("function * /** string */ f(x) {}").getFirstChild();
+    assertNode(fn).hasType(Token.FUNCTION);
+
+    JSDocInfo info = fn.getFirstChild().getJSDocInfo();
+    assertThat(info.hasType()).isTrue();
+    assertTypeEquals(STRING_TYPE, info.getType());
+  }
+
+  public void testInlineJSDocReturnType_generator2() {
+    mode = LanguageMode.ECMASCRIPT6;
+
+    Node fn = parse("function /** string */ *f(x) {}").getFirstChild();
+    assertNode(fn).hasType(Token.FUNCTION);
+
+    JSDocInfo info = fn.getFirstChild().getJSDocInfo();
+    assertThat(info.hasType()).isTrue();
+    assertTypeEquals(STRING_TYPE, info.getType());
+  }
+
+  public void testInlineJSDocReturnType_async() {
+    mode = LanguageMode.ECMASCRIPT8;
+
+    Node fn = parse("async function /** string */ f(x) {}").getFirstChild();
+    assertNode(fn).hasType(Token.FUNCTION);
+
+    JSDocInfo info = fn.getFirstChild().getJSDocInfo();
+    assertThat(info.hasType()).isTrue();
+    assertTypeEquals(STRING_TYPE, info.getType());
+  }
+
   public void testIncorrectJSDocDoesNotAlterJSParsing1() throws Exception {
     assertNodeEquality(
         parse("var a = [1,2]"),
@@ -1416,6 +1460,9 @@ public final class ParserTest extends BaseJSTypeTestCase {
 
     mode = LanguageMode.ECMASCRIPT6;
     parseError("function () {}", "'identifier' expected");
+
+    isIdeMode = true;
+    parseError("function () {}", "'identifier' expected", "unnamed function statement");
   }
 
   public void testArrayDestructuringVar() {
@@ -1513,7 +1560,7 @@ public final class ParserTest extends BaseJSTypeTestCase {
     mode = LanguageMode.ECMASCRIPT6;
     parseWarning(
         "var {first, ...rest} = foo();",
-        getRequiresEsNextMessage(Feature.OBJECT_PATTERN_REST));
+        getRequiresEs2018Message(Feature.OBJECT_PATTERN_REST));
   }
 
   public void testArrayLiteralDeclarationSpread() {
@@ -1540,12 +1587,12 @@ public final class ParserTest extends BaseJSTypeTestCase {
     parseWarning(
         "var o = {first: 1, ...spread};",
         getRequiresEs6Message(Feature.SPREAD_EXPRESSIONS),
-        getRequiresEsNextMessage(Feature.OBJECT_LITERALS_WITH_SPREAD));
+        getRequiresEs2018Message(Feature.OBJECT_LITERALS_WITH_SPREAD));
 
     mode = LanguageMode.ECMASCRIPT6;
     parseWarning(
         "var o = {first: 1, ...spread};",
-        getRequiresEsNextMessage(Feature.OBJECT_LITERALS_WITH_SPREAD));
+        getRequiresEs2018Message(Feature.OBJECT_LITERALS_WITH_SPREAD));
   }
 
   public void testArrayDestructuringAssignRest() {
@@ -1572,7 +1619,7 @@ public final class ParserTest extends BaseJSTypeTestCase {
 
     mode = LanguageMode.ECMASCRIPT6;
     parseWarning("var {first, ...rest} = foo();",
-        getRequiresEsNextMessage(Feature.OBJECT_PATTERN_REST));
+        getRequiresEs2018Message(Feature.OBJECT_PATTERN_REST));
   }
 
   public void testArrayDestructuringAssignRestInvalid() {
@@ -2166,17 +2213,17 @@ public final class ParserTest extends BaseJSTypeTestCase {
         "'one\\\ntwo';",
         requiresLanguageModeMessage(LanguageMode.ECMASCRIPT5, Feature.STRING_CONTINUATION),
         "String continuations are not recommended. See"
-                + " https://google.github.io/styleguide/javascriptguide.xml?showone=Multiline_string_literals#Multiline_string_literals");
+                + " https://google.github.io/styleguide/jsguide.html#features-strings-no-line-continuations");
     assertThat(n.getFirstFirstChild().getString()).isEqualTo("onetwo");
 
     mode = LanguageMode.ECMASCRIPT5;
     parseWarning("'one\\\ntwo';", "String continuations are not recommended. See"
-        + " https://google.github.io/styleguide/javascriptguide.xml?showone=Multiline_string_literals#Multiline_string_literals");
+        + " https://google.github.io/styleguide/jsguide.html#features-strings-no-line-continuations");
     assertThat(n.getFirstFirstChild().getString()).isEqualTo("onetwo");
 
     mode = LanguageMode.ECMASCRIPT6;
     parseWarning("'one\\\ntwo';", "String continuations are not recommended. See"
-        + " https://google.github.io/styleguide/javascriptguide.xml?showone=Multiline_string_literals#Multiline_string_literals");
+        + " https://google.github.io/styleguide/jsguide.html#features-strings-no-line-continuations");
     assertThat(n.getFirstFirstChild().getString()).isEqualTo("onetwo");
   }
 
@@ -2252,7 +2299,7 @@ public final class ParserTest extends BaseJSTypeTestCase {
     expectFeatures(Feature.TEMPLATE_LITERALS);
     Node n = parseWarning("`string \\\ncontinuation`",
         "String continuations are not recommended. See"
-        + " https://google.github.io/styleguide/javascriptguide.xml?showone=Multiline_string_literals#Multiline_string_literals");
+        + " https://google.github.io/styleguide/jsguide.html#features-strings-no-line-continuations");
     Node templateLiteral = n.getFirstFirstChild();
     Node stringNode = templateLiteral.getFirstChild();
     assertNode(stringNode).hasType(Token.STRING);
@@ -3655,6 +3702,23 @@ public final class ParserTest extends BaseJSTypeTestCase {
     parseError("export * as s from './someModule';", "'from' expected");
   }
 
+  public void testExportAsync() {
+    mode = LanguageMode.ECMASCRIPT8;
+    strictMode = SLOPPY;
+
+    expectFeatures(Feature.MODULES, Feature.ASYNC_FUNCTIONS);
+    parse("export async function f() {}");
+  }
+
+  public void testImportExportTypescriptKeyword() {
+    mode = LanguageMode.TYPESCRIPT;
+    parseError("export { namespace };", "cannot use keyword 'namespace' here.");
+
+    mode = LanguageMode.ECMASCRIPT6;
+    parse("export { namespace };");
+    parse("import { namespace } from './input0.js';");
+  }
+
   public void testGoogModule() {
     Node tree = parse("goog.module('example');");
     assertNode(tree).hasType(Token.SCRIPT);
@@ -3820,13 +3884,13 @@ public final class ParserTest extends BaseJSTypeTestCase {
     return requiresLanguageModeMessage(LanguageMode.ECMASCRIPT6, feature);
   }
 
-  private static String getRequiresEsNextMessage(Feature feature) {
-    return requiresLanguageModeMessage(LanguageMode.ES_NEXT, feature);
+  private static String getRequiresEs2018Message(Feature feature) {
+    return requiresLanguageModeMessage(LanguageMode.ECMASCRIPT2018, feature);
   }
 
   private static String requiresLanguageModeMessage(LanguageMode languageMode, Feature feature) {
     return String.format(
-        "this language feature is only supported for %s mode or better: %s",
+        "This language feature is only supported for %s mode or better: %s",
         languageMode,
         feature);
   }

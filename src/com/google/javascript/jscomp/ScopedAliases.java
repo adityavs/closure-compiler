@@ -148,7 +148,7 @@ class ScopedAliases implements HotSwapCompilerPass {
   @Override
   public void hotSwapScript(Node root, Node originalRoot) {
     Traversal traversal = new Traversal();
-    NodeTraversal.traverseEs6(compiler, root, traversal);
+    NodeTraversal.traverse(compiler, root, traversal);
 
     if (!traversal.hasErrors()) {
       // Apply the aliases.
@@ -221,21 +221,40 @@ class ScopedAliases implements HotSwapCompilerPass {
     public abstract void applyAlias(AbstractCompiler compiler);
   }
 
+  private static boolean isValidAliasRhs(Node rhs) {
+    switch (rhs.getToken()) {
+      case GETPROP:
+        return isValidAliasRhs(rhs.getFirstChild());
+      case NAME:
+        return true;
+      case CALL:
+        return NodeUtil.isCallTo(rhs, "goog.module.get");
+      default:
+        return false;
+    }
+  }
+
   private static boolean isAliasDefinition(Node nameNode) {
     if (!nameNode.hasChildren()) {
       return false;
     }
     Node rhs = nameNode.getLastChild();
-    return rhs.isQualifiedName() || NodeUtil.isCallTo(rhs, "goog.module.get");
+    return isValidAliasRhs(rhs);
   }
 
-  private static String getAliasedNamespace(Node aliasDefinition) {
-    if (aliasDefinition.isQualifiedName()) {
-      return aliasDefinition.getQualifiedName();
+  private static String getAliasedNamespace(Node rhs) {
+    switch (rhs.getToken()) {
+      case GETPROP:
+        return getAliasedNamespace(rhs.getFirstChild()) + '.' + rhs.getLastChild().getString();
+      case NAME:
+        return rhs.getString();
+      case CALL:
+        checkState(NodeUtil.isCallTo(rhs, "goog.module.get"), rhs);
+        checkState(rhs.hasTwoChildren(), rhs);
+        return rhs.getLastChild().getString();
+      default:
+        throw new RuntimeException("Invalid alias RHS:" + rhs);
     }
-    checkState(NodeUtil.isCallTo(aliasDefinition, "goog.module.get"), aliasDefinition);
-    checkState(aliasDefinition.hasTwoChildren(), aliasDefinition);
-    return aliasDefinition.getLastChild().getString();
   }
 
   private static class AliasedNode extends AliasUsage {
@@ -616,7 +635,7 @@ class ScopedAliases implements HotSwapCompilerPass {
           renamer.addDeclaredName(s, false);
         }
         MakeDeclaredNamesUnique uniquifier = new MakeDeclaredNamesUnique(renamer);
-        NodeTraversal.traverseEs6ScopeRoots(
+        NodeTraversal.traverseScopeRoots(
             compiler, null, ImmutableList.of(t.getScopeRoot()), uniquifier, true);
       }
     }
@@ -677,9 +696,8 @@ class ScopedAliases implements HotSwapCompilerPass {
       }
 
       Token type = n.getToken();
-      boolean isObjLitShorthand = type == Token.STRING_KEY && !n.hasChildren();
       Var aliasVar = null;
-      if (type == Token.NAME || isObjLitShorthand) {
+      if (type == Token.NAME) {
         String name = n.getString();
         Var lexicalVar = t.getScope().getVar(name);
         if (lexicalVar != null && lexicalVar == aliases.get(name)) {
@@ -693,7 +711,7 @@ class ScopedAliases implements HotSwapCompilerPass {
       }
 
       if (isGoogScopeFunctionBody(t.getEnclosingFunction().getLastChild())) {
-        if (aliasVar != null && !isObjLitShorthand && NodeUtil.isLValue(n)) {
+        if (aliasVar != null && NodeUtil.isLValue(n)) {
           if (aliasVar.getNode() == n) {
             aliasDefinitionsInOrder.add(n);
 

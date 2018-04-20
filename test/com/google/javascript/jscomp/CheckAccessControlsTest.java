@@ -115,6 +115,12 @@ public final class CheckAccessControlsTest extends TypeICompilerTestCase {
         "Variable f has been deprecated: Another reason");
   }
 
+  public void testWarningOnDeprecatedConstVariableWithConst() {
+    testDepName(
+        "/** @deprecated Another reason */ const f = 4; function g() { alert(f); }",
+        "Variable f has been deprecated: Another reason");
+  }
+
   public void testThatNumbersArentDeprecated() {
     testSame("/** @deprecated */ var f = 4; var h = 3; function g() { alert(h); }");
   }
@@ -398,26 +404,26 @@ public final class CheckAccessControlsTest extends TypeICompilerTestCase {
 
   public void testPrivateAccessForProperties5() {
     testError(
-        srcs(new String[] {
-          lines(
-              "/** @constructor */",
-              "function Parent () {",
-              "  /** @private */",
-              "  this.prop = 'foo';",
-              "};"),
-          lines(
-              "/**",
-              " * @constructor",
-              " * @extends {Parent}",
-              " */",
-              "function Child() {",
-              "  this.prop = 'asdf';",
-              "}",
-              "Child.prototype = new Parent();")
-        }),
-        error(
-            BAD_PRIVATE_PROPERTY_ACCESS,
-            "Access to private property prop of Parent not allowed here."));
+        srcs(
+            new String[] {
+              lines(
+                  "/** @constructor */",
+                  "function Parent () {",
+                  "  /** @private */",
+                  "  this.prop = 'foo';",
+                  "};"),
+              lines(
+                  "/**",
+                  " * @constructor",
+                  " * @extends {Parent}",
+                  " */",
+                  "function Child() {",
+                  "  this.prop = 'asdf';",
+                  "}",
+                  "Child.prototype = new Parent();")
+            }),
+        error(BAD_PRIVATE_PROPERTY_ACCESS)
+            .withMessage("Access to private property prop of Parent not allowed here."));
   }
 
   public void testPrivateAccessForProperties6() {
@@ -444,9 +450,8 @@ public final class CheckAccessControlsTest extends TypeICompilerTestCase {
                   "}",
                   "Child.prototype = new x.y.z.Parent();")
             }),
-        error(
-            BAD_PRIVATE_PROPERTY_ACCESS,
-            "Access to private property prop of x.y.z.Parent not allowed here."));
+        error(BAD_PRIVATE_PROPERTY_ACCESS)
+            .withMessage("Access to private property prop of x.y.z.Parent not allowed here."));
   }
 
   public void testPrivateAccess_googModule() {
@@ -465,15 +470,16 @@ public final class CheckAccessControlsTest extends TypeICompilerTestCase {
     this.mode = TypeInferenceMode.OTI_ONLY;
     testError(
         srcs(js),
-        error(
-            BAD_PRIVATE_PROPERTY_ACCESS, "Access to private property m of One not allowed here."));
+        error(BAD_PRIVATE_PROPERTY_ACCESS)
+            .withMessage("Access to private property m of One not allowed here."));
 
+    /*
     this.mode = TypeInferenceMode.NTI_ONLY;
     testError(
         srcs(js),
-        error(
-            BAD_PRIVATE_PROPERTY_ACCESS,
+        error(BAD_PRIVATE_PROPERTY_ACCESS).withMessage(
            "Access to private property m of module$exports$example$One not allowed here."));
+           */
   }
 
   public void testNoPrivateAccessForProperties1() {

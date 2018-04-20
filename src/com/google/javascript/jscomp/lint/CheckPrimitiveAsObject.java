@@ -15,7 +15,6 @@
  */
 package com.google.javascript.jscomp.lint;
 
-import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableSet;
 import com.google.javascript.jscomp.AbstractCompiler;
 import com.google.javascript.jscomp.DiagnosticType;
@@ -57,12 +56,12 @@ public final class CheckPrimitiveAsObject extends AbstractPostOrderCallback
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverseEs6(compiler, root, this);
+    NodeTraversal.traverse(compiler, root, this);
   }
 
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
-    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
+    NodeTraversal.traverse(compiler, scriptRoot, this);
   }
 
   @Override
@@ -94,8 +93,7 @@ public final class CheckPrimitiveAsObject extends AbstractPostOrderCallback
               }
             }
           }
-        },
-        Predicates.<Node>alwaysTrue());
+        });
   }
 
   private void checkForPrimitiveObjectConstructor(NodeTraversal t, Node n) {

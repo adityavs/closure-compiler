@@ -403,6 +403,7 @@ public final class CommandLineRunnerTest extends TestCase {
   public void testCheckUndefinedProperties1() {
     args.add("--warning_level=VERBOSE");
     args.add("--jscomp_error=missingProperties");
+    args.add("--jscomp_off=undefinedNames");
     test("var x = {}; var y = x.bar;", TypeCheck.INEXISTENT_PROPERTY);
   }
 
@@ -508,12 +509,12 @@ public final class CommandLineRunnerTest extends TestCase {
 
   public void testIssue70a() {
     args.add("--language_in=ECMASCRIPT5");
-    test("function foo({}) {}", RhinoErrorReporter.ES6_FEATURE);
+    test("function foo({}) {}", RhinoErrorReporter.LANGUAGE_FEATURE);
   }
 
   public void testIssue70b() {
     args.add("--language_in=ECMASCRIPT5");
-    test("function foo([]) {}", RhinoErrorReporter.ES6_FEATURE);
+    test("function foo([]) {}", RhinoErrorReporter.LANGUAGE_FEATURE);
   }
 
   public void testIssue81() {
@@ -1602,8 +1603,7 @@ public final class CommandLineRunnerTest extends TestCase {
       runner.doRun();
       fail("Expected flag usage exception");
     } catch (FlagUsageException e) {
-      assertThat(e)
-          .hasMessage(
+      assertThat(e).hasMessageThat().isEqualTo(
               "Bad --js flag. Manifest files cannot be generated when the input is from stdin.");
     }
   }
@@ -2431,8 +2431,8 @@ public final class CommandLineRunnerTest extends TestCase {
         Suppliers.ofInstance(externs),
         inputsSupplier,
         modulesSupplier,
-        (Integer code) -> {
-          exitCodes.add(code);
+        exitCode -> {
+          exitCodes.add(exitCode);
           return null;
         });
     runner.run();

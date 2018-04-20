@@ -99,7 +99,7 @@ class CoalesceVariableNames extends AbstractPostOrderCallback implements
   public void process(Node externs, Node root) {
     checkNotNull(externs);
     checkNotNull(root);
-    NodeTraversal.traverseEs6(compiler, root, this);
+    NodeTraversal.traverse(compiler, root, this);
     compiler.setLifeCycleStage(LifeCycleStage.RAW);
   }
 
@@ -227,7 +227,7 @@ class CoalesceVariableNames extends AbstractPostOrderCallback implements
 
       pseudoName = Joiner.on("_").join(allMergedNames);
 
-      while (t.getScope().isDeclared(pseudoName, true)) {
+      while (t.getScope().hasSlot(pseudoName)) {
         pseudoName += "$";
       }
 
@@ -284,7 +284,7 @@ class CoalesceVariableNames extends AbstractPostOrderCallback implements
       // Skip lets and consts that have multiple variables declared in them, otherwise this produces
       // incorrect semantics. See test case "testCapture".
       if (v.isLet() || v.isConst()) {
-        Node nameDecl = NodeUtil.getEnclosingNode(v.getNode(), NodeUtil.isNameDeclaration);
+        Node nameDecl = NodeUtil.getEnclosingNode(v.getNode(), NodeUtil::isNameDeclaration);
         if (NodeUtil.findLhsNodesInNode(nameDecl).size() > 1) {
           continue;
         }
@@ -428,7 +428,7 @@ class CoalesceVariableNames extends AbstractPostOrderCallback implements
    * @param name name node of the variable being coalesced
    */
   private static void removeVarDeclaration(Node name) {
-    Node var = NodeUtil.getEnclosingNode(name, NodeUtil.isNameDeclaration);
+    Node var = NodeUtil.getEnclosingNode(name, NodeUtil::isNameDeclaration);
     Node parent = var.getParent();
 
     if (!var.isVar()) {
@@ -473,7 +473,7 @@ class CoalesceVariableNames extends AbstractPostOrderCallback implements
   private static void makeDeclarationVar(Var coalescedName) {
     if (coalescedName.isLet() || coalescedName.isConst()) {
       Node declNode =
-          NodeUtil.getEnclosingNode(coalescedName.getParentNode(), NodeUtil.isNameDeclaration);
+          NodeUtil.getEnclosingNode(coalescedName.getParentNode(), NodeUtil::isNameDeclaration);
       declNode.setToken(Token.VAR);
     }
   }

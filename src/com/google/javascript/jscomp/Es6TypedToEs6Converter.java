@@ -108,10 +108,10 @@ public final class Es6TypedToEs6Converter implements NodeTraversal.Callback, Hot
   @Override
   public void process(Node externs, Node scriptRoot) {
     ScanNamespaces scanner = new ScanNamespaces();
-    NodeTraversal.traverseEs6(compiler, externs, scanner);
-    NodeTraversal.traverseEs6(compiler, scriptRoot, scanner);
-    NodeTraversal.traverseEs6(compiler, externs, this);
-    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
+    NodeTraversal.traverse(compiler, externs, scanner);
+    NodeTraversal.traverse(compiler, scriptRoot, scanner);
+    NodeTraversal.traverse(compiler, externs, this);
+    NodeTraversal.traverse(compiler, scriptRoot, this);
     if (!compiler.hasHaltingErrors()) {
       compiler.setFeatureSet(compiler.getFeatureSet().withoutTypes());
     }
@@ -120,8 +120,8 @@ public final class Es6TypedToEs6Converter implements NodeTraversal.Callback, Hot
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
     ScanNamespaces scanner = new ScanNamespaces();
-    NodeTraversal.traverseEs6(compiler, scriptRoot, scanner);
-    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
+    NodeTraversal.traverse(compiler, scriptRoot, scanner);
+    NodeTraversal.traverse(compiler, scriptRoot, this);
   }
 
   @Override
@@ -509,7 +509,7 @@ public final class Es6TypedToEs6Converter implements NodeTraversal.Callback, Hot
 
   private void visitTypeAlias(NodeTraversal t, Node n, Node parent) {
     String alias = n.getString();
-    if (t.getScope().isDeclared(alias, true)) {
+    if (t.getScope().hasSlot(alias)) {
       compiler.report(
           JSError.make(n, TYPE_ALIAS_ALREADY_DECLARED, alias));
     }

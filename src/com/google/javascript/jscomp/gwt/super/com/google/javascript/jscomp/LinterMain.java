@@ -13,3 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package com.google.javascript.jscomp;
+
+/** GWT compatible no-op replacement of {@code LinterMain} */
+public class LinterMain {}

@@ -20,7 +20,6 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
 import com.google.common.base.Predicate;
-import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableList;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
@@ -72,7 +71,7 @@ public final class ProcessCommonJSModules extends NodeTraversal.AbstractPreOrder
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverseEs6(compiler, root, this);
+    NodeTraversal.traverse(compiler, root, this);
   }
 
   @Override
@@ -85,7 +84,7 @@ public final class ProcessCommonJSModules extends NodeTraversal.AbstractPreOrder
       }
 
       FindImportsAndExports finder = new FindImportsAndExports();
-      NodeTraversal.traverseEs6(compiler, n, finder);
+      NodeTraversal.traverse(compiler, n, finder);
 
       CompilerInput.ModuleType moduleType = compiler.getInput(n.getInputId()).getJsModuleType();
 
@@ -110,7 +109,7 @@ public final class ProcessCommonJSModules extends NodeTraversal.AbstractPreOrder
 
           if (needsRetraverse) {
             finder = new FindImportsAndExports();
-            NodeTraversal.traverseEs6(compiler, n, finder);
+            NodeTraversal.traverse(compiler, n, finder);
           }
         }
 
@@ -129,10 +128,10 @@ public final class ProcessCommonJSModules extends NodeTraversal.AbstractPreOrder
         }
       } else if (needsRetraverse) {
         finder = new FindImportsAndExports();
-        NodeTraversal.traverseEs6(compiler, n, finder);
+        NodeTraversal.traverse(compiler, n, finder);
       }
 
-      NodeTraversal.traverseEs6(
+      NodeTraversal.traverse(
           compiler,
           n,
           new RewriteModule(
@@ -1057,8 +1056,7 @@ public final class ProcessCommonJSModules extends NodeTraversal.AbstractPreOrder
               compiler.reportFunctionDeleted(n);
             }
           }
-        },
-        Predicates.<Node>alwaysTrue());
+        });
   }
 
   private void reportNestedScopesChanged(Node n) {
@@ -1071,8 +1069,7 @@ public final class ProcessCommonJSModules extends NodeTraversal.AbstractPreOrder
               compiler.reportChangeToChangeScope(n);
             }
           }
-        },
-        Predicates.<Node>alwaysTrue());
+        });
   }
 
   private static UmdPattern findUmdPattern(List<UmdPattern> umdPatterns, Node n) {

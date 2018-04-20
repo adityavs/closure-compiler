@@ -16,13 +16,15 @@
 
 package com.google.javascript.jscomp;
 
-import static com.google.common.base.Preconditions.checkState;
+import static com.google.javascript.jscomp.CheckJSDoc.MISPLACED_SUPPRESS;
 
+import com.google.common.collect.Iterables;
 import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.JSTypeExpression;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
+import java.util.Set;
 import javax.annotation.Nullable;
 
 /**
@@ -71,6 +73,12 @@ final class CheckJSDoc extends AbstractPostOrderCallback implements HotSwapCompi
           "JSC_INVALID_DEFINE_ON_LET",
           "variables annotated with @define may only be declared with VARs, ASSIGNs, or CONSTs");
 
+  public static final DiagnosticType MISPLACED_SUPPRESS =
+      DiagnosticType.warning(
+          "JSC_MISPLACED_SUPPRESS",
+          "@suppress annotation not allowed here. See"
+              + " https://github.com/google/closure-compiler/wiki/@suppress-annotations");
+
   private final AbstractCompiler compiler;
 
   CheckJSDoc(AbstractCompiler compiler) {
@@ -79,13 +87,13 @@ final class CheckJSDoc extends AbstractPostOrderCallback implements HotSwapCompi
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverseEs6(compiler, externs, this);
-    NodeTraversal.traverseEs6(compiler, root, this);
+    NodeTraversal.traverse(compiler, externs, this);
+    NodeTraversal.traverse(compiler, root, this);
   }
 
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
-    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
+    NodeTraversal.traverse(compiler, scriptRoot, this);
   }
 
   @Override
@@ -104,6 +112,67 @@ final class CheckJSDoc extends AbstractPostOrderCallback implements HotSwapCompi
     validateNoSideEffects(n, info);
     validateAbstractJsDoc(n, info);
     validateDefinesDeclaration(n, info);
+    validateSuppress(n, info);
+  }
+
+  private void validateSuppress(Node n, JSDocInfo info) {
+    if (info == null || info.getSuppressions().isEmpty()) {
+      return;
+    }
+    switch (n.getToken()) {
+      case FUNCTION:
+      case CLASS:
+      case VAR:
+      case LET:
+      case CONST:
+      case SCRIPT:
+      case MEMBER_FUNCTION_DEF:
+      case GETTER_DEF:
+      case SETTER_DEF:
+        // Suppressions are always valid here.
+        return;
+
+      case STRING_KEY:
+        if (n.getParent().isObjectLit()) {
+          return;
+        }
+        break;
+
+      case ASSIGN:
+      case GETPROP:
+        if (n.getParent().isExprResult()) {
+          return;
+        }
+        break;
+
+      case CALL:
+        // TODO(blickly): Stop ignoring no-op extraProvide suppression.
+        // We don't actually support extraProvide, but if we did, it would go on a CALL.
+        if (containsOnlySuppressionFor(info, "extraRequire")
+            || containsOnlySuppressionFor(info, "extraProvide")) {
+          return;
+        }
+        break;
+
+      case WITH:
+        if (containsOnlySuppressionFor(info, "with")) {
+          return;
+        }
+        break;
+
+      default:
+        break;
+    }
+    if (containsOnlySuppressionFor(info, "missingRequire")) {
+      return;
+    }
+    compiler.report(JSError.make(n, MISPLACED_SUPPRESS));
+  }
+
+  private static boolean containsOnlySuppressionFor(JSDocInfo jsdoc, String allowedSuppression) {
+    Set<String> suppressions = jsdoc.getSuppressions();
+    return suppressions.size() == 1
+        && Iterables.getOnlyElement(suppressions).equals(allowedSuppression);
   }
 
   private void validateTypedefs(Node n, JSDocInfo info) {
@@ -378,9 +447,10 @@ final class CheckJSDoc extends AbstractPostOrderCallback implements HotSwapCompi
   private boolean isValidMsgName(Node nameNode) {
     if (nameNode.isName() || nameNode.isStringKey()) {
       return nameNode.getString().startsWith("MSG_");
-    } else {
-      checkState(nameNode.isQualifiedName());
+    } else if (nameNode.isQualifiedName()) {
       return nameNode.getLastChild().getString().startsWith("MSG_");
+    } else {
+      return false;
     }
   }
 

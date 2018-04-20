@@ -96,10 +96,10 @@ public final class Es6RewriteBlockScopedDeclaration extends AbstractPostOrderCal
     Scope hoistScope = scope.getClosestHoistScope();
     if (scope != hoistScope) {
       String newName = oldName;
-      if (hoistScope.isDeclared(oldName, true) || undeclaredNames.contains(oldName)) {
+      if (hoistScope.hasSlot(oldName) || undeclaredNames.contains(oldName)) {
         do {
           newName = oldName + "$" + compiler.getUniqueNameIdSupplier().get();
-        } while (hoistScope.isDeclared(newName, true));
+        } while (hoistScope.hasSlot(newName));
         nameNode.setString(newName);
         compiler.reportChangeToEnclosingScope(nameNode);
         Node scopeRoot = scope.getRootNode();
@@ -113,26 +113,28 @@ public final class Es6RewriteBlockScopedDeclaration extends AbstractPostOrderCal
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverseEs6(compiler, root, new CollectUndeclaredNames());
-    NodeTraversal.traverseEs6(compiler, root, this);
+    NodeTraversal.traverse(compiler, root, new CollectUndeclaredNames());
+    NodeTraversal.traverse(compiler, root, this);
     // Needed for let / const declarations in .d.ts externs.
     TranspilationPasses.processTranspile(compiler, externs, transpiledFeatures, this);
-    NodeTraversal.traverseEs6(compiler, root, new Es6RenameReferences(renameTable));
+    NodeTraversal.traverse(compiler, root, new Es6RenameReferences(renameTable));
     LoopClosureTransformer transformer = new LoopClosureTransformer();
-    NodeTraversal.traverseEs6(compiler, root, transformer);
+    NodeTraversal.traverse(compiler, root, transformer);
     transformer.transformLoopClosure();
     rewriteDeclsToVars();
+    TranspilationPasses.markFeaturesAsTranspiledAway(compiler, transpiledFeatures);
   }
 
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
-    NodeTraversal.traverseEs6(compiler, scriptRoot, new CollectUndeclaredNames());
-    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
-    NodeTraversal.traverseEs6(compiler, scriptRoot, new Es6RenameReferences(renameTable));
+    NodeTraversal.traverse(compiler, scriptRoot, new CollectUndeclaredNames());
+    NodeTraversal.traverse(compiler, scriptRoot, this);
+    NodeTraversal.traverse(compiler, scriptRoot, new Es6RenameReferences(renameTable));
     LoopClosureTransformer transformer = new LoopClosureTransformer();
-    NodeTraversal.traverseEs6(compiler, scriptRoot, transformer);
+    NodeTraversal.traverse(compiler, scriptRoot, transformer);
     transformer.transformLoopClosure();
     rewriteDeclsToVars();
+    TranspilationPasses.markFeaturesAsTranspiledAway(compiler, transpiledFeatures);
   }
 
   /**
@@ -216,7 +218,7 @@ public final class Es6RewriteBlockScopedDeclaration extends AbstractPostOrderCal
   private class CollectUndeclaredNames extends AbstractPostOrderCallback {
     @Override
     public void visit(NodeTraversal t, Node n, Node parent) {
-      if (n.isName() && !t.getScope().isDeclared(n.getString(), true)) {
+      if (n.isName() && !t.getScope().hasSlot(n.getString())) {
         undeclaredNames.add(n.getString());
       }
     }
@@ -496,7 +498,7 @@ public final class Es6RewriteBlockScopedDeclaration extends AbstractPostOrderCal
           loopParent.isLabel() ? loopParent.getFirstChild().getString() : null;
       ContinueStatementUpdater continueStatementUpdater =
           new ContinueStatementUpdater(breakLabel, originalLoopLabel);
-      NodeTraversal.traverseEs6(
+      NodeTraversal.traverse(
           compiler, NodeUtil.getLoopCodeBlock(loopNode), continueStatementUpdater);
       return continueStatementUpdater.replacedAContinueStatement;
     }

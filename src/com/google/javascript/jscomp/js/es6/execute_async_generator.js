@@ -16,9 +16,10 @@
 
 'require base';
 'require es6/promise';
+'require es6/generator_engine';
 
 /**
- * Handle the execution of an async function.
+ * Handles the execution of an async function.
  *
  * An async function, foo(a, b), will be rewritten as:
  *
@@ -43,7 +44,7 @@
  * @return {!Promise<?>}
  * @suppress {reportUnknownTypes}
  */
-$jscomp.executeAsyncGenerator = function(generator) {
+$jscomp.asyncExecutePromiseGenerator = function(generator) {
   function passValueToGenerator(value) {
     return generator.next(value);
   }
@@ -67,4 +68,50 @@ $jscomp.executeAsyncGenerator = function(generator) {
 
     handleGeneratorRecord(generator.next());
   });
+};
+
+/**
+ * Handles the execution of a generator function returning promises.
+ *
+ * An async function, foo(a, b), will be rewritten as:
+ *
+ * ```
+ * function foo(a, b) {
+ *   let $jscomp$async$this = this;
+ *   let $jscomp$async$arguments = arguments;
+ *   let $jscomp$async$super$get$x = () => super.x;
+ *   return $jscomp.asyncExecutePromiseGeneratorFunction(
+ *       function* () {
+ *         // original body of foo() with:
+ *         // - await (x) replaced with yield (x)
+ *         // - arguments replaced with $jscomp$async$arguments
+ *         // - this replaced with $jscomp$async$this
+ *         // - super.x replaced with $jscomp$async$super$get$x()
+ *         // - super.x(5) replaced with  $jscomp$async$super$get$x()
+ *         //      .call($jscomp$async$this, 5)
+ *       });
+ * }
+ * ```
+ * @param {function(): !Generator<?>} generatorFunction
+ * @return {!Promise<?>}
+ * @suppress {reportUnknownTypes}
+ */
+$jscomp.asyncExecutePromiseGeneratorFunction = function(generatorFunction) {
+  return $jscomp.asyncExecutePromiseGenerator(generatorFunction());
+};
+
+/**
+ * Handles the execution of a state machine program that represents transpiled
+ * async function.
+ *
+ * @final
+ * @param {function(!$jscomp.generator.Context<?>): (void|{value: ?})} program
+ * @return {!Promise<?>}
+ * @suppress {reportUnknownTypes, visibility}
+ */
+$jscomp.asyncExecutePromiseGeneratorProgram = function(program) {
+  return $jscomp.asyncExecutePromiseGenerator(
+      new $jscomp.generator.Generator_(
+          new $jscomp.generator.Engine_(
+              program)));
 };

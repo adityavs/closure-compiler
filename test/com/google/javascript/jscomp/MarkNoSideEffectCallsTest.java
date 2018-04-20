@@ -234,7 +234,7 @@ public final class MarkNoSideEffectCallsTest extends CompilerTestCase {
 
   void testMarkCalls(
       String extraExterns, String source, List<String> expected) {
-    testSame(EXTERNS + extraExterns, source);
+    testSame(externs(EXTERNS + extraExterns), srcs(source));
     assertEquals(expected, noSideEffectCalls);
     noSideEffectCalls.clear();
   }
@@ -261,8 +261,8 @@ public final class MarkNoSideEffectCallsTest extends CompilerTestCase {
     @Override
     public void process(Node externs, Node root) {
       passUnderTest.process(externs, root);
-      NodeTraversal.traverseEs6(compiler, externs, this);
-      NodeTraversal.traverseEs6(compiler, root, this);
+      NodeTraversal.traverse(compiler, externs, this);
+      NodeTraversal.traverse(compiler, root, this);
     }
 
     @Override

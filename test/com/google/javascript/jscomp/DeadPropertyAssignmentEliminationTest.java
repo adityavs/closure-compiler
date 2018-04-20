@@ -194,6 +194,64 @@ public class DeadPropertyAssignmentEliminationTest extends CompilerTestCase {
             "  doSomething(this.c);",
             "  this.c = 30;",
             "}"));
+
+    test(
+        lines(
+            "var foo = function() {",
+            "  a.b.c = 20;",
+            "  doSomething(a.b.c = 25);",
+            "  a.b.c = 30;",
+            "}"),
+        lines(
+            "var foo = function() {",
+            "  20;",
+            "  doSomething(a.b.c = 25);",
+            "  a.b.c = 30;",
+            "}"));
+  }
+
+  public void testYield() {
+    // Assume that properties may be read during a yield
+    testSame(
+        lines(
+            "var foo = function*() {",
+            "  a.b.c = 20;",
+            "  yield;",
+            "  a.b.c = 30;",
+            "}"));
+
+    testSame(
+        lines(
+            "/** @constructor */",
+            "var foo = function*() {",
+            "  this.c = 20;",
+            "  yield;",
+            "  this.c = 30;",
+            "}"));
+
+    testSame(
+        lines(
+            "var obj = {",
+            "  *gen() {",
+            "    this.c = 20;",
+            "    yield;",
+            "    this.c = 30;",
+            "  }",
+            "}"));
+
+    test(
+        lines(
+            "var foo = function*() {",
+            "  a.b.c = 20;",
+            "  yield a.b.c = 25;",
+            "  a.b.c = 30;",
+            "}"),
+        lines(
+            "var foo = function*() {",
+            "  20;",
+            "  yield a.b.c = 25;",
+            "  a.b.c = 30;",
+            "}"));
   }
 
   public void testUnknownLookup() {
@@ -1101,29 +1159,24 @@ public class DeadPropertyAssignmentEliminationTest extends CompilerTestCase {
     );
 
     testSame(
-        externs,
-        lines(
-            "function z() {",
-            "  window.innerWidth = 10;",
-            "  window.innerWidth = 20;",
-            "}"));
+        externs(externs),
+        srcs(
+            lines(
+                "function z() {", "  window.innerWidth = 10;", "  window.innerWidth = 20;", "}")));
 
     testSame(
-        externs,
-        lines(
-            "function z() {",
-            "  var img = new Image();",
-            "  img.src = '';",
-            "  img.src = 'foo.bar';",
-            "}"));
+        externs(externs),
+        srcs(
+            lines(
+                "function z() {",
+                "  var img = new Image();",
+                "  img.src = '';",
+                "  img.src = 'foo.bar';",
+                "}")));
 
     testSame(
-        externs,
-        lines(
-            "function z(x) {",
-            "  x.src = '';",
-            "  x.src = 'foo.bar';",
-            "}"));
+        externs(externs),
+        srcs(lines("function z(x) {", "  x.src = '';", "  x.src = 'foo.bar';", "}")));
   }
 
   public void testJscompInherits() {
@@ -1150,6 +1203,21 @@ public class DeadPropertyAssignmentEliminationTest extends CompilerTestCase {
             "  10;",
             "  foo.bar = 20;",
             "}"));
+  }
+
+  public void testGithubIssue2874() {
+    testSame(
+        lines(
+            "var globalObj = {i0:0};\n",
+            "function func(b) {",
+            "  var g = globalObj;",
+            "  var f = b;",
+            "  g.i0 = f.i0;",
+            "  g = b;",
+            "  g.i0 = 0;",
+            "}",
+            "func({i0:2});",
+            "alert(globalObj);"));
   }
 
   @Override

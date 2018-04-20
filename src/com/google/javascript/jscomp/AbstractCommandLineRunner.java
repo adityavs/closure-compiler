@@ -265,6 +265,11 @@ public abstract class AbstractCommandLineRunner<A extends Compiler,
       Appendable out, CompilerInput input, String content) throws IOException;
 
   /**
+   * Writes whatever runtime libraries are needed to bundle.
+   */
+  protected abstract void appendRuntimeTo(Appendable out) throws IOException;
+
+  /**
    * Returns the instance of the Options to use when {@link #run()} is called. createCompiler() is
    * called before createOptions(), so getCompiler() will not return null when createOptions() is
    * called.
@@ -1182,9 +1187,11 @@ public abstract class AbstractCommandLineRunner<A extends Compiler,
       compiler.parseForCompilation();
       if (!compiler.hasErrors()) {
         compiler.stage1Passes();
-        compiler.saveState(serializedOutputStream);
-        compiler.performPostCompilationTasks();
       }
+      if (!compiler.hasErrors()) {
+        compiler.saveState(serializedOutputStream);
+      }
+      compiler.performPostCompilationTasks();
     } catch (IOException e) {
       compiler.report(JSError.make(COULD_NOT_SERIALIZE_AST, filename));
     } finally {
@@ -2032,6 +2039,16 @@ public abstract class AbstractCommandLineRunner<A extends Compiler,
   @VisibleForTesting
   void printBundleTo(Iterable<CompilerInput> inputs, Appendable out)
       throws IOException {
+    if (!compiler.getOptions().preventLibraryInjection) {
+      // ES6 modules will need a runtime in a bundle. Skip appending this runtime if there are no
+      // ES6 modules to cut down on size.
+      for (CompilerInput input : inputs) {
+        if ("es6".equals(input.getLoadFlags().get("module"))) {
+          appendRuntimeTo(out);
+          break;
+        }
+      }
+    }
 
     for (CompilerInput input : inputs) {
       // Every module has an empty file in it. This makes it easier to implement

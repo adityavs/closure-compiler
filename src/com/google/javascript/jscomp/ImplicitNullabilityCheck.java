@@ -50,7 +50,7 @@ public final class ImplicitNullabilityCheck extends AbstractPostOrderCallback
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverseRootsEs6(compiler, this, externs, root);
+    NodeTraversal.traverseRoots(compiler, this, externs, root);
   }
 
   /**
@@ -75,6 +75,7 @@ public final class ImplicitNullabilityCheck extends AbstractPostOrderCallback
               }
             });
 
+    final Scope scope = t.getScope();
     for (Node typeRoot : info.getTypeNodes()) {
       NodeUtil.visitPreOrder(
           typeRoot,
@@ -114,7 +115,7 @@ public final class ImplicitNullabilityCheck extends AbstractPostOrderCallback
                 }
               }
               String typeName = node.getString();
-              if (typeName.equals("null") || registry.getType(typeName) == null) {
+              if (typeName.equals("null") || registry.getType(scope, typeName) == null) {
                 return;
               }
               TypeI type = registry.createTypeFromCommentNode(node);
@@ -123,7 +124,7 @@ public final class ImplicitNullabilityCheck extends AbstractPostOrderCallback
               }
             }
           },
-          Predicates.<Node>alwaysTrue());
+          Predicates.alwaysTrue());
     }
   }
 

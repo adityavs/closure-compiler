@@ -202,6 +202,33 @@ public class AggressiveInlineAliasesTest extends CompilerTestCase {
     testSame("var obj = {foo: {bar: 3}}; var bar = obj.foo.bar; obj.foo = {}; alert(bar);");
   }
 
+  public void testAliasingOfReassignedProperty4() {
+    // Note: it should be safe to inline aliases for properties of ns below, even though ns
+    // has multiple definitions. Not inlining "foo" to "ns.ctor.foo" actually causes bad code later,
+    // because CollapseProperties unsafely collapses aliased ctor properties.
+    test(
+        lines(
+            "var ns = {};",
+            "/** @constructor */ ns.ctor = function() {};",
+            "ns.ctor.foo = 3;",
+            "var foo = ns.ctor.foo;",
+            "ns = ns || {};", // safe reinitialization of ns.
+            "alert(foo);"),
+        lines(
+            "var ns = {};",
+            "/** @constructor */ ns.ctor = function() {};",
+            "ns.ctor.foo = 3;",
+            "var foo = null;",
+            "ns = ns || {};",
+            "alert(ns.ctor.foo);"));
+  }
+
+  public void testAliasingOfReassignedProperty5() {
+    test(
+        "var obj = {foo: {bar: 3}}; var bar = obj.foo.bar; var obj; alert(bar);",
+        "var obj = {foo: {bar: 3}}; var bar =        null; var obj; alert(obj.foo.bar);");
+  }
+
   public void testAddPropertyToChildFuncOfUncollapsibleObjectInLocalScope() {
     test(
         "var a = {};"

@@ -926,7 +926,7 @@ angular.Scope.prototype.$eval = function(opt_exp, opt_locals) {};
  */
 angular.Scope.prototype.$evalAsync = function(opt_exp, opt_locals) {};
 
-/** @type {string} */
+/** @type {number} */
 angular.Scope.prototype.$id;
 
 /**
@@ -981,6 +981,7 @@ angular.Scope.Event.prototype.name;
 
 angular.Scope.Event.prototype.preventDefault = function() {};
 
+/** @type {!Function|undefined} */
 angular.Scope.Event.prototype.stopPropagation = function() {};
 
 /** @type {!angular.Scope} */
@@ -996,34 +997,12 @@ angular.Scope.prototype.$on = function(name, listener) {};
 
 
 /**
- * @type {!Object}
+ * @type {{
+ *     full:string, major:number, minor:number, dot:number, codeName:string}}
  */
-angular.version = {};
+angular.version;
 
-/**
- * @type {string}
- */
-angular.version.full = '';
 
-/**
- * @type {number}
- */
-angular.version.major = 0;
-
-/**
- * @type {number}
- */
-angular.version.minor = 0;
-
-/**
- * @type {number}
- */
-angular.version.dot = 0;
-
-/**
- * @type {string}
- */
-angular.version.codeName = '';
 
 /******************************************************************************
  * $anchorScroll Service
@@ -1808,7 +1787,7 @@ angular.$interpolate;
 
 /**
  * @typedef {
- *  function(function(), number=, number=, boolean=):!angular.$q.Promise
+ *  function(function(number=), number=, number=, boolean=):!angular.$q.Promise
  * }
  */
 angular.$interval;

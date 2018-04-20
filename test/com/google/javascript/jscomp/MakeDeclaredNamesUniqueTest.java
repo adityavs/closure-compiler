@@ -49,7 +49,7 @@ public final class MakeDeclaredNamesUniqueTest extends CompilerTestCase {
             renamer = new MakeDeclaredNamesUnique(new InlineRenamer(compiler.getCodingConvention(),
                 compiler.getUniqueNameIdSupplier(), localNamePrefix, removeConst, true, null));
           }
-          NodeTraversal.traverseRootsEs6(compiler, renamer, externs, root);
+          NodeTraversal.traverseRoots(compiler, renamer, externs, root);
         }
       };
     } else {
@@ -90,9 +90,9 @@ public final class MakeDeclaredNamesUniqueTest extends CompilerTestCase {
 
   private void testSameWithInversion(String externs, String original) {
     invert = false;
-    testSame(externs, original);
+    testSame(externs(externs), srcs(original));
     invert = true;
-    testSame(externs, original);
+    testSame(externs(externs), srcs(original));
     invert = false;
   }
 
@@ -106,6 +106,14 @@ public final class MakeDeclaredNamesUniqueTest extends CompilerTestCase {
 
   private void testInFunction(String original, String expected) {
     test(wrapInFunction(original), wrapInFunction(expected));
+  }
+
+  public void testShadowedBleedingName() {
+    this.useDefaultRenamer = true;
+
+    test(
+        "var foo; var x = function foo(){var foo;}",
+        "var foo; var x = function foo$jscomp$1(){var foo$jscomp$2}");
   }
 
   public void testMakeLocalNamesUniqueWithContext1() {
@@ -197,7 +205,7 @@ public final class MakeDeclaredNamesUniqueTest extends CompilerTestCase {
     testSameWithInversion(externs, "var extern1 = extern1 || {};");
 
     // Verify global names are untouched.
-    testSame(externs, "var extern1 = extern1 || {};");
+    testSame(externs(externs), srcs("var extern1 = extern1 || {};"));
   }
 
   public void testMakeLocalNamesUniqueWithContext4() {

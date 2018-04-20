@@ -100,6 +100,10 @@ public final class ConstCheckTest extends CompilerTestCase {
     testWarning("const xyz = 1; xyz = 2;");
   }
 
+  public void testConstantRedefined4() {
+    testError("let XYZ = 1; XYZ = 2;");
+  }
+
   public void testConstantRedefinedInLocalScope1() {
     testError("var XYZ = 1; (function(){ XYZ = 2; })();");
   }
@@ -180,6 +184,10 @@ public final class ConstCheckTest extends CompilerTestCase {
     testWarning("/** @const */ var XYZ = 1; XYZ = 2;");
   }
 
+  public void testConstAnnotation2() {
+    testWarning("/** @const */ let x = 1; x = 2;");
+  }
+
   public void testConstAnnotation3() {
     testWarning("/** @const */ const xyz = 1; xyz = 2;");
   }
@@ -215,7 +223,7 @@ public final class ConstCheckTest extends CompilerTestCase {
   public void testConstSuppressionOnVarFromExterns() {
     String externs = "/** @const */ var xyz;";
     String js = "/** @suppress {const} */ var xyz = 3;";
-    testSame(externs, js);
+    testSame(externs(externs), srcs(js));
   }
 
   public void testConstSuppressionOnInc() {

@@ -49,8 +49,541 @@ public final class TypeCheckNoTranspileTest extends CompilerTypeTestCase {
     return options;
   }
 
-  public void testUnsupported() {
-    testTypes("const x = 0;", "Internal Error: TypeCheck doesn't know how to handle CONST", true);
+  public void testGetTypedPercent() {
+    // Make sure names declared with `const` and `let` are counted correctly for typed percentage.
+    // This was created my a modifying a copy of TypeCheckTest.testGetTypedPercent1()
+    String js =
+        lines(
+            "const id = function(x) { return x; }",
+            "let id2 = function(x) { return id(x); }");
+    assertEquals(50.0, getTypedPercent(js), 0.1);
+  }
+
+  private double getTypedPercent(String js) {
+    Node n = compiler.parseTestCode(js);
+
+    Node externs = IR.root();
+    IR.root(externs, n);
+
+    TypeCheck t = makeTypeCheck();
+    t.processForTesting(null, n);
+    return t.getTypedPercent();
+  }
+
+  public void testGlobalEnumWithLet() {
+    testTypes(
+        lines(
+            "/** @enum */", // type defaults to {number}
+            "let E = {A: 1, B: 2};",
+            "",
+            "/**",
+            " * @param {E} x",
+            " * @return {number}",
+            " */",
+            "function f(x) {return x}"));
+  }
+
+  public void testGlobalEnumWithConst() {
+    testTypes(
+        lines(
+            "/** @enum */", // type defaults to {number}
+            "const E = {A: 1, B: 2};",
+            "",
+            "/**",
+            " * @param {E} x",
+            " * @return {number}",
+            " */",
+            "function f(x) {return x}"));
+  }
+
+  public void testLocalEnumWithLet() {
+    // TODO(bradfordcsmith): Local enum types should be non-nullable just like the global ones.
+    testTypes(
+        lines(
+            "{",
+            "  /** @enum */", // type defaults to {number}
+            "  let E = {A: 1, B: 2};",
+            "",
+            "  /**",
+            "   * @param {E} x",
+            "   * @return {number}",
+            "   */",
+            "  function f(x) {return x}",
+            "}"),
+        lines(
+            "inconsistent return type",
+            "found   : (E|null)",
+            "required: number"));
+  }
+
+  public void testLocalEnumWithConst() {
+    // TODO(bradfordcsmith): Local enum types should be non-nullable just like the global ones.
+    testTypes(
+        lines(
+            "{",
+            "  /** @enum */", // type defaults to {number}
+            "  const E = {A: 1, B: 2};",
+            "",
+            "  /**",
+            "   * @param {E} x",
+            "   * @return {number}",
+            "   */",
+            "  function f(x) {return x}",
+            "}"),
+        lines(
+            "inconsistent return type",
+            "found   : (E|null)",
+            "required: number"));
+  }
+
+  public void testGlobalTypedefWithLet() {
+    testTypes(
+        lines(
+            "/** @typedef {number} */",
+            "let Bar;",
+            "/** @param {Bar} x */",
+            "function f(x) {}",
+            "f('3');",
+            ""),
+        lines(
+            "actual parameter 1 of f does not match formal parameter",
+            "found   : string",
+            "required: number"));
+  }
+
+  public void testLocalTypedefWithLet() {
+    // TODO(bradfordcsmith): It should be possible to define local typedefs.
+    testTypes(
+        lines(
+            "{",
+            "  /** @typedef {number} */",
+            "  let Bar;",
+            "  /** @param {Bar} x */",
+            "  function f(x) {}",
+            "  f('3');",
+            "}",
+            ""),
+        "Bad type annotation. Unknown type Bar");
+  }
+
+  public void testConstWrongType() {
+    testTypes(
+        "/** @type {number} */ const x = 'hi';",
+        lines(
+            "initializing variable", // preserve newlines
+            "found   : string",
+            "required: number"));
+  }
+
+  public void testLetWrongType() {
+    testTypes(
+        "/** @type {number} */ let x = 'hi';",
+        lines(
+            "initializing variable", // preserve newlines
+            "found   : string",
+            "required: number"));
+  }
+
+  public void testForOf1() {
+    testTypes("/** @type {!Iterable} */ var it; for (var elem of it) {}");
+  }
+
+  public void testForOf2() {
+    testTypes(
+        lines(
+            "function takesString(/** string */ s) {}",
+            "/** @type {!Iterable<string>} */ var it;",
+            "for (var elem of it) { takesString(elem); }"));
+  }
+
+  public void testForOf3() {
+    testTypes(
+        lines(
+            "function takesString(/** string */ s) {}",
+            "/** @type {!Iterable<number>} */ var it;",
+            "for (var elem of it) { takesString(elem); }"),
+        lines(
+            "actual parameter 1 of takesString does not match formal parameter",
+            "found   : number",
+            "required: string"));
+  }
+
+  public void testForOf_wrongLoopVarType() {
+    // TODO(b/77905791): this should generate an error
+    testTypes(
+        lines(
+            "/** @type {!Array<number>} */",
+            "var numArray = [1, 2];",
+            "/** @type {string} */",
+            "var elem = '';",
+            "for (elem of numArray) {}", "")
+    );
+  }
+
+  public void testForOf_array1() {
+    testTypes("for (var elem of [1, 2]) {}");
+  }
+
+  public void testForOf_array2() {
+    testTypes(
+        lines(
+            "/** @type {!Array<number>} */ var arr = [1, 2];",
+            "function takesString(/** string */ s) {}",
+            "for (var elem of arr) { takesString(elem); }"),
+        lines(
+            "actual parameter 1 of takesString does not match formal parameter",
+            "found   : number",
+            "required: string"));
+  }
+
+  public void testForOf_array3() {
+    testTypes(
+        lines(
+            "/** @type {!Array<number>} */ var arr = [1, 2];",
+            "function takesNumber(/** number */ n) {}",
+            "for (var elem of arr) { takesNumber(elem); }"));
+  }
+
+  // TODO(tbreisacher): Should be no warning here.
+  public void testForOf_string1() {
+    testTypes(
+        lines(
+            "function takesString(/** string */ s) {}",
+            "for (var ch of 'a string') { takesString(elem); }"),
+        lines(
+            "Can only iterate over a (non-null) Iterable type",
+            "found   : string",
+            "required: Iterable"));
+  }
+
+  // TODO(tbreisacher): Should be a type mismatch warning here because we're passing a string to
+  // takesNumber.
+  public void testForOf_string2() {
+    testTypes(
+        lines(
+            "function takesNumber(/** number */ n) {}",
+            "for (var ch of 'a string') { takesNumber(elem); }"),
+        lines(
+            "Can only iterate over a (non-null) Iterable type",
+            "found   : string",
+            "required: Iterable"));
+  }
+
+  public void testForOf_StringObject1() {
+    testTypes(
+        lines(
+            "function takesString(/** string */ s) {}",
+            "for (var ch of new String('boxed')) { takesString(elem); }"));
+  }
+
+  public void testForOf_StringObject2() {
+    testTypes(
+        lines(
+            "function takesNumber(/** number */ n) {}",
+            "for (var ch of new String('boxed')) { takesNumber(elem); }"));
+  }
+
+  public void testForOf_iterableTypeIsNotFirstTemplateType() {
+    testTypes(
+        lines(
+            "function takesNumber(/** number */ n) {}",
+            "",
+            "/**",
+            " * @constructor",
+            " * @implements {Iterable<T>}",
+            " * @template S, T",
+            " */",
+            "function MyIterable() {}",
+            "",
+            "// Note that 'mi' is an Iterable<string>, not an Iterable<number>.",
+            "/** @type {!MyIterable<number, string>} */",
+            "var mi;",
+            "",
+            "for (var t of mi) { takesNumber(t); }", ""),
+        lines(
+            "actual parameter 1 of takesNumber does not match formal parameter",
+            "found   : string",
+            "required: number"));
+  }
+
+  public void testForOf_unionType1() {
+    testTypes(
+        lines(
+            "function takesNumber(/** number */ n) {}",
+            "/** @param {(!Array<string>|undefined)} arr */",
+            "function f(arr) {",
+            "  for (let x of (arr || [])) {",
+            "    takesNumber(x);", // TODO(b/77904110): Can we warn here? Currently we infer x to
+            "  }",                 // have the unknown type because (arr || []) has type Array.
+            "}"));
+  }
+
+  public void testForOf_unionType2() {
+    testTypes(
+        lines(
+            "/** @param {(number|undefined)} n */",
+            "function f(n) {",
+            "  for (let x of (n || [])) {}",
+            "}"),
+        lines(
+            "Can only iterate over a (non-null) Iterable type",
+            "found   : (Array|number)",
+            "required: Iterable"));
+  }
+
+  public void testForOf_nullable() {
+    testTypes(
+        "/** @type {?Iterable} */ var it; for (var elem of it) {}",
+        lines(
+            "Can only iterate over a (non-null) Iterable type",
+            "found   : (Iterable|null)",
+            "required: Iterable"));
+  }
+
+  public void testForOf_maybeUndefined() {
+    testTypes(
+        "/** @type {!Iterable|undefined} */ var it; for (var elem of it) {}",
+        lines(
+            "Can only iterate over a (non-null) Iterable type",
+            "found   : (Iterable|undefined)",
+            "required: Iterable"));
+  }
+
+  public void testForOf_let() {
+    // TypeCheck can now handle `let`
+    testTypes("/** @type {!Iterable} */ let it; for (let elem of it) {}");
+  }
+
+  public void testForOf_const() {
+    // TypeCheck can now handle const
+    testTypes("/** @type {!Iterable} */ const it = []; for (const elem of it) {}");
+  }
+
+  public void testGenerator1() {
+    testTypes("/** @return {!Generator<?>} */ function* gen() {}");
+  }
+
+  public void testGenerator2() {
+    testTypes("/** @return {!Generator<number>} */ function* gen() { yield 1; }");
+  }
+
+  public void testGenerator3() {
+    testTypes(
+        "/** @return {!Generator<string>} */ function* gen() {  yield 1; }",
+        lines(
+            "Yielded type does not match declared return type.",
+            "found   : number",
+            "required: string"));
+  }
+
+  public void testGenerator4() {
+    testTypes(
+        lines(
+            "/** @return {!Generator} */", // treat Generator as Generator<?>
+            "function* gen() {",
+            "  yield 1;",
+            "}"));
+  }
+
+  public void testGenerator5() {
+    // Test more complex type inference inside the yield expression
+    testTypes(
+        lines(
+            "/** @return {!Generator<{a: number, b: string}>} */",
+            "function *gen() {",
+            "  yield {a: 3, b: '4'};",
+            "}",
+            "var g = gen();"));
+  }
+
+  public void testGenerator6() {
+    testTypes(
+        lines(
+            "/** @return {!Generator<string>} */",
+            "function* gen() {",
+            "}",
+            "var g = gen();",
+            "var /** number */ n = g.next().value;"),
+        lines(
+            "initializing variable", // test that g.next().value typechecks properly
+            "found   : string",
+            "required: number"));
+  }
+
+  public void testGenerator_nextWithParameter() {
+    // Note: we infer "var x = yield 1" to have a unknown type. Thus we don't warn "yield x + 2"
+    // actually yielding a string, or "k" not being number type.
+    testTypes(
+        lines(
+            "/** @return {!Generator<number>} */",
+            "function* gen() {",
+            "  var x = yield 1;",
+            "  yield x + 2;",
+            "}",
+            "var g = gen();",
+            "var /** number */ n = g.next().value;", // 1
+            "var /** number */ k = g.next('').value;")); // '2'
+  }
+
+  public void testGenerator_yieldUndefined1() {
+    testTypes(
+        lines(
+            "/** @return {!Generator<undefined>} */",
+            "function* gen() {",
+            "  yield undefined;",
+            "  yield;", // yield undefined
+            "}"));
+  }
+
+  public void testGenerator_yieldUndefined2() {
+    testTypes(
+        lines(
+            "/** @return {!Generator<number>} */",
+            "function* gen() {",
+            "  yield;", // yield undefined
+            "}"),
+        lines(
+            "Yielded type does not match declared return type.",
+            "found   : undefined",
+            "required: number"));
+  }
+
+  public void testGenerator_returnsIterable1() {
+    testTypes("/** @return {!Iterable<?>} */ function *gen() {}");
+  }
+
+  public void testGenerator_returnsIterable2() {
+    testTypes(
+        "/** @return {!Iterable<string>} */ function* gen() {  yield 1; }",
+        lines(
+            "Yielded type does not match declared return type.",
+            "found   : number",
+            "required: string"));
+  }
+
+  public void testGenerator_returnsIterator1() {
+    testTypes("/** @return {!Iterator<?>} */ function *gen() {}");
+  }
+
+  public void testGenerator_returnsIterator2() {
+    testTypes(
+        "/** @return {!Iterator<string>} */ function* gen() {  yield 1; }",
+        lines(
+            "Yielded type does not match declared return type.",
+            "found   : number",
+            "required: string"));
+  }
+
+  public void testGenerator_returnsIteratorIterable() {
+    testTypes("/** @return {!IteratorIterable<?>} */ function *gen() {}");
+  }
+
+  public void testGenerator_cantReturnArray() {
+    testTypes(
+        "/** @return {!Array<?>} */ function *gen() {}",
+        lines(
+            "A generator function must return a (supertype of) Generator",
+            "found   : Array<?>",
+            "required: Generator"));
+  }
+
+  public void testGenerator_notAConstructor() {
+    testTypes(
+        lines(
+            "/** @return {!Generator<number>} */",
+            "function* gen() {",
+            "  yield 1;",
+            "}",
+            "var g = new gen;"),
+        "cannot instantiate non-constructor");
+  }
+
+  public void testGenerator_noDeclaredReturnType1() {
+    testTypes("function *gen() {} var /** !Generator<?> */ g = gen();");
+  }
+
+  public void testGenerator_noDeclaredReturnType2() {
+    testTypes("function *gen() {} var /** !Generator<number> */ g = gen();");
+  }
+
+  public void testGenerator_noDeclaredReturnType3() {
+    // We infer gen() to return !Generator<?>, so don't warn for a type mismatch with string
+    testTypes(
+        lines(
+            "function *gen() {",
+            "  yield 1;",
+            "  yield 2;",
+            "}",
+            "var /** string */ g = gen().next().value;"));
+  }
+
+  public void testGenerator_return1() {
+    testTypes("/** @return {!Generator<number>} */ function *gen() { return 1; }");
+  }
+
+  public void testGenerator_return2() {
+    testTypes("/** @return {!Generator<string>} */ function *gen() {  return 1; }",
+        lines(
+            "inconsistent return type",
+            "found   : number",
+            "required: string"));
+  }
+
+  public void testGenerator_return3() {
+    // Allow this although returning "undefined" is inconsistent with !Generator<number>.
+    // Probably the user is not intending to use the return value.
+    testTypes("/** @return {!Generator<number>} */ function *gen() {  return; }");
+  }
+
+  // test yield*
+  public void testGenerator_yieldAll1() {
+    testTypes(
+        lines(
+            "/** @return {!Generator<number>} */",
+            "function *gen() {",
+            "  yield* [1, 2, 3];",
+            "}"));
+  }
+
+  public void testGenerator_yieldAll2() {
+    testTypes(
+        "/** @return {!Generator<number>} */ function *gen() { yield* 1; }",
+        lines(
+            "Expression yield* expects an iterable",
+            "found   : number",
+            "required: Iterable"));
+  }
+
+  public void testGenerator_yieldAll3() {
+    testTypes(
+        lines(
+            "/** @return {!Generator<number>} */",
+            "function *gen1() {",
+            "  yield 1;",
+            "}",
+            "",
+            "/** @return {!Generator<number>} */",
+            "function *gen2() {",
+            "  yield* gen1();",
+            "}"));
+  }
+
+  public void testGenerator_yieldAll4() {
+    testTypes(
+        lines(
+            "/** @return {!Generator<string>} */",
+            "function *gen1() {",
+            "  yield 'a';",
+            "}",
+            "",
+            "/** @return {!Generator<number>} */",
+            "function *gen2() {",
+            "  yield* gen1();",
+            "}"),
+        lines(
+            "Yielded type does not match declared return type.",
+            "found   : string",
+            "required: number"));
   }
 
   private void testTypes(String js) {
@@ -296,3 +829,4 @@ public final class TypeCheckNoTranspileTest extends CompilerTypeTestCase {
     }
   }
 }
+

@@ -235,7 +235,7 @@ class RemoveUnusedCode implements CompilerPass {
     // Create scope from parent of root node, which also has externs as a child, so we'll
     // have extern definitions in scope.
     Scope scope = scopeCreator.createScope(root.getParent(), null);
-    if (!scope.isDeclared(NodeUtil.JSC_PROPERTY_NAME_FN, /* recurse */ true)) {
+    if (!scope.hasSlot(NodeUtil.JSC_PROPERTY_NAME_FN)) {
       // TODO(b/70730762): Passes that add references to this should ensure it is declared.
       // NOTE: null input makes this an extern var.
       scope.declare(
@@ -1230,7 +1230,12 @@ class RemoveUnusedCode implements CompilerPass {
     if (!nameNode.getString().isEmpty()) {
       // var x = function funcName() {};
       // make sure funcName gets into the varInfoMap so it will be considered for removal.
-      traverseNameNode(nameNode, fparamScope);
+      VarInfo varInfo = traverseNameNode(nameNode, fparamScope);
+      if (NodeUtil.isExpressionResultUsed(function)) {
+        // var f = function g() {};
+        // The f is an alias for g, so g escapes from the scope where it is defined.
+        varInfo.hasNonLocalOrNonLiteralValue = true;
+      }
     }
 
     traverseChildren(paramlist, fparamScope);
@@ -1779,6 +1784,11 @@ class RemoveUnusedCode implements CompilerPass {
         }
       }
     }
+
+    @Override
+    public String toString() {
+      return "UnusedReadReference:" + referenceNode;
+    }
   }
 
   /**
@@ -1815,6 +1825,11 @@ class RemoveUnusedCode implements CompilerPass {
       // there are no instances of it.
       return true;
     }
+
+    @Override
+    public String toString() {
+      return "InstanceofName:" + instanceofNode;
+    }
   }
 
   /** Represents an increment or decrement operation that could be removed. */
@@ -1849,6 +1864,11 @@ class RemoveUnusedCode implements CompilerPass {
           }
         }
       }
+    }
+
+    @Override
+    public String toString() {
+      return "IncOrDecOp:" + incOrDecNode;
     }
   }
 
@@ -1986,6 +2006,11 @@ class RemoveUnusedCode implements CompilerPass {
     public void removeInternal(AbstractCompiler compiler) {
       NodeUtil.deleteNode(classDeclarationNode, compiler);
     }
+
+    @Override
+    public String toString() {
+      return "ClassDeclaration:" + classDeclarationNode;
+    }
   }
 
   private class NamedClassExpression extends Removable {
@@ -2007,6 +2032,11 @@ class RemoveUnusedCode implements CompilerPass {
           compiler.reportChangeToEnclosingScope(classNode);
         }
       }
+    }
+
+    @Override
+    public String toString() {
+      return "NamedClassExpression:" + classNode;
     }
   }
 
@@ -2031,6 +2061,11 @@ class RemoveUnusedCode implements CompilerPass {
     @Override
     void removeInternal(AbstractCompiler compiler) {
       NodeUtil.deleteNode(propertyNode, compiler);
+    }
+
+    @Override
+    public String toString() {
+      return "ClassOrPrototypeNamedProperty:" + propertyNode;
     }
   }
 
@@ -2074,6 +2109,11 @@ class RemoveUnusedCode implements CompilerPass {
     boolean isAssignedValueLocal() {
       // The declared function is always created locally.
       return true;
+    }
+
+    @Override
+    public String toString() {
+      return "FunctionDeclaration:" + functionDeclarationNode;
     }
   }
 
@@ -2301,6 +2341,11 @@ class RemoveUnusedCode implements CompilerPass {
     boolean isPrototypeProperty() {
       return true;
     }
+
+    @Override
+    public String toString() {
+      return "AnonymousPrototypeNamedPropertyAssign:" + assignNode;
+    }
   }
 
   /**
@@ -2308,7 +2353,6 @@ class RemoveUnusedCode implements CompilerPass {
    * `goog.addSingletonGetter()`.
    */
   private class ClassSetupCall extends Removable {
-
     final Node callNode;
 
     ClassSetupCall(RemovableBuilder builder, Node callNode) {
@@ -2357,6 +2401,11 @@ class RemoveUnusedCode implements CompilerPass {
       // If we aren't sure where X comes from and what aliases it might have, we cannot be sure
       // it's safe to remove the class setup for it.
       return true;
+    }
+
+    @Override
+    public String toString() {
+      return "ClassSetupCall:" + callNode;
     }
   }
 

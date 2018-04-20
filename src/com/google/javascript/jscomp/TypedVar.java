@@ -18,14 +18,20 @@ package com.google.javascript.jscomp;
 
 import com.google.javascript.rhino.ErrorReporter;
 import com.google.javascript.rhino.Node;
-import com.google.javascript.rhino.StaticSourceFile;
-import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.jstype.JSType;
 import com.google.javascript.rhino.jstype.StaticTypedRef;
 import com.google.javascript.rhino.jstype.StaticTypedSlot;
 
 /**
  * {@link AbstractVar} subclass for use with {@link TypedScope}.
+ *
+ * <p>Note that this class inherits its {@link #equals} and {@link #hashCode}
+ * implementations from {@link ScopedName}, which does not include any type
+ * information.  This is necessary because {@code Var}-keyed maps are used
+ * across multiple top scopes, but it comes with the caveat that if {@code
+ * TypedVar} instances are stored in a set, the type information is at risk
+ * of disappearing if an untyped (or differently typed) var is added for the
+ * same symbol.
  */
 public class TypedVar extends AbstractVar<TypedScope, TypedVar>
     implements StaticTypedSlot<JSType>, StaticTypedRef<JSType> {
@@ -65,7 +71,7 @@ public class TypedVar extends AbstractVar<TypedScope, TypedVar>
 
   void resolveType(ErrorReporter errorReporter) {
     if (type != null) {
-      type = type.resolve(errorReporter, scope);
+      this.type = type.resolve(errorReporter, scope);
     }
   }
 
@@ -104,40 +110,5 @@ public class TypedVar extends AbstractVar<TypedScope, TypedVar>
 
   boolean isMarkedAssignedExactlyOnce() {
     return markedAssignedExactlyOnce;
-  }
-
-  static TypedVar makeArguments(TypedScope scope) {
-    // Look for an extern named "arguments" and use its type if available.
-    // TODO(sdh): consider looking for "Arguments" ctor rather than "arguments" var: this could
-    // allow deleting the variable, which doesn't really belong in externs in the first place.
-    TypedVar globalArgs = scope.getGlobalScope().getVar(Var.ARGUMENTS);
-    JSType type = globalArgs != null && globalArgs.isExtern() ? globalArgs.getType() : null;
-    return new TypedArguments(type, scope);
-  }
-
-  private static final class TypedArguments extends TypedVar {
-    TypedArguments(JSType type, TypedScope scope) {
-      super(false, Var.ARGUMENTS, null, type, scope, -1, null);
-    }
-
-    @Override
-    public boolean isArguments() {
-      return true;
-    }
-
-    @Override
-    public StaticSourceFile getSourceFile() {
-      return scope.getRootNode().getStaticSourceFile();
-    }
-
-    @Override
-    public boolean isBleedingFunction() {
-      return false;
-    }
-
-    @Override
-    protected Token declarationType() {
-      return null;
-    }
   }
 }

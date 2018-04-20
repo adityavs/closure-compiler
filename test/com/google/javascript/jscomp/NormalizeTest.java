@@ -20,7 +20,6 @@ import static com.google.common.truth.Truth.assertThat;
 
 import com.google.javascript.jscomp.CompilerOptions.LanguageMode;
 import com.google.javascript.jscomp.CompilerOptions.PropertyCollapseLevel;
-import com.google.javascript.jscomp.NodeTraversal.AbstractPostOrderCallback;
 import com.google.javascript.rhino.Node;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -871,15 +870,12 @@ public final class NormalizeTest extends CompilerTestCase {
   private Set<Node> findNodesWithProperty(Node root, final byte prop) {
     final Set<Node> set = new HashSet<>();
 
-    NodeTraversal.traverseEs6(
+    NodeTraversal.traversePostOrder(
         getLastCompiler(),
         root,
-        new AbstractPostOrderCallback() {
-          @Override
-          public void visit(NodeTraversal t, Node node, Node parent) {
-            if (node.getBooleanProp(prop)) {
-              set.add(node);
-            }
+        (NodeTraversal t, Node node, Node parent) -> {
+          if (node.getBooleanProp(prop)) {
+            set.add(node);
           }
         });
     return set;
@@ -923,8 +919,7 @@ public final class NormalizeTest extends CompilerTestCase {
         "var a$FOO = 1; var b = 1; b = a$FOO;");
 
     tester.testSame(
-        "var EXTERN; var ext; ext.FOO;",
-        "var b = EXTERN; var c = ext.FOO");
+        externs("var EXTERN; var ext; ext.FOO;"), srcs("var b = EXTERN; var c = ext.FOO"));
 
     tester.test(
         "var a={}; a.ACONST = 4; var b = 1; b = a.ACONST;",

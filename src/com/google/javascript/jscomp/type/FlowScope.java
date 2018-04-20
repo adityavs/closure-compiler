@@ -39,6 +39,12 @@ public interface FlowScope extends StaticTypedScope<JSType>, LatticeElement {
   FlowScope createChildFlowScope();
 
   /**
+   * Creates a child flow scope with the given syntactic scope, which may be required to be a
+   * specific subclass, such as TypedScope.
+   */
+  FlowScope createChildFlowScope(StaticTypedScope<JSType> scope);
+
+  /**
    * Defines the type of a symbol at this point in the flow.
    * @throws IllegalArgumentException If no slot for this symbol exists.
    */
@@ -72,4 +78,7 @@ public interface FlowScope extends StaticTypedScope<JSType>, LatticeElement {
    * @return The unique refined variable if found or null.
    */
   StaticTypedSlot<JSType> findUniqueRefinedSlot(FlowScope blindScope);
+
+  /** Returns the underlying TypedScope. */
+  StaticTypedScope<JSType> getDeclarationScope();
 }

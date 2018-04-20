@@ -19,7 +19,6 @@ package com.google.javascript.refactoring;
 import static com.google.common.base.Preconditions.checkState;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.HashMultimap;
@@ -29,6 +28,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Multimaps;
 import com.google.common.collect.Ordering;
 import com.google.common.collect.SetMultimap;
+import com.google.common.collect.Streams;
 import com.google.common.io.Files;
 import java.io.File;
 import java.io.IOException;
@@ -41,30 +41,17 @@ import java.util.Map.Entry;
 import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.IntStream;
-import java.util.stream.StreamSupport;
 
 /**
  * Class that applies suggested fixes to code or files.
  */
 public final class ApplySuggestedFixes {
 
-  private static final Ordering<CodeReplacement> ORDER_CODE_REPLACEMENTS = Ordering.natural()
-      .onResultOf(new Function<CodeReplacement, Integer>() {
-        @Override public Integer apply(CodeReplacement replacement) {
-          return replacement.getStartPosition();
-        }
-      })
-      .compound(Ordering.natural().onResultOf(new Function<CodeReplacement, Integer>() {
-        @Override public Integer apply(CodeReplacement replacement) {
-          return replacement.getLength();
-        }
-      }))
-      .compound(Ordering.natural().onResultOf(new Function<CodeReplacement, String>() {
-        @Override public String apply(CodeReplacement replacement) {
-          return replacement.getSortKey();
-        }
-      }));
-
+  private static final Ordering<CodeReplacement> ORDER_CODE_REPLACEMENTS =
+      Ordering.natural()
+          .onResultOf(CodeReplacement::getStartPosition)
+          .compound(Ordering.natural().onResultOf(CodeReplacement::getLength))
+          .compound(Ordering.natural().onResultOf(CodeReplacement::getSortKey));
 
   /**
    * Applies the provided set of suggested fixes to the files listed in the suggested fixes.
@@ -105,7 +92,7 @@ public final class ApplySuggestedFixes {
     }
     int alternativeCount = Iterables.getFirst(fixChoices, null).getAlternatives().size();
     Preconditions.checkArgument(
-        StreamSupport.stream(fixChoices.spliterator(), false)
+        Streams.stream(fixChoices)
             .map(f -> f.getAlternatives().size())
             .allMatch(Predicate.isEqual(alternativeCount)),
         "All SuggestedFixAlternatives must offer an equal number of choices for this "
@@ -120,7 +107,7 @@ public final class ApplySuggestedFixes {
       final int choiceIndex,
       Map<String, String> fileNameToCodeMap) {
     ImmutableList<SuggestedFix> chosenFixes =
-        StreamSupport.stream(fixChoices.spliterator(), false)
+        Streams.stream(fixChoices)
             .map(choices -> choices.getAlternatives().get(choiceIndex))
             .collect(ImmutableList.toImmutableList());
     return applySuggestedFixesToCode(chosenFixes, fileNameToCodeMap);

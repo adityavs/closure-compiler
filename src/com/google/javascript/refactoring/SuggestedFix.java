@@ -19,6 +19,7 @@ package com.google.javascript.refactoring;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
+import com.google.auto.value.AutoValue;
 import com.google.common.base.Ascii;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
@@ -108,8 +109,13 @@ public final class SuggestedFix {
     return alternatives.subList(1, alternatives.size());
   }
 
-  @Override public String toString() {
-    if (replacements.isEmpty()) {
+  boolean isNoOp() {
+    return replacements.isEmpty();
+  }
+
+  @Override
+  public String toString() {
+    if (this.isNoOp()) {
       return "<no-op SuggestedFix>";
     }
     StringBuilder sb = new StringBuilder();
@@ -171,11 +177,7 @@ public final class SuggestedFix {
      */
     public Builder attachMatchedNodeInfo(Node node, AbstractCompiler compiler) {
       matchedNodeInfo =
-          new MatchedNodeInfo(
-              NodeUtil.getSourceName(node),
-              node.getLineno(),
-              node.getCharno(),
-              isInClosurizedFile(node, new NodeMetadata(compiler)));
+          MatchedNodeInfo.create(node, isInClosurizedFile(node, new NodeMetadata(compiler)));
       return this;
     }
 
@@ -184,6 +186,16 @@ public final class SuggestedFix {
           alternative.getNonDefaultAlternatives().isEmpty(),
           "Alternative SuggestedFix must have no alternatives of their own.");
       alternatives.add(alternative);
+      return this;
+    }
+
+    /**
+     * Replaces text starting at the given node position.
+     */
+    Builder replaceText(Node node, int length, String newContent) {
+      int startPosition = node.getSourceOffset();
+      replacements.put(
+          node.getSourceFileName(), CodeReplacement.create(startPosition, length, newContent));
       return this;
     }
 
@@ -662,8 +674,7 @@ public final class SuggestedFix {
     }
 
     /**
-     * Adds a goog.require for the given namespace to the file if it does not
-     * already exist.
+     * Adds a goog.require for the given namespace to the file if it does not already exist.
      */
     public Builder addGoogRequire(Match m, String namespace) {
       Node node = m.getNode();
@@ -687,8 +698,8 @@ public final class SuggestedFix {
           IR.string(namespace));
 
       String shortName = getShortNameForRequire(namespace);
-      boolean useConstRequire = usesConstGoogRequires(metadata, script);
-      if (useConstRequire) {
+      boolean useAliasedRequire = usesConstGoogRequires(metadata, script);
+      if (useAliasedRequire) {
         googRequireNode = IR.constNode(IR.name(shortName), googRequireNode);
       } else {
         googRequireNode = IR.exprResult(googRequireNode);
@@ -794,9 +805,38 @@ public final class SuggestedFix {
       if (script.isModuleBody()) {
         return true;
       }
-      HasConstRequireOrModuleCallback callback = new HasConstRequireOrModuleCallback(metadata);
-      NodeTraversal.traverseEs6(metadata.getCompiler(), script, callback);
-      return callback.getUsesConstRequires();
+      HasAliasedRequireOrModuleCallback callback = new HasAliasedRequireOrModuleCallback(metadata);
+      NodeTraversal.traverse(metadata.getCompiler(), script, callback);
+      return callback.getUsesAliasedRequires();
+    }
+
+    /**
+     * Merge names from the lhs of |requireToMergeFrom|, which must be a destructuring require, if
+     * there is another destructuring require that its lhs can be merged into. If not, then no
+     * change is applied.
+     */
+    Builder mergeGoogRequire(
+        Node requireToMergeFrom, NodeMetadata m, String namespace, AbstractCompiler compiler) {
+      checkArgument(requireToMergeFrom.getFirstChild().isDestructuringLhs(), requireToMergeFrom);
+      checkArgument(requireToMergeFrom.getFirstFirstChild().isObjectPattern(), requireToMergeFrom);
+
+      Node googRequireNode = findGoogRequireNode(requireToMergeFrom, m, namespace);
+      if (googRequireNode == null) {
+        return this;
+      }
+      if (googRequireNode.isExprResult()) {
+        return this;
+      }
+      if (googRequireNode.getFirstChild().isDestructuringLhs()) {
+        Node objectPattern = googRequireNode.getFirstFirstChild();
+        Node newObjectPattern = objectPattern.cloneTree();
+        for (Node name : requireToMergeFrom.getFirstFirstChild().children()) {
+          newObjectPattern.addChildToBack(name.cloneTree());
+        }
+        this.replace(objectPattern, newObjectPattern, compiler);
+        this.deleteWithoutRemovingWhitespace(requireToMergeFrom);
+      }
+      return this;
     }
 
     /**
@@ -812,8 +852,14 @@ public final class SuggestedFix {
     }
 
     /**
-     * Find the goog.require node for the given namespace (or null if there isn't one).
-     * If there is more than one, this will return the first standalone goog.require statement.
+     * Find the goog.require node for the given namespace (or null if there isn't one). If there is
+     * more than one:
+     *
+     * <ul>
+     *   <li>If there is at least one standalone goog.require, this will return the first standalone
+     *       goog.require.
+     *   <li>If not, this will return the first goog.require.
+     * </ul>
      */
     @Nullable
     private static Node findGoogRequireNode(Node n, NodeMetadata metadata, String namespace) {
@@ -831,8 +877,9 @@ public final class SuggestedFix {
 
       for (Node child : script.children()) {
         if (NodeUtil.isNameDeclaration(child)
-            && child.getFirstFirstChild() != null
-            && Matchers.googRequire(namespace).matches(child.getFirstFirstChild(), metadata)) {
+            && child.getFirstChild().getLastChild() != null
+            && Matchers.googRequire(namespace).matches(
+                child.getFirstChild().getLastChild(), metadata)) {
           return child;
         }
       }
@@ -895,68 +942,57 @@ public final class SuggestedFix {
   }
 
   /**
-   * Information about the node that was matched for the suggested fix. This information can be
-   * used later on when processing the SuggestedFix.
+   * Information about the node that was matched for the suggested fix. This information can be used
+   * later on when processing the SuggestedFix.
    *
    * <p>NOTE: Since this class can be retained for a long time when running refactorings over large
    * blobs of code, it's important that it does not contain any memory intensive objects in order to
    * keep memory to a reasonable amount.
    */
-  public static class MatchedNodeInfo {
-    private final String sourceFilename;
-    private final int lineno;
-    private final int charno;
-    private final boolean isInClosurizedFile;
-
-    MatchedNodeInfo(String sourceFilename, int lineno, int charno, boolean isInClosurizedFile) {
-      this.sourceFilename = sourceFilename;
-      this.lineno = lineno;
-      this.charno = charno;
-      this.isInClosurizedFile = isInClosurizedFile;
+  @AutoValue
+  public abstract static class MatchedNodeInfo {
+    static MatchedNodeInfo create(Node node, boolean closurized) {
+      return new AutoValue_SuggestedFix_MatchedNodeInfo(
+          NodeUtil.getSourceName(node),
+          node.getLineno(),
+          node.getCharno(),
+          closurized);
     }
 
-    public String getSourceFilename() {
-      return sourceFilename;
-    }
+    public abstract String getSourceFilename();
 
-    public int getLineno() {
-      return lineno;
-    }
+    public abstract int getLineno();
 
-    public int getCharno() {
-      return charno;
-    }
+    public abstract int getCharno();
 
-    public boolean isInClosurizedFile() {
-      return isInClosurizedFile;
-    }
+    public abstract boolean isInClosurizedFile();
   }
 
   /** Traverse an AST and find {@code goog.module} or {@code const X = goog.require('...');}. */
-  private static class HasConstRequireOrModuleCallback extends AbstractPreOrderCallback {
-    private boolean usesConstRequires;
+  private static class HasAliasedRequireOrModuleCallback extends AbstractPreOrderCallback {
+    private boolean usesAliasedRequires;
     final NodeMetadata metadata;
 
-    public HasConstRequireOrModuleCallback(NodeMetadata metadata) {
-      this.usesConstRequires = false;
+    public HasAliasedRequireOrModuleCallback(NodeMetadata metadata) {
+      this.usesAliasedRequires = false;
       this.metadata = metadata;
     }
 
-    boolean getUsesConstRequires() {
-      return usesConstRequires;
+    boolean getUsesAliasedRequires() {
+      return usesAliasedRequires;
     }
 
     @Override
     public boolean shouldTraverse(NodeTraversal nodeTraversal, Node n, Node parent) {
-      if (Matchers.googModule().matches(n, metadata) || isConstRequire(n, metadata)) {
-        usesConstRequires = true;
+      if (Matchers.googModule().matches(n, metadata) || isAliasedRequire(n, metadata)) {
+        usesAliasedRequires = true;
         return false;
       }
       return true;
     }
 
-    private static boolean isConstRequire(Node node, NodeMetadata metadata) {
-      return node.isConst()
+    private static boolean isAliasedRequire(Node node, NodeMetadata metadata) {
+      return NodeUtil.isNameDeclaration(node)
           && node.getFirstFirstChild() != null
           && Matchers.googRequire().matches(node.getFirstFirstChild(), metadata);
     }

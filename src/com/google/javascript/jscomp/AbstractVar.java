@@ -16,6 +16,8 @@
 
 package com.google.javascript.jscomp;
 
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import com.google.javascript.rhino.JSDocInfo;
@@ -24,13 +26,12 @@ import com.google.javascript.rhino.StaticRef;
 import com.google.javascript.rhino.StaticSlot;
 import com.google.javascript.rhino.StaticSourceFile;
 import com.google.javascript.rhino.Token;
-import java.util.Objects;
 
 /**
  * Used by {@code Scope} to store information about variables.
  */
 public class AbstractVar<S extends AbstractScope<S, V>, V extends AbstractVar<S, V>>
-    implements StaticSlot, StaticRef {
+    extends ScopedName implements StaticSlot, StaticRef {
 
   final String name;
 
@@ -64,6 +65,11 @@ public class AbstractVar<S extends AbstractScope<S, V>, V extends AbstractVar<S,
   }
 
   @Override
+  public final Node getScopeRoot() {
+    return scope.getRootNode();
+  }
+
+  @Override
   public final Node getNode() {
     return nameNode;
   }
@@ -73,8 +79,8 @@ public class AbstractVar<S extends AbstractScope<S, V>, V extends AbstractVar<S,
   }
 
   @Override
-  public StaticSourceFile getSourceFile() {
-    return nameNode.getStaticSourceFile();
+  public final StaticSourceFile getSourceFile() {
+    return (nameNode != null ? nameNode : scope.getRootNode()).getStaticSourceFile();
   }
 
   @Override
@@ -96,7 +102,8 @@ public class AbstractVar<S extends AbstractScope<S, V>, V extends AbstractVar<S,
    * that bleeds into the inner scope).
    */
   public boolean isBleedingFunction() {
-    return NodeUtil.isFunctionExpression(getParentNode());
+    Node parent = getParentNode();
+    return parent != null && NodeUtil.isFunctionExpression(parent);
   }
 
   public final S getScope() {
@@ -187,8 +194,17 @@ public class AbstractVar<S extends AbstractScope<S, V>, V extends AbstractVar<S,
     return declarationType() == Token.IMPORT;
   }
 
-  public boolean isArguments() {
-    return false;
+  public final boolean isArguments() {
+    return Var.ARGUMENTS.equals(name) && scope.isFunctionScope();
+  }
+
+  public final boolean isThis() {
+    return "this".equals(name) && scope.isFunctionScope();
+  }
+
+  private boolean isImplicit() {
+    AbstractScope.ImplicitVar var = AbstractScope.ImplicitVar.of(name);
+    return var != null && var.isMadeByScope(scope);
   }
 
   private static final ImmutableSet<Token> DECLARATION_TYPES = Sets.immutableEnumSet(
@@ -208,8 +224,10 @@ public class AbstractVar<S extends AbstractScope<S, V>, V extends AbstractVar<S,
         return current.getToken();
       }
     }
-    throw new IllegalStateException("The nameNode for " + this + " must be a descendant"
-        + " of one of: " + DECLARATION_TYPES);
+    checkState(
+        isImplicit(),
+        "The nameNode for %s must be a descendant of one of: %s", this, DECLARATION_TYPES);
+    return null;
   }
 
   // This is safe because any concrete subclass of AbstractVar<V> should be assignable to V.
@@ -218,21 +236,5 @@ public class AbstractVar<S extends AbstractScope<S, V>, V extends AbstractVar<S,
   @SuppressWarnings("unchecked")
   private V thisVar() {
     return (V) this;
-  }
-
-  // Non-final for jsdev tests
-  @Override
-  public boolean equals(Object other) {
-    if (!(other instanceof AbstractVar)) {
-      return false;
-    }
-    return Objects.equals(name, ((AbstractVar<?, ?>) other).name)
-        && Objects.equals(scope.getRootNode(), ((AbstractVar<?, ?>) other).scope.getRootNode());
-  }
-
-  // Non-final for jsdev tests
-  @Override
-  public int hashCode() {
-    return Objects.hash(name, scope.getRootNode());
   }
 }

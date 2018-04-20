@@ -289,15 +289,15 @@ $jscomp.generator.Context.prototype.throw_ = function(e) {
 };
 
 /**
- * Returns a value as the result of suspended yield.
+ * Returns a value as the result of generator function.
  *
  * @final
- * @param {VALUE} value
+ * @param {VALUE=} value
  * @return {void}
  * @suppress {reportUnknownTypes}
  */
 $jscomp.generator.Context.prototype.return = function(value) {
-  this.abruptCompletion_ = {return: value};
+  this.abruptCompletion_ = {return: /** @type {VALUE} */ (value)};
   this.nextAddress = this.finallyAddress_;
 };
 
@@ -476,6 +476,7 @@ $jscomp.generator.Context.prototype.enterFinallyBlock = function(
  * @param {number} nextAddress The state that should be run next.
  * @param {number=} finallyDepth The nesting level of current "finally" block.
  * @return {void}
+ * @suppress {strictMissingProperties}
  */
 $jscomp.generator.Context.prototype.leaveFinallyBlock = function(
     nextAddress, finallyDepth) {
@@ -570,8 +571,8 @@ $jscomp.generator.Context.prototype.leaveFinallyBlock = function(
     //         //   continues from there.
     //       }
     //     }
-    if (abruptCompletion.jumpTo != undefined
-        && this.finallyAddress_ < abruptCompletion.jumpTo) {
+    if (abruptCompletion.jumpTo != undefined &&
+        this.finallyAddress_ < abruptCompletion.jumpTo) {
       this.nextAddress = abruptCompletion.jumpTo;
       this.abruptCompletion_ = null;
     } else {
@@ -787,7 +788,7 @@ $jscomp.generator.Engine_.prototype.yieldAllStep_ = function(
  * @private
  * @final
  * @return {!IIterableResult<VALUE>}
- * @suppress {reportUnknownTypes}
+ * @suppress {reportUnknownTypes, strictMissingProperties}
  */
 $jscomp.generator.Engine_.prototype.nextStep_ = function() {
   while (this.context_.nextAddress) {
@@ -867,6 +868,12 @@ $jscomp.generator.Generator_ = function(engine) {
 $jscomp.generator.createGenerator = function(generator, program) {
   /** @const */ var result =
       new $jscomp.generator.Generator_(new $jscomp.generator.Engine_(program));
+  // The spec says that `myGenFunc() instanceof myGenFunc` must be true.
+  // We'll make this work by setting the prototype before calling the
+  // constructor every time. All of the methods of the object are defined on the
+  // instance by the constructor, so this does no harm.
+  // We also cast Generator_ to Object to hide dynamic inheritance from
+  // jscompiler, it makes ConformanceRules$BanUnknownThis happy.
   if ($jscomp.setPrototypeOf) {
     /** @type {function(!Object, ?Object): !Object} */ ($jscomp.setPrototypeOf)(
         result, generator.prototype);

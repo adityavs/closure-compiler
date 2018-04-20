@@ -86,7 +86,7 @@ public final class ReferenceCollectingCallback
    */
   public ReferenceCollectingCallback(AbstractCompiler compiler, Behavior behavior,
       ScopeCreator creator) {
-    this(compiler, behavior, creator, Predicates.<Var>alwaysTrue());
+    this(compiler, behavior, creator, Predicates.alwaysTrue());
   }
 
   /**
@@ -139,7 +139,7 @@ public final class ReferenceCollectingCallback
    */
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
-    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
+    NodeTraversal.traverse(compiler, scriptRoot, this);
   }
 
   /**
@@ -351,11 +351,8 @@ public final class ReferenceCollectingCallback
 
   private void addReference(Var v, Reference reference) {
     // Create collection if none already
-    ReferenceCollection referenceInfo = referenceMap.get(v);
-    if (referenceInfo == null) {
-      referenceInfo = new ReferenceCollection();
-      referenceMap.put(v, referenceInfo);
-    }
+    ReferenceCollection referenceInfo =
+        referenceMap.computeIfAbsent(v, k -> new ReferenceCollection());
 
     // Add this particular reference
     referenceInfo.add(reference);

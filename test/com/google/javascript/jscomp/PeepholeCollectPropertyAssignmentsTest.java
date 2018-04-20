@@ -61,6 +61,14 @@ public final class PeepholeCollectPropertyAssignmentsTest extends CompilerTestCa
     testSame("var a; a.b = []; a.b[0] = 1; a.b[1] = 2; a.b[2] = 3;");
   }
 
+  public final void testArrayOptimizationWithLet() {
+    test("let a = []; a[0] = 1; a[1] = 2; a[2] = 3;", "let a = [1, 2, 3];");
+  }
+
+  public final void testArrayOptimizationWithConst() {
+    test("const a = []; a[0] = 1; a[1] = 2; a[2] = 3;", "const a = [1, 2, 3];");
+  }
+
   public final void testCompoundAssignment() {
     testSame("var x, a; a = []; a[0] *= x;");
   }
@@ -190,6 +198,14 @@ public final class PeepholeCollectPropertyAssignmentsTest extends CompilerTestCa
          "var o; o = { x: 0, \"y\": 1, \"2\": 2 };");
   }
 
+  public final void testObjectOptimizationWithLet() {
+    test("let o = {}; o.x = 0; o['y'] = 1; o[2] = 2;", "let o = { x: 0, 'y': 1, '2': 2 };");
+  }
+
+  public final void testObjectOptimizationWithConst() {
+    test("const o = {}; o.x = 0; o['y'] = 1; o[2] = 2;", "const o = { x: 0, 'y': 1, '2': 2 };");
+  }
+
   public final void testObjectReassignedInValue1() {
     test("var o = {}; o.x = 1; o.y = (o = {}); o.z = 4;",
          "var o = {x:1}; o.y = (o = {}); o.z = 4;");
@@ -238,28 +254,85 @@ public final class PeepholeCollectPropertyAssignmentsTest extends CompilerTestCa
          "z:{a:function () {return o}}};");
   }
 
-  public final void testObjectPropertyReassigned(){
+  public final void testObjectPropertyReassigned() {
     test("var a = {b:''};" +
         "a.b='c';",
         "var a={b:'c'};");
   }
 
-  public final void testObjectPropertyReassigned2(){
+  public final void testObjectPropertyReassigned2() {
     test("var a = {b:'', x:10};" +
         "a.b='c';",
         "var a={x:10, b:'c'};");
   }
 
-  public final void testObjectPropertyReassigned3(){
+  public final void testObjectPropertyReassigned3() {
     test("var a = {x:10};" +
         "a.b = 'c';",
         "var a = {x:10, b:'c'};");
   }
 
-  public final void testObjectPropertyReassigned4(){
+  public final void testObjectPropertyReassigned4() {
     testSame(
         "var a = {b:10};" +
         "var x = 1;" +
         "a.b = x+10;");
+  }
+
+  public final void testObjectComputedProp1() {
+    testSame(
+        lines(
+            "var a = {['computed']: 10};",
+            "var alsoComputed = 'someValue';",
+            "a[alsoComputed] = 20;"));
+  }
+
+  public final void testObjectComputedProp2() {
+    test(
+        lines(
+            "var a = {['computed']: 10};",
+            "a.prop = 20;"),
+        lines(
+            "var a = {",
+            "  ['computed']: 10,",
+            "  prop: 20,",
+            "};"));
+  }
+
+  public final void testObjectMemberFunction1() {
+    test(
+        lines(
+            "var a = { member() {} };",
+            "a.prop = 20;"),
+        lines(
+            "var a = {",
+            "  member() {},",
+            "  prop: 20,",
+            "};"));
+  }
+
+  public final void testObjectMemberFunction2() {
+    test(
+        lines(
+            "var a = { member() {} };",
+            "a.member = 20;"),
+        lines(
+            "var a = {",
+            "  member: 20,",
+            "};"));
+  }
+
+  public final void testObjectGetter() {
+    testSame(
+        lines(
+            "var a = { get x() {} };",
+            "a.x = 20;"));
+  }
+
+  public final void testObjectSetter() {
+    testSame(
+        lines(
+            "var a = { set x(value) {} };",
+            "a.x = 20;"));
   }
 }

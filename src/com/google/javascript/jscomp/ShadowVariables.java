@@ -111,8 +111,8 @@ class ShadowVariables implements CompilerPass {
     //    variable usage frequency map.
     //
     // 3. Updates the pseudo naming map if needed.
-    NodeTraversal.traverseEs6(compiler, root, new GatherReferenceInfo());
-    NodeTraversal.traverseEs6(compiler, root, new DoShadowVariables());
+    NodeTraversal.traverse(compiler, root, new GatherReferenceInfo());
+    NodeTraversal.traverse(compiler, root, new DoShadowVariables());
 
     if (oldPseudoNameMap != null) {
       oldPseudoNameMap.putAll(deltaPseudoNameMap);
@@ -247,7 +247,7 @@ class ShadowVariables implements CompilerPass {
       for (Assignment assignment : varsByFrequency) {
         if (assignment.isLocal) {
           if (!scopeUpRefMap.containsEntry(curScope.getRootNode(), assignment.oldName)) {
-            if (curScope.isDeclared(assignment.oldName, true)) {
+            if (curScope.hasSlot(assignment.oldName)) {
               // Don't shadow if the scopes are the same eg.:
               // function f() { var a = 1; { var a = 2; } } // Unsafe
               Var toShadow = curScope.getVar(assignment.oldName);

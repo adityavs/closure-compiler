@@ -500,6 +500,56 @@ public class InlineFunctionsTest extends CompilerTestCase {
         "5;");
   }
 
+  public void testInlineFunctions34() {
+    test(
+        lines(
+            "class X {}",
+            "(function(e) {",
+            "  for (var el = f(e.target); el != null; el = el.parent) {}",
+            "  function f(x) { return x instanceof X ? x : null; }",
+            "})({target:{}});",
+            ""),
+        lines(
+            "class X {}",
+            "{",
+            "  var e$jscomp$inline_0 = {target:{}};",
+            "  var el$jscomp$inline_1;",
+            "  {",
+            "    var x$jscomp$inline_2 = e$jscomp$inline_0.target;",
+            "    el$jscomp$inline_1 = x$jscomp$inline_2 instanceof X ? x$jscomp$inline_2 : null;",
+            "  }",
+            "  for(;el$jscomp$inline_1 != null; el$jscomp$inline_1 = el$jscomp$inline_1.parent);",
+            "}",
+            ""));
+  }
+
+  // Same as above, except the for loop uses a let instead of a var. See b/73373371.
+  public void testInlineFunctions35() {
+    test(
+        lines(
+            "class X {}",
+            "(function(e) {",
+            "  for (let el = f(e.target); el != null; el = el.parent) {}",
+            "  function f(x) { return x instanceof X ? x : null; }",
+            "})({target:{}});",
+            ""),
+        lines(
+            "class X {}",
+            "{",
+            "  var e$jscomp$inline_0 = {target: {}};",
+            "  var JSCompiler_inline_result$jscomp$inline_1;",
+            "  {",
+            "    var x$jscomp$inline_2 = e$jscomp$inline_0.target;",
+            "    JSCompiler_inline_result$jscomp$inline_1 =",
+            "        x$jscomp$inline_2 instanceof X ? x$jscomp$inline_2 : null",
+            "  }",
+            "  for (let el$jscomp$inline_3 = JSCompiler_inline_result$jscomp$inline_1;",
+            "       el$jscomp$inline_3 != null;",
+            "       el$jscomp$inline_3 = el$jscomp$inline_3.parent) {}",
+            "}",
+            ""));
+  }
+
   public void testMixedModeInlining1() {
     // Base line tests, direct inlining
     test("function foo(){return 1}" +
@@ -966,13 +1016,14 @@ public class InlineFunctionsTest extends CompilerTestCase {
             "function _goo() { let a = 2; let x = foo(); }"),
         lines(
             "let a = 0;",
-            "function _goo(){",
+            "function _goo() {",
             "  let a$jscomp$2 = 2;",
-            "  let x;",
+            "  var JSCompiler_inline_result$jscomp$0;",
             "  {",
-            "    let a$jscomp$inline_0 = 3;",
-            "    x = a + a;",
+            "     let a$jscomp$inline_1 = 3;",
+            "     JSCompiler_inline_result$jscomp$0 = a + a;",
             "  }",
+            "  let x = JSCompiler_inline_result$jscomp$0;",
             "}"));
   }
 
@@ -3256,6 +3307,17 @@ public class InlineFunctionsTest extends CompilerTestCase {
             "  return args.length;",
             "}",
             "foo(...[0,1]);"));
+
+    testSame("var args = [0, 1]; (function foo(x, y) { return x + y; })(...args);");
+
+    testSame(
+        lines(
+            "var args = [0, 1];",
+            "(function foo(x, y, z) {",
+            "  return x + y + z;",
+            "})(2, ...args);"));
+
+    testSame("(function (x, y) {  return x + y; })(...[0, 1]);");
   }
 
   public void testGeneratorFunction() {

@@ -21,7 +21,6 @@ import static com.google.common.base.Preconditions.checkState;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.MoreObjects;
-import com.google.common.base.Predicates;
 import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
 import com.google.common.collect.HashMultimap;
@@ -332,7 +331,7 @@ final class ClosureRewriteModule implements HotSwapCompilerPass {
       if (!this.isModule || this.declareLegacyNamespace) {
         return null;
       }
-      return MODULE_EXPORTS_PREFIX + this.legacyNamespace.replace('.', '$');
+      return getBinaryModuleNamespace(legacyNamespace);
     }
 
     @Nullable
@@ -342,6 +341,10 @@ final class ClosureRewriteModule implements HotSwapCompilerPass {
       }
       return this.getBinaryNamespace();
     }
+  }
+
+  static String getBinaryModuleNamespace(String legacyNamespace) {
+    return MODULE_EXPORTS_PREFIX + legacyNamespace.replace('.', '$');
   }
 
   private class ScriptPreprocessor extends NodeTraversal.AbstractPreOrderCallback {
@@ -518,7 +521,7 @@ final class ClosureRewriteModule implements HotSwapCompilerPass {
    */
   private void rewriteJsdoc(JSDocInfo info) {
     for (Node typeNode : info.getTypeNodes()) {
-      NodeUtil.visitPreOrder(typeNode, replaceJsDocRefs, Predicates.<Node>alwaysTrue());
+      NodeUtil.visitPreOrder(typeNode, replaceJsDocRefs);
     }
   }
 
@@ -698,7 +701,7 @@ final class ClosureRewriteModule implements HotSwapCompilerPass {
     if (scriptParent == null) {
       return;
     }
-    NodeTraversal.traverseEs6(compiler, scriptParent, new UnwrapGoogLoadModule());
+    NodeTraversal.traverse(compiler, scriptParent, new UnwrapGoogLoadModule());
 
     // Record all the scripts first so that the googModuleNamespaces global state can be complete
     // before doing any updating also queue up scriptDescriptions for later use in ScriptUpdater
@@ -708,8 +711,8 @@ final class ClosureRewriteModule implements HotSwapCompilerPass {
       pushScript(new ScriptDescription());
       currentScript.rootNode = c;
       scriptDescriptions.addLast(currentScript);
-      NodeTraversal.traverseEs6(compiler, c, new ScriptPreprocessor());
-      NodeTraversal.traverseEs6(compiler, c, new ScriptRecorder());
+      NodeTraversal.traverse(compiler, c, new ScriptPreprocessor());
+      NodeTraversal.traverse(compiler, c, new ScriptRecorder());
       popScript();
     }
 
@@ -722,7 +725,7 @@ final class ClosureRewriteModule implements HotSwapCompilerPass {
     // scriptDescriptions that were queued up by all the recording.
     for (Node c = scriptParent.getFirstChild(); c != null; c = c.getNext()) {
       pushScript(scriptDescriptions.removeFirst());
-      NodeTraversal.traverseEs6(compiler, c, new ScriptUpdater());
+      NodeTraversal.traverse(compiler, c, new ScriptUpdater());
       popScript();
     }
   }
@@ -730,20 +733,20 @@ final class ClosureRewriteModule implements HotSwapCompilerPass {
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
     checkState(scriptRoot.isScript(), scriptRoot);
-    NodeTraversal.traverseEs6(compiler, scriptRoot, new UnwrapGoogLoadModule());
+    NodeTraversal.traverse(compiler, scriptRoot, new UnwrapGoogLoadModule());
 
     rewriteState.removeRoot(originalRoot);
 
     pushScript(new ScriptDescription());
     currentScript.rootNode = scriptRoot;
-    NodeTraversal.traverseEs6(compiler, scriptRoot, new ScriptPreprocessor());
-    NodeTraversal.traverseEs6(compiler, scriptRoot, new ScriptRecorder());
+    NodeTraversal.traverse(compiler, scriptRoot, new ScriptPreprocessor());
+    NodeTraversal.traverse(compiler, scriptRoot, new ScriptRecorder());
 
     if (compiler.hasHaltingErrors()) {
       return;
     }
 
-    NodeTraversal.traverseEs6(compiler, scriptRoot, new ScriptUpdater());
+    NodeTraversal.traverse(compiler, scriptRoot, new ScriptUpdater());
     popScript();
 
     reportUnrecognizedRequires();
@@ -1785,7 +1788,7 @@ final class ClosureRewriteModule implements HotSwapCompilerPass {
    */
   private void maybeAddAliasToSymbolTable(Node n, String module) {
     if (preprocessorSymbolTable != null) {
-      n.putBooleanProp(Node.GOOG_MODULE_ALIAS, true);
+      n.putBooleanProp(Node.MODULE_ALIAS, true);
       // Alias can be used in js types. Types have node type STRING and not NAME so we have to
       // use their name as string.
       String nodeName =

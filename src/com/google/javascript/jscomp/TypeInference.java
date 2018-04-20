@@ -57,6 +57,7 @@ import com.google.javascript.rhino.jstype.TemplatizedType;
 import com.google.javascript.rhino.jstype.UnionType;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -81,17 +82,21 @@ class TypeInference
   private final AbstractCompiler compiler;
   private final JSTypeRegistry registry;
   private final ReverseAbstractInterpreter reverseInterpreter;
-  private final TypedScope syntacticScope;
   private final FlowScope functionScope;
   private final FlowScope bottomScope;
+  private final TypedScope containerScope;
+  private final TypedScopeCreator scopeCreator;
   private final Map<String, AssertionFunctionSpec> assertionFunctionsMap;
+
+  // Scopes that have had their unbound untyped vars inferred as undefined.
+  private final Set<TypedScope> inferredUnboundVars = new HashSet<>();
 
   // For convenience
   private final ObjectType unknownType;
 
   TypeInference(AbstractCompiler compiler, ControlFlowGraph<Node> cfg,
                 ReverseAbstractInterpreter reverseInterpreter,
-                TypedScope functionScope,
+                TypedScope syntacticScope, TypedScopeCreator scopeCreator,
                 Map<String, AssertionFunctionSpec> assertionFunctionsMap) {
     super(cfg, new LinkedFlowScope.FlowScopeJoinOp());
     this.compiler = compiler;
@@ -99,25 +104,34 @@ class TypeInference
     this.reverseInterpreter = reverseInterpreter;
     this.unknownType = registry.getNativeObjectType(UNKNOWN_TYPE);
 
-    this.syntacticScope = functionScope;
-    inferArguments(functionScope);
+    this.containerScope = syntacticScope;
+    inferArguments(syntacticScope);
 
-    this.functionScope = LinkedFlowScope.createEntryLattice(functionScope);
+    this.functionScope = LinkedFlowScope.createEntryLattice(syntacticScope);
+    this.scopeCreator = scopeCreator;
     this.assertionFunctionsMap = assertionFunctionsMap;
 
+    inferDeclarativelyUnboundVarsWithoutTypes(functionScope);
+
+    this.bottomScope =
+        LinkedFlowScope.createEntryLattice(
+            TypedScope.createLatticeBottom(syntacticScope.getRootNode()));
+  }
+
+  private void inferDeclarativelyUnboundVarsWithoutTypes(FlowScope flow) {
+    TypedScope scope = (TypedScope) flow.getDeclarationScope();
+    if (!inferredUnboundVars.add(scope)) {
+      return;
+    }
     // For each local variable declared with the VAR keyword, the entry
     // type is VOID.
-    for (TypedVar var : functionScope.getDeclarativelyUnboundVarsWithoutTypes()) {
+    for (TypedVar var : scope.getDeclarativelyUnboundVarsWithoutTypes()) {
       if (isUnflowable(var)) {
         continue;
       }
 
-      this.functionScope.inferSlotType(
-          var.getName(), getNativeType(VOID_TYPE));
+      flow.inferSlotType(var.getName(), getNativeType(VOID_TYPE));
     }
-
-    this.bottomScope = LinkedFlowScope.createEntryLattice(
-        TypedScope.createLatticeBottom(functionScope.getRootNode()));
   }
 
   /**
@@ -142,8 +156,7 @@ class TypeInference
         for (Node astParameter : astParameters.children()) {
           TypedVar var = functionScope.getVar(astParameter.getString());
           checkNotNull(var);
-          if (var.isTypeInferred() &&
-              var.getType() == unknownType) {
+          if (var.isTypeInferred() && var.getType() == unknownType) {
             JSType newType = null;
 
             if (iifeArgumentNode != null) {
@@ -187,7 +200,9 @@ class TypeInference
       return input;
     }
 
-    FlowScope output = input.createChildFlowScope();
+    Node root = NodeUtil.getEnclosingScopeRoot(n);
+    FlowScope output = input.createChildFlowScope(scopeCreator.createScope(root));
+    inferDeclarativelyUnboundVarsWithoutTypes(output);
     output = traverse(n, output);
     return output;
   }
@@ -213,32 +228,48 @@ class TypeInference
 
       switch (branch) {
         case ON_TRUE:
-          if (source.isForIn()) {
-            // item is assigned a property name, so its type should be string.
+          if (source.isForIn() || source.isForOf()) {
             Node item = source.getFirstChild();
             Node obj = item.getNext();
 
             FlowScope informed = traverse(obj, output.createChildFlowScope());
 
-            if (item.isVar()) {
+            if (NodeUtil.isNameDeclaration(item)) {
               item = item.getFirstChild();
             }
-            if (item.isName()) {
-              JSType iterKeyType = getNativeType(STRING_TYPE);
+            if (source.isForIn()) {
+              // item is assigned a property name, so its type should be string.
+              if (item.isName()) {
+                JSType iterKeyType = getNativeType(STRING_TYPE);
+                ObjectType objType = getJSType(obj).dereference();
+                JSType objIndexType =
+                    objType == null
+                        ? null
+                        : objType
+                            .getTemplateTypeMap()
+                            .getResolvedTemplateType(registry.getObjectIndexKey());
+                if (objIndexType != null && !objIndexType.isUnknownType()) {
+                  JSType narrowedKeyType = iterKeyType.getGreatestSubtype(objIndexType);
+                  if (!narrowedKeyType.isEmptyType()) {
+                    iterKeyType = narrowedKeyType;
+                  }
+                }
+                redeclareSimpleVar(informed, item, iterKeyType);
+              }
+            } else {
+              // for/of. The type of `item` is the type parameter of the Iterable type.
               ObjectType objType = getJSType(obj).dereference();
-              JSType objIndexType =
-                  objType == null
-                      ? null
-                      : objType
+
+              if (objType != null
+                  && objType.isSubtypeOf(getNativeType(JSTypeNative.ITERABLE_TYPE))) {
+                if (objType.isTemplatizedType()) {
+                  JSType newType =
+                      objType
                           .getTemplateTypeMap()
-                          .getResolvedTemplateType(registry.getObjectIndexKey());
-              if (objIndexType != null && !objIndexType.isUnknownType()) {
-                JSType narrowedKeyType = iterKeyType.getGreatestSubtype(objIndexType);
-                if (!narrowedKeyType.isEmptyType()) {
-                  iterKeyType = narrowedKeyType;
+                          .getResolvedTemplateType(registry.getIterableTemplate());
+                  redeclareSimpleVar(informed, item, newType);
                 }
               }
-              redeclareSimpleVar(informed, item, iterKeyType);
             }
             newScope = informed;
             break;
@@ -262,8 +293,7 @@ class TypeInference
           }
 
           if (condition != null) {
-            if (condition.isAnd() ||
-                condition.isOr()) {
+            if (condition.isAnd() || condition.isOr()) {
               // When handling the short-circuiting binary operators,
               // the outcome scope on true can be different than the outcome
               // scope on false.
@@ -279,9 +309,10 @@ class TypeInference
               // conditionOutcomes is cached from previous iterations
               // of the loop.
               if (conditionOutcomes == null) {
-                conditionOutcomes = condition.isAnd() ?
-                    traverseAnd(condition, output.createChildFlowScope()) :
-                    traverseOr(condition, output.createChildFlowScope());
+                conditionOutcomes =
+                    condition.isAnd()
+                        ? traverseAnd(condition, output.createChildFlowScope())
+                        : traverseOr(condition, output.createChildFlowScope());
               }
               newScope =
                   reverseInterpreter.getPreciserScopeKnowingConditionOutcome(
@@ -435,7 +466,12 @@ class TypeInference
       case EXPR_RESULT:
         scope = traverseChildren(n, scope);
         if (n.getFirstChild().isGetProp()) {
-          ensurePropertyDeclared(n.getFirstChild());
+          Node getprop = n.getFirstChild();
+          ObjectType ownerType = ObjectType.cast(
+              getJSType(getprop.getFirstChild()).restrictByNotNullOrUndefined());
+          if (ownerType != null) {
+            ensurePropertyDeclaredHelper(getprop, ownerType, scope);
+          }
         }
         break;
 
@@ -447,7 +483,14 @@ class TypeInference
         scope = traverseReturn(n, scope);
         break;
 
+      case YIELD:
+        scope = traverseChildren(n, scope);
+        n.setJSType(getNativeType(UNKNOWN_TYPE));
+        break;
+
       case VAR:
+      case LET:
+      case CONST:
       case THROW:
         scope = traverseChildren(n, scope);
         break;
@@ -460,7 +503,7 @@ class TypeInference
         scope = traverseChildren(n, scope);
         JSDocInfo info = n.getJSDocInfo();
         if (info != null && info.hasType()) {
-          n.setJSType(info.getType().evaluate(syntacticScope, registry));
+          n.setJSType(info.getType().evaluate(scope.getDeclarationScope(), registry));
         }
         break;
 
@@ -530,7 +573,7 @@ class TypeInference
     // otherwise use "unknown".
     JSDocInfo info = name.getJSDocInfo();
     if (info != null && info.hasType()) {
-      type = info.getType().evaluate(syntacticScope, registry);
+      type = info.getType().evaluate(scope.getDeclarationScope(), registry);
     } else {
       type = getNativeType(JSTypeNative.UNKNOWN_TYPE);
     }
@@ -552,6 +595,34 @@ class TypeInference
     return scope;
   }
 
+  private boolean isPossibleMixinApplication(Node lvalue, Node rvalue) {
+    JSDocInfo jsdoc = NodeUtil.getBestJSDocInfo(lvalue);
+    return jsdoc != null
+        && jsdoc.isConstructor()
+        && jsdoc.getImplementedInterfaceCount() > 0
+        && lvalue.isQualifiedName()
+        && rvalue.isCall();
+  }
+
+  /**
+   * @param constructor A constructor function defined by a call, which may be a mixin application.
+   *     The constructor implements at least one interface. If the constructor is missing some
+   *     properties of the inherited interfaces, this method declares these properties.
+   */
+  private void addMissingInterfaceProperties(JSType constructor) {
+    if (constructor.isConstructor()) {
+      FunctionType f = constructor.toMaybeFunctionType();
+      ObjectType proto = f.getPrototype();
+      for (ObjectType interf : f.getImplementedInterfaces()) {
+        for (String pname : interf.getPropertyNames()) {
+          if (!proto.hasProperty(pname)) {
+            proto.defineDeclaredProperty(pname, interf.getPropertyType(pname), null);
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Updates the scope according to the result of a type change, like
    * an assignment or a type cast.
@@ -559,21 +630,28 @@ class TypeInference
   private void updateScopeForTypeChange(
       FlowScope scope, Node left, JSType leftType, JSType resultType) {
     checkNotNull(resultType);
+
+    Node right = NodeUtil.getRValueOfLValue(left);
+    if (isPossibleMixinApplication(left, right)) {
+      addMissingInterfaceProperties(leftType);
+    }
+
     switch (left.getToken()) {
       case NAME:
         String varName = left.getString();
-        TypedVar var = syntacticScope.getVar(varName);
+        TypedVar var = getDeclaredVar(scope, varName);
         JSType varType = var == null ? null : var.getType();
-        boolean isVarDeclaration = left.hasChildren()
-            && varType != null && !var.isTypeInferred();
+        boolean isVarDeclaration =
+            left.hasChildren()
+                && varType != null
+                && !var.isTypeInferred()
+                && var.getNameNode() != null;
 
         boolean isTypelessConstDecl =
-            isVarDeclaration &&
-            NodeUtil.isConstantDeclaration(
-                compiler.getCodingConvention(),
-                var.getJSDocInfo(), var.getNameNode()) &&
-              !(var.getJSDocInfo() != null &&
-                var.getJSDocInfo().hasType());
+            isVarDeclaration
+                && NodeUtil.isConstantDeclaration(
+                    compiler.getCodingConvention(), var.getJSDocInfo(), var.getNameNode())
+                && !(var.getJSDocInfo() != null && var.getJSDocInfo().hasType());
 
         // When looking at VAR initializers for declared VARs, we tend
         // to use the declared type over the type it's being
@@ -617,8 +695,7 @@ class TypeInference
 
         if (var != null && var.isTypeInferred()) {
           JSType oldType = var.getType();
-          var.setType(oldType == null ?
-             resultType : oldType.getLeastSupertype(resultType));
+          var.setType(oldType == null ? resultType : oldType.getLeastSupertype(resultType));
         } else if (isTypelessConstDecl) {
           // /** @const */ var x = y;
           // should be redeclared, so that the type of y
@@ -644,24 +721,22 @@ class TypeInference
         }
 
         left.setJSType(resultType);
-        ensurePropertyDefined(left, resultType);
+        ensurePropertyDefined(left, resultType, scope);
         break;
       default:
         break;
     }
   }
 
-  /**
-   * Defines a property if the property has not been defined yet.
-   */
-  private void ensurePropertyDefined(Node getprop, JSType rightType) {
+  /** Defines a property if the property has not been defined yet. */
+  private void ensurePropertyDefined(Node getprop, JSType rightType, FlowScope scope) {
     String propName = getprop.getLastChild().getString();
     Node obj = getprop.getFirstChild();
     JSType nodeType = getJSType(obj);
     ObjectType objectType = ObjectType.cast(
         nodeType.restrictByNotNullOrUndefined());
-    boolean propCreationInConstructor = obj.isThis() &&
-        getJSType(syntacticScope.getRootNode()).isConstructor();
+    boolean propCreationInConstructor =
+        obj.isThis() && getJSType(containerScope.getRootNode()).isConstructor();
 
     if (objectType == null) {
       registry.registerPropertyOnType(propName, nodeType);
@@ -678,12 +753,10 @@ class TypeInference
         //    top level and the constructor Foo is defined in the same file.
         boolean staticPropCreation = false;
         Node maybeAssignStm = getprop.getGrandparent();
-        if (syntacticScope.isGlobal() &&
-            NodeUtil.isPrototypePropertyDeclaration(maybeAssignStm)) {
+        if (containerScope.isGlobal() && NodeUtil.isPrototypePropertyDeclaration(maybeAssignStm)) {
           String propCreationFilename = maybeAssignStm.getSourceFileName();
           Node ctor = objectType.getOwnerFunction().getSource();
-          if (ctor != null &&
-              ctor.getSourceFileName().equals(propCreationFilename)) {
+          if (ctor != null && ctor.getSourceFileName().equals(propCreationFilename)) {
             staticPropCreation = true;
           }
         }
@@ -692,7 +765,7 @@ class TypeInference
         }
       }
 
-      if (ensurePropertyDeclaredHelper(getprop, objectType)) {
+      if (ensurePropertyDeclaredHelper(getprop, objectType, scope)) {
         return;
       }
 
@@ -725,37 +798,24 @@ class TypeInference
   }
 
   /**
-   * Defines a declared property if it has not been defined yet.
-   *
-   * This handles the case where a property is declared on an object where
-   * the object type is inferred, and so the object type will not
-   * be known in {@code TypedScopeCreator}.
-   */
-  private void ensurePropertyDeclared(Node getprop) {
-    ObjectType ownerType = ObjectType.cast(
-        getJSType(getprop.getFirstChild()).restrictByNotNullOrUndefined());
-    if (ownerType != null) {
-      ensurePropertyDeclaredHelper(getprop, ownerType);
-    }
-  }
-
-  /**
    * Declares a property on its owner, if necessary.
+   *
    * @return True if a property was declared.
    */
   private boolean ensurePropertyDeclaredHelper(
-      Node getprop, ObjectType objectType) {
+      Node getprop, ObjectType objectType, FlowScope scope) {
     if (getprop.isQualifiedName()) {
       String propName = getprop.getLastChild().getString();
       String qName = getprop.getQualifiedName();
-      TypedVar var = syntacticScope.getVar(qName);
+      TypedVar var = getDeclaredVar(scope, qName);
       if (var != null && !var.isTypeInferred()) {
         // Handle normal declarations that could not be addressed earlier.
-        if (propName.equals("prototype") ||
-        // Handle prototype declarations that could not be addressed earlier.
-            (!objectType.hasOwnProperty(propName) &&
-             (!objectType.isInstanceType() ||
-                 (var.isExtern() && !objectType.isNativeObjectType())))) {
+        if (propName.equals("prototype")
+            ||
+            // Handle prototype declarations that could not be addressed earlier.
+            (!objectType.hasOwnProperty(propName)
+                && (!objectType.isInstanceType()
+                    || (var.isExtern() && !objectType.isNativeObjectType())))) {
           return objectType.defineDeclaredProperty(
               propName, var.getType(), getprop);
         }
@@ -782,8 +842,7 @@ class TypeInference
         // 1) The var is escaped and assigned in an inner scope, e.g.,
         // function f() { var x = 3; function g() { x = null } (x); }
         boolean isInferred = var.isTypeInferred();
-        boolean unflowable = isInferred &&
-            isUnflowable(syntacticScope.getVar(varName));
+        boolean unflowable = isInferred && isUnflowable(getDeclaredVar(scope, varName));
 
         // 2) We're reading type information from another scope for an
         // inferred variable. That variable is assigned more than once,
@@ -798,14 +857,12 @@ class TypeInference
         //
         // In this case, we would infer the first reference to t as
         // type {number}, even though it's undefined.
-        boolean nonLocalInferredSlot = false;
-        if (isInferred && syntacticScope.isLocal()) {
-          TypedVar maybeOuterVar = syntacticScope.getParent().getVar(varName);
-          if (var == maybeOuterVar &&
-              !maybeOuterVar.isMarkedAssignedExactlyOnce()) {
-            nonLocalInferredSlot = true;
-          }
-        }
+        TypedVar maybeOuterVar =
+            isInferred && containerScope.isLocal()
+                ? containerScope.getParent().getVar(varName)
+                : null;
+        boolean nonLocalInferredSlot =
+            var.equals(maybeOuterVar) && !maybeOuterVar.isMarkedAssignedExactlyOnce();
 
         if (!unflowable && !nonLocalInferredSlot) {
           type = var.getType();
@@ -861,11 +918,10 @@ class TypeInference
         // Do normal flow inference if this is a direct property assignment.
         if (qObjName != null && name.isStringKey()) {
           String qKeyName = qObjName + "." + memberName;
-          TypedVar var = syntacticScope.getVar(qKeyName);
+          TypedVar var = getDeclaredVar(scope, qKeyName);
           JSType oldType = var == null ? null : var.getType();
           if (var != null && var.isTypeInferred()) {
-            var.setType(oldType == null ?
-                valueType : oldType.getLeastSupertype(oldType));
+            var.setType(oldType == null ? valueType : oldType.getLeastSupertype(oldType));
           }
 
           scope.inferQualifiedSlot(name, qKeyName,
@@ -893,8 +949,8 @@ class TypeInference
       boolean rightIsUnknown = rightType.isUnknownType();
       if (leftIsUnknown && rightIsUnknown) {
         type = unknownType;
-      } else if ((!leftIsUnknown && leftType.isString()) ||
-                 (!rightIsUnknown && rightType.isString())) {
+      } else if ((!leftIsUnknown && leftType.isString())
+          || (!rightIsUnknown && rightType.isString())) {
         type = getNativeType(STRING_TYPE);
       } else if (leftIsUnknown || rightIsUnknown) {
         type = unknownType;
@@ -914,7 +970,7 @@ class TypeInference
   }
 
   private boolean isAddedAsNumber(JSType type) {
-    return type.isSubtype(registry.createUnionType(VOID_TYPE, NULL_TYPE,
+    return type.isSubtypeOf(registry.createUnionType(VOID_TYPE, NULL_TYPE,
         NUMBER_VALUE_OR_OBJECT_TYPE, BOOLEAN_TYPE, BOOLEAN_OBJECT_TYPE));
   }
 
@@ -960,7 +1016,7 @@ class TypeInference
     if (functionType.isFunctionType()) {
       FunctionType fnType = functionType.toMaybeFunctionType();
       n.setJSType(fnType.getReturnType());
-      backwardsInferenceFromCallSite(n, fnType);
+      backwardsInferenceFromCallSite(n, fnType, scope);
     } else if (functionType.isEquivalentTo(
         getNativeType(CHECKED_UNKNOWN_TYPE))) {
       n.setJSType(getNativeType(CHECKED_UNKNOWN_TYPE));
@@ -970,8 +1026,7 @@ class TypeInference
     return scope;
   }
 
-  private FlowScope tightenTypesAfterAssertions(FlowScope scope,
-      Node callNode) {
+  private FlowScope tightenTypesAfterAssertions(FlowScope scope, Node callNode) {
     Node left = callNode.getFirstChild();
     Node firstParam = left.getNext();
     AssertionFunctionSpec assertionFunctionSpec =
@@ -1029,8 +1084,7 @@ class TypeInference
   }
 
   /**
-   * We only do forward type inference. We do not do full backwards
-   * type inference.
+   * We only do forward type inference. We do not do full backwards type inference.
    *
    * In other words, if we have,
    * <code>
@@ -1041,20 +1095,20 @@ class TypeInference
    * of "x" from the return type of "f". A backwards type-inference engine
    * would try to figure out the type of "x" from the parameter type of "g".
    *
-   * However, there are a few special syntactic forms where we do some
-   * some half-assed backwards type-inference, because programmers
-   * expect it in this day and age. To take an example from Java,
+   * <p>However, there are a few special syntactic forms where we do some some half-assed backwards
+   * type-inference, because programmers expect it in this day and age. To take an example from
+   * Java,
    * <code>
    * List<String> x = Lists.newArrayList();
    * </code>
-   * The Java compiler will be able to infer the generic type of the List
-   * returned by newArrayList().
+   * The Java compiler will be able to infer the generic type of the List returned by
+   * newArrayList().
    *
-   * In much the same way, we do some special-case backwards inference for
-   * JS. Those cases are enumerated here.
+   * <p>In much the same way, we do some special-case backwards inference for JS. Those cases are
+   * enumerated here.
    */
-  private void backwardsInferenceFromCallSite(Node n, FunctionType fnType) {
-    boolean updatedFnType = inferTemplatedTypesForCall(n, fnType);
+  private void backwardsInferenceFromCallSite(Node n, FunctionType fnType, FlowScope scope) {
+    boolean updatedFnType = inferTemplatedTypesForCall(n, fnType, scope);
     if (updatedFnType) {
       fnType = n.getFirstChild().getJSType().toMaybeFunctionType();
     }
@@ -1145,9 +1199,9 @@ class TypeInference
           && iArgument.isFunction()
           && iArgumentType.isFunctionType()) {
         FunctionType argFnType = iArgumentType.toMaybeFunctionType();
-        boolean declared = iArgument.getJSDocInfo() != null;
-        iArgument.setJSType(
-            matchFunction(restrictedParameter, argFnType, declared));
+        JSDocInfo argJsdoc = iArgument.getJSDocInfo();
+        boolean declared = argJsdoc != null && argJsdoc.containsDeclaration();
+        iArgument.setJSType(matchFunction(restrictedParameter, argFnType, declared));
       }
       i++;
     }
@@ -1274,7 +1328,7 @@ class TypeInference
             .restrictByNotNullOrUndefined()
             .collapseUnion();
 
-        if (argObjectType.isSubtype(referencedParamType)) {
+        if (argObjectType.isSubtypeOf(referencedParamType)) {
           // If the argument type is a subtype of the parameter type, resolve any
           // template types amongst their templatized types.
           TemplateTypeMap paramTypeMap = paramType.getTemplateTypeMap();
@@ -1352,8 +1406,7 @@ class TypeInference
     public JSType caseTemplateType(TemplateType type) {
       madeChanges = true;
       JSType replacement = replacements.get(type);
-      return replacement != null ?
-          replacement : registry.getNativeType(UNKNOWN_TYPE);
+      return replacement != null ? replacement : registry.getNativeType(UNKNOWN_TYPE);
     }
   }
 
@@ -1374,13 +1427,11 @@ class TypeInference
     return typeVars;
   }
 
-  /**
-   * This function will evaluate the type transformations associated to the
-   * template types
-   */
+  /** This function will evaluate the type transformations associated to the template types */
   private Map<TemplateType, JSType> evaluateTypeTransformations(
       ImmutableList<TemplateType> templateTypes,
-      Map<TemplateType, JSType> inferredTypes) {
+      Map<TemplateType, JSType> inferredTypes,
+      FlowScope scope) {
 
     Map<String, JSType> typeVars = null;
     Map<TemplateType, JSType> result = null;
@@ -1390,7 +1441,7 @@ class TypeInference
       if (type.isTypeTransformation()) {
         // Lazy initialization when the first type transformation is found
         if (ttlObj == null) {
-          ttlObj = new TypeTransformation(compiler, syntacticScope);
+          ttlObj = new TypeTransformation(compiler, (TypedScope) scope.getDeclarationScope());
           typeVars = buildTypeVariables(inferredTypes);
           result = new LinkedHashMap<>();
         }
@@ -1409,12 +1460,11 @@ class TypeInference
   }
 
   /**
-   * For functions that use template types, specialize the function type for
-   * the call target based on the call-site specific arguments.
-   * Specifically, this enables inference to set the type of any function
-   * literal parameters based on these inferred types.
+   * For functions that use template types, specialize the function type for the call target based
+   * on the call-site specific arguments. Specifically, this enables inference to set the type of
+   * any function literal parameters based on these inferred types.
    */
-  private boolean inferTemplatedTypesForCall(Node n, FunctionType fnType) {
+  private boolean inferTemplatedTypesForCall(Node n, FunctionType fnType, FlowScope scope) {
     ImmutableList<TemplateType> keys = fnType.getTemplateTypeMap().getTemplateKeys();
     if (keys.isEmpty()) {
       return false;
@@ -1432,7 +1482,8 @@ class TypeInference
     }
 
     // Try to infer the template types using the type transformations
-    Map<TemplateType, JSType> typeTransformations = evaluateTypeTransformations(keys, inferred);
+    Map<TemplateType, JSType> typeTransformations =
+        evaluateTypeTransformations(keys, inferred, scope);
     if (typeTransformations != null) {
       inferred.putAll(typeTransformations);
     }
@@ -1469,7 +1520,7 @@ class TypeInference
           ct = (FunctionType) constructorType;
         }
         if (ct != null && ct.isConstructor()) {
-          backwardsInferenceFromCallSite(n, ct);
+          backwardsInferenceFromCallSite(n, ct, scope);
 
           // If necessary, create a TemplatizedType wrapper around the instance
           // type, based on the types of the constructor parameters.
@@ -1571,12 +1622,12 @@ class TypeInference
 
     // Scopes sometimes contain inferred type info about qualified names.
     String qualifiedName = n.getQualifiedName();
-    StaticTypedSlot<JSType> var = scope.getSlot(qualifiedName);
+    StaticTypedSlot<JSType> var = qualifiedName != null ? scope.getSlot(qualifiedName) : null;
     if (var != null) {
       JSType varType = var.getType();
       if (varType != null) {
         boolean isDeclared = !var.isTypeInferred();
-        isLocallyInferred = (var != syntacticScope.getSlot(qualifiedName));
+        isLocallyInferred = (var != getDeclaredVar(scope, qualifiedName));
         if (isDeclared || isLocallyInferred) {
           propertyType = varType;
         }
@@ -1671,8 +1722,8 @@ class TypeInference
       }
       // Exclude the boolean type if the literal set is empty because a boolean
       // can never actually be returned.
-      if (outcome.booleanValues == BooleanLiteralSet.EMPTY &&
-          getNativeType(BOOLEAN_TYPE).isSubtype(type)) {
+      if (outcome.booleanValues == BooleanLiteralSet.EMPTY
+          && getNativeType(BOOLEAN_TYPE).isSubtypeOf(type)) {
         // Exclusion only makes sense for a union type.
         if (type.isUnionType()) {
           type = type.toMaybeUnionType().getRestrictedUnion(
@@ -1776,29 +1827,33 @@ class TypeInference
       return new BooleanOutcomePair(
           BooleanLiteralSet.BOTH, BooleanLiteralSet.BOTH, flowScope, flowScope);
     }
-    return new BooleanOutcomePair(jsType.getPossibleToBooleanOutcomes(),
-        registry.getNativeType(BOOLEAN_TYPE).isSubtype(jsType) ?
-            BooleanLiteralSet.BOTH : BooleanLiteralSet.EMPTY,
-        flowScope, flowScope);
+    return new BooleanOutcomePair(
+        jsType.getPossibleToBooleanOutcomes(),
+        registry.getNativeType(BOOLEAN_TYPE).isSubtypeOf(jsType)
+            ? BooleanLiteralSet.BOTH
+            : BooleanLiteralSet.EMPTY,
+        flowScope,
+        flowScope);
   }
 
-  private void redeclareSimpleVar(
-      FlowScope scope, Node nameNode, JSType varType) {
-    checkState(nameNode.isName());
+  private void redeclareSimpleVar(FlowScope scope, Node nameNode, JSType varType) {
+    checkState(nameNode.isName(), nameNode);
     String varName = nameNode.getString();
     if (varType == null) {
       varType = getNativeType(JSTypeNative.UNKNOWN_TYPE);
     }
-    if (isUnflowable(syntacticScope.getVar(varName))) {
+    if (isUnflowable(getDeclaredVar(scope, varName))) {
       return;
     }
     scope.inferSlotType(varName, varType);
   }
 
   private boolean isUnflowable(TypedVar v) {
-    return v != null && v.isLocal() && v.isMarkedEscaped() &&
+    return v != null
+        && v.isLocal()
+        && v.isMarkedEscaped()
         // It's OK to flow a variable in the scope where it's escaped.
-        v.getScope() == syntacticScope;
+        && v.getScope().getClosestContainerScope() == containerScope;
   }
 
   /**
@@ -1820,5 +1875,9 @@ class TypeInference
 
   private JSType getNativeType(JSTypeNative typeId) {
     return registry.getNativeType(typeId);
+  }
+
+  private static TypedVar getDeclaredVar(FlowScope scope, String name) {
+    return ((TypedScope) scope.getDeclarationScope()).getVar(name);
   }
 }

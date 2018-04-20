@@ -49,6 +49,12 @@ Node.prototype.contains = function(n) {};
 Node.prototype.isConnected;
 
 /**
+ * @type {boolean}
+ * @see https://html.spec.whatwg.org/multipage/scripting.html#the-script-element
+ */
+HTMLScriptElement.prototype.async;
+
+/**
  * @constructor
  * @see http://www.whatwg.org/specs/web-apps/current-work/multipage/the-canvas-element.html#the-canvas-element
  * @extends {HTMLElement}
@@ -1015,6 +1021,25 @@ HTMLImageElement.prototype.naturalHeight;
 HTMLImageElement.prototype.crossOrigin;
 
 /**
+ * @type {string}
+ * @see https://html.spec.whatwg.org/multipage/embedded-content.html#dom-img-currentsrc
+ */
+HTMLImageElement.prototype.currentSrc;
+
+/**
+ * @type {string}
+ * @see https://html.spec.whatwg.org/multipage/images.html#image-decoding-hint
+ */
+HTMLImageElement.prototype.decoding;
+
+/**
+ * @return {!Promise<undefined>}
+ * @see https://html.spec.whatwg.org/multipage/embedded-content.html#dom-img-decode
+ */
+HTMLImageElement.prototype.decode;
+
+
+/**
  * This is a superposition of the Window and Worker postMessage methods.
  * @param {*} message
  * @param {(string|!Array<!Transferable>)=} opt_targetOriginOrTransfer
@@ -1212,14 +1237,13 @@ WebWorker.prototype.postMessage = function(message) {};
 
 /**
  * Sent when the worker thread posts a message to its creator.
- * @type {?function(!MessageEvent<*>)}
+ * @type {?function(!MessageEvent<*>): void}
  */
 WebWorker.prototype.onmessage;
 
 /**
  * Sent when the worker thread encounters an error.
- * TODO(tbreisacher): Should this change to function(!ErrorEvent)?
- * @type {?function(!Event)}
+ * @type {?function(!ErrorEvent): void}
  */
 WebWorker.prototype.onerror;
 
@@ -1263,14 +1287,13 @@ Worker.prototype.webkitPostMessage = function(message, opt_transfer) {};
 
 /**
  * Sent when the worker thread posts a message to its creator.
- * @type {?function(!MessageEvent<*>)}
+ * @type {?function(!MessageEvent<*>): void}
  */
 Worker.prototype.onmessage;
 
 /**
  * Sent when the worker thread encounters an error.
- * TODO(tbreisacher): Should this change to function(!ErrorEvent)?
- * @type {?function(!Event)}
+ * @type {?function(!ErrorEvent): void}
  */
 Worker.prototype.onerror;
 
@@ -1302,8 +1325,7 @@ SharedWorker.prototype.port;
 
 /**
  * Called on network errors for loading the initial script.
- * TODO(tbreisacher): Should this change to function(!ErrorEvent)?
- * @type {?function(!Event)}
+ * @type {?function(!ErrorEvent): void}
  */
 SharedWorker.prototype.onerror;
 
@@ -1362,19 +1384,19 @@ WorkerGlobalScope.prototype.close = function() {};
 
 /**
  * Sent when the worker encounters an error.
- * @type {?function(!Event)}
+ * @type {?function(!ErrorEvent): void}
  */
 WorkerGlobalScope.prototype.onerror;
 
 /**
  * Sent when the worker goes offline.
- * @type {?function(!Event)}
+ * @type {?function(!Event): void}
  */
 WorkerGlobalScope.prototype.onoffline;
 
 /**
  * Sent when the worker goes online.
- * @type {?function(!Event)}
+ * @type {?function(!Event): void}
  */
 WorkerGlobalScope.prototype.ononline;
 
@@ -1408,7 +1430,7 @@ DedicatedWorkerGlobalScope.prototype.webkitPostMessage =
 
 /**
  * Sent when the creator posts a message to this worker.
- * @type {?function(!MessageEvent<*>)}
+ * @type {?function(!MessageEvent<*>): void}
  */
 DedicatedWorkerGlobalScope.prototype.onmessage;
 
@@ -1817,6 +1839,9 @@ HTMLImageElement.prototype.onload;
 
 /** @type {?function(Event)} */
 HTMLImageElement.prototype.onerror;
+
+/** @type {string} */
+HTMLMediaElement.prototype.preload;
 
 /** @type {number} */
 HTMLMediaElement.prototype.readyState;
@@ -3196,6 +3221,14 @@ DOMTokenList.prototype.add = function(var_args) {};
 DOMTokenList.prototype.remove = function(var_args) {};
 
 /**
+ * Replaces token with newToken.
+ * @param {string} token The CSS class to replace.
+ * @param {string} newToken The new CSS class to use.
+ * @return {undefined}
+ */
+DOMTokenList.prototype.replace = function(token, newToken) {};
+
+/**
  * @param {string} token The CSS class to toggle from this element.
  * @param {boolean=} opt_force True to add the class whether it exists
  *     or not. False to remove the class whether it exists or not.
@@ -3593,7 +3626,7 @@ Document.prototype.webkitFullScreenKeyboardInputAllowed;
 Element.prototype.msRequestFullscreen = function() {};
 
 /** @return {void} */
-Element.prototype.msExitFullscreen = function() {};
+Document.prototype.msExitFullscreen = function() {};
 
 /** @type {boolean} */
 Document.prototype.msFullscreenEnabled;
@@ -4234,6 +4267,37 @@ function HTMLDataListElement() {}
 HTMLDataListElement.prototype.options;
 
 
+/**
+ * @return {boolean}
+ * @see https://html.spec.whatwg.org/multipage/iframe-embed-object.html#the-object-element
+ */
+HTMLObjectElement.prototype.checkValidity;
+
+/**
+ * @param {string} message
+ * @see https://html.spec.whatwg.org/multipage/iframe-embed-object.html#the-object-element
+ * @return {undefined}
+ */
+HTMLObjectElement.prototype.setCustomValidity;
+
+/**
+ * @type {string}
+ * @see https://html.spec.whatwg.org/multipage/iframe-embed-object.html#the-object-element
+ */
+HTMLObjectElement.prototype.validationMessage;
+
+/**
+ * @type {!ValidityState}
+ * @see https://html.spec.whatwg.org/multipage/iframe-embed-object.html#the-object-element
+ */
+HTMLObjectElement.prototype.validity;
+
+/**
+ * @type {boolean}
+ * @see https://html.spec.whatwg.org/multipage/iframe-embed-object.html#the-object-element
+ */
+HTMLObjectElement.prototype.willValidate;
+
 
 /**
  * @see https://html.spec.whatwg.org/multipage/forms.html#the-output-element
@@ -4519,6 +4583,12 @@ Navigator.prototype.javaEnabled = function() {};
 Navigator.prototype.deviceMemory;
 
 /**
+ * @type {!StorageManager}
+ * @see https://storage.spec.whatwg.org
+ */
+Navigator.prototype.storage;
+
+/**
  * @constructor
  * @implements {IObject<(string|number),!Plugin>}
  * @implements {IArrayLike<!Plugin>}
@@ -4720,3 +4790,27 @@ VisualViewport.prototype.onresize;
 
 /** @type {?function(!Event)} */
 VisualViewport.prototype.onscroll;
+
+/**
+ * @see https://storage.spec.whatwg.org/
+ * @constructor
+ */
+function StorageManager() {}
+
+/** @return {!Promise<boolean>} */
+StorageManager.prototype.persisted = function() {};
+
+/** @return {!Promise<boolean>} */
+StorageManager.prototype.persist = function() {};
+
+/** @return {!Promise<StorageEstimate>} */
+StorageManager.prototype.estimate = function() {};
+
+/**
+ * @see https://storage.spec.whatwg.org/
+ * @typedef {{
+ *   usage: number,
+ *   quota: number
+ * }}
+ */
+var StorageEstimate;

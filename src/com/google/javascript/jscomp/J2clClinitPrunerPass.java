@@ -71,12 +71,12 @@ public class J2clClinitPrunerPass implements CompilerPass {
 
     // Update the function side-effect markers on the AST.
     // Removing a clinit from a function may make it side-effect free.
-    new PureFunctionIdentifier.DriverInJ2cl(compiler, null).process(externs, root);
+    new PureFunctionIdentifier.Driver(compiler, null).process(externs, root);
   }
 
   private void removeRedundantClinits(Node root, List<Node> changedScopeNodes) {
     RedundantClinitPruner redundantClinitPruner = new RedundantClinitPruner();
-    NodeTraversal.traverseEs6ScopeRoots(
+    NodeTraversal.traverseScopeRoots(
         compiler,
         root,
         getNonNestedParentScopeNodes(changedScopeNodes),
@@ -84,14 +84,14 @@ public class J2clClinitPrunerPass implements CompilerPass {
         redundantClinitPruner, // FunctionCallback
         true);
 
-    NodeTraversal.traverseEs6ScopeRoots(
+    NodeTraversal.traverseScopeRoots(
         compiler, root, changedScopeNodes, new LookAheadRedundantClinitPruner(), false);
   }
 
   private void pruneEmptyClinits(Node root, List<Node> changedScopes) {
     // Clear emptiedClinitMethods before EmptyClinitPruner to populate only with new ones.
     emptiedClinitMethods.clear();
-    NodeTraversal.traverseEs6ScopeRoots(
+    NodeTraversal.traverseScopeRoots(
         compiler, root, changedScopes, new EmptyClinitPruner(), false);
 
     // Make sure replacements are to final destination instead of pointing intermediate ones.
@@ -112,7 +112,7 @@ public class J2clClinitPrunerPass implements CompilerPass {
 
   private Multimap<String, Node> collectClinitReferences(Node root) {
     final Multimap<String, Node> clinitReferences = HashMultimap.create();
-    NodeTraversal.traverseEs6(
+    NodeTraversal.traverse(
         compiler,
         root,
         new AbstractPostOrderCallback() {
@@ -174,12 +174,14 @@ public class J2clClinitPrunerPass implements CompilerPass {
 
     @Override
     public boolean shouldTraverse(NodeTraversal t, Node node, Node parent) {
-      if (NodeUtil.isFunctionDeclaration(node)) {
-        // Unlike function expressions, we don't know when the function in a function declaration
-        // will be executed so lets avoid inheriting anything from the current branch.
+      if (NodeUtil.isFunctionDeclaration(node) || node.isScript()) {
+        // In the case of function declarations, unlike function expressions, we don't know when the
+        // function will be executed so assume there are no clinits already executed.
+        // In the case of script roots, when using modules, we can not assume the scripts are going
+        // to be executed in program order.
         stateStack.addLast(clinitsCalledAtBranch);
         clinitsCalledAtBranch = new HierarchicalSet<>(null);
-      }
+      } 
 
       if (isNewControlBranch(parent)) {
         clinitsCalledAtBranch = new HierarchicalSet<>(clinitsCalledAtBranch);
@@ -200,9 +202,11 @@ public class J2clClinitPrunerPass implements CompilerPass {
         clinitsCalledAtBranch = clinitsCalledAtBranch.parent;
       }
 
-      if (parent != null && NodeUtil.isFunctionDeclaration(node)) {
-        // Unlike function expressions, we don't know when the function in a function declaration
-        // will be executed so lets avoid inheriting anything from the current branch.
+      if (NodeUtil.isFunctionDeclaration(node) || node.isScript()) {
+        // In the case of function declarations, unlike function expressions, we don't know when the
+        // function will be executed so assume there are no clinits already executed.
+        // In the case of script roots, when using modules, we can not assume the scripts are going
+        // to be executed in program order.
         clinitsCalledAtBranch = stateStack.removeLast();
       }
     }

@@ -21,7 +21,6 @@ import static com.google.common.base.Ascii.toUpperCase;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
-import com.google.common.base.Predicates;
 import com.google.javascript.jscomp.NodeTraversal.AbstractModuleCallback;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
@@ -55,6 +54,11 @@ public final class ClosureCheckModule extends AbstractModuleCallback
           "JSC_GOOG_MODULE_IN_NON_MODULE",
           "goog.module() call must be the first statement in a module.");
 
+  static final DiagnosticType DECLARE_LEGACY_NAMESPACE_IN_NON_MODULE =
+      DiagnosticType.error(
+          "JSC_DECLARE_LEGACY_NAMESPACE_IN_NON_MODULE",
+          "goog.module.declareLegacyNamespace may only be called in a goog.module.");
+
   static final DiagnosticType GOOG_MODULE_REFERENCES_THIS = DiagnosticType.error(
       "JSC_GOOG_MODULE_REFERENCES_THIS",
       "The body of a goog.module cannot reference 'this'.");
@@ -63,10 +67,11 @@ public final class ClosureCheckModule extends AbstractModuleCallback
       "JSC_GOOG_MODULE_USES_THROW",
       "The body of a goog.module cannot use 'throw'.");
 
-  static final DiagnosticType GOOG_MODULE_USES_GOOG_MODULE_GET = DiagnosticType.error(
-      "JSC_GOOG_MODULE_USES_GOOG_MODULE_GET",
-      "It's illegal to use a 'goog.module.get' at the module top-level."
-      + " Did you mean to use goog.require instead?");
+  static final DiagnosticType MODULE_USES_GOOG_MODULE_GET =
+      DiagnosticType.error(
+          "JSC_MODULE_USES_GOOG_MODULE_GET",
+          "It's illegal to use a 'goog.module.get' at the module top-level."
+              + " Did you mean to use goog.require instead?");
 
   static final DiagnosticType DUPLICATE_NAME_SHORT_REQUIRE =
       DiagnosticType.error(
@@ -181,12 +186,12 @@ public final class ClosureCheckModule extends AbstractModuleCallback
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverseEs6(compiler, root, this);
+    NodeTraversal.traverse(compiler, root, this);
   }
 
   @Override
   public void hotSwapScript(Node scriptRoot, Node originalRoot) {
-    NodeTraversal.traverseEs6(compiler, scriptRoot, this);
+    NodeTraversal.traverse(compiler, scriptRoot, this);
   }
 
   @Override
@@ -217,6 +222,8 @@ public final class ClosureCheckModule extends AbstractModuleCallback
     if (currentModule == null) {
       if (NodeUtil.isCallTo(n, "goog.module")) {
         t.report(n, GOOG_MODULE_IN_NON_MODULE);
+      } else if (NodeUtil.isGoogModuleDeclareLegacyNamespaceCall(n)) {
+        t.report(n, DECLARE_LEGACY_NAMESPACE_IN_NON_MODULE);
       }
       return;
     }
@@ -236,7 +243,7 @@ public final class ClosureCheckModule extends AbstractModuleCallback
             || callee.matchesQualifiedName("goog.forwardDeclare")) {
           checkRequireCall(t, n, parent);
         } else if (callee.matchesQualifiedName("goog.module.get") && t.inModuleHoistScope()) {
-          t.report(n, GOOG_MODULE_USES_GOOG_MODULE_GET);
+          t.report(n, MODULE_USES_GOOG_MODULE_GET);
         }
         break;
       case ASSIGN: {
@@ -364,8 +371,7 @@ public final class ClosureCheckModule extends AbstractModuleCallback
               }
             }
           }
-        },
-        Predicates.<Node>alwaysTrue());
+        });
   }
 
   /** Is this the LHS of a goog.module export? i.e. Either "exports" or "exports.name" */

@@ -38,17 +38,24 @@ public final class ImplicitNullabilityCheckTest extends TypeICompilerTestCase {
   @Override
   protected void setUp() throws Exception {
     super.setUp();
-    enableTranspile();
   }
 
   public void testExplicitJsdocDoesntWarn() {
     noWarning("/** @type {boolean} */ var x;");
+    noWarning("/** @type {symbol} */ var x;");
     noWarning("/** @type {null} */ var x;");
     noWarning("/** @type {!Object} */ var x;");
     noWarning("/** @type {?Object} */ var x;");
     noWarning("/** @type {function(new:Object)} */ function f(){}");
     noWarning("/** @type {function(this:Object)} */ function f(){}");
     noWarning("/** @typedef {!Object} */ var Obj; var /** Obj */ x;");
+
+    // Test let and const
+    noWarning("/** @type {boolean} */ let x;");
+    noWarning("/** @type {!Object} */ let x;");
+
+    noWarning("/** @type {!Object} */ const x = {};");
+    noWarning("/** @type {boolean} */ const x = true;");
   }
 
   public void testExplicitlyNullableUnion() {
@@ -57,6 +64,12 @@ public final class ImplicitNullabilityCheckTest extends TypeICompilerTestCase {
     noWarning("/** @type {?(Object|number)} */ var x;");
     noWarning("/** @type {(Object|?number)} */ var x;");
     warnImplicitlyNullable("/** @type {(Object|number)} */ var x;");
+
+    noWarning("/** @type {(Object|null)} */ let x;");
+    warnImplicitlyNullable("/** @type {(Object|number)} */ let x;");
+
+    noWarning("/** @type {(Object|null)} */ const x = null;");
+    warnImplicitlyNullable("/** @type {(Object|number)} */ const x = 3;;");
   }
 
   public void testJsdocPositions() {
@@ -65,6 +78,9 @@ public final class ImplicitNullabilityCheckTest extends TypeICompilerTestCase {
     warnImplicitlyNullable("/** @typedef {Object} */ var x;");
     warnImplicitlyNullable("/** @param {Object} x */ function f(x){}");
     warnImplicitlyNullable("/** @return {Object} */ function f(x){ return {}; }");
+
+    warnImplicitlyNullable("/** @type {Object} */ let x;");
+    warnImplicitlyNullable("/** @type {Object} */ const x = {};");
   }
 
   public void testParameterizedObject() {
@@ -83,14 +99,16 @@ public final class ImplicitNullabilityCheckTest extends TypeICompilerTestCase {
   public void testUnknownTypenameDoesntWarn() {
     // Different warnings in OTI and NTI
     this.mode = TypeInferenceMode.OTI_ONLY;
-    testSame(
-        DEFAULT_EXTERNS, "/** @type {gibberish} */ var x;",
-        RhinoErrorReporter.UNRECOGNIZED_TYPE_ERROR);
+    test(
+        externs(DEFAULT_EXTERNS),
+        srcs("/** @type {gibberish} */ var x;"),
+        warning(RhinoErrorReporter.UNRECOGNIZED_TYPE_ERROR));
 
     this.mode = TypeInferenceMode.NTI_ONLY;
-    testSame(
-        DEFAULT_EXTERNS, "/** @type {gibberish} */ var x;",
-        GlobalTypeInfoCollector.UNRECOGNIZED_TYPE_NAME);
+    test(
+        externs(DEFAULT_EXTERNS),
+        srcs("/** @type {gibberish} */ var x;"),
+        warning(GlobalTypeInfoCollector.UNRECOGNIZED_TYPE_NAME));
   }
 
   public void testThrowsDoesntWarn() {
@@ -122,10 +140,13 @@ public final class ImplicitNullabilityCheckTest extends TypeICompilerTestCase {
   }
 
   private void warnImplicitlyNullable(String js) {
-    testSame(DEFAULT_EXTERNS, js, ImplicitNullabilityCheck.IMPLICITLY_NULLABLE_JSDOC);
+    test(
+        externs(DEFAULT_EXTERNS),
+        srcs(js),
+        warning(ImplicitNullabilityCheck.IMPLICITLY_NULLABLE_JSDOC));
   }
 
   private void noWarning(String js) {
-    testSame(DEFAULT_EXTERNS, js);
+    testSame(externs(DEFAULT_EXTERNS), srcs(js));
   }
 }

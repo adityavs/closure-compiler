@@ -173,6 +173,13 @@ public class CompilerOptions implements Serializable {
      * of the code being compiled.  This is useful for incremental type checking.
      */
     GENERATE_IJS,
+
+    /**
+     * The compiler should run the same checks as used during type-only interface generation,
+     * but run them after typechecking to give better error messages. This only makes sense in
+     * --checks_only mode.
+     */
+    RUN_IJS_CHECKS_LATE,
   }
 
   private IncrementalCheckMode incrementalCheckMode = IncrementalCheckMode.OFF;
@@ -181,6 +188,7 @@ public class CompilerOptions implements Serializable {
     incrementalCheckMode = value;
     switch (value) {
       case OFF:
+      case RUN_IJS_CHECKS_LATE:
         break;
       case GENERATE_IJS:
         setPreserveTypeAnnotations(true);
@@ -191,6 +199,10 @@ public class CompilerOptions implements Serializable {
 
   public boolean shouldGenerateTypedExterns() {
     return incrementalCheckMode == IncrementalCheckMode.GENERATE_IJS;
+  }
+
+  public boolean shouldRunTypeSummaryChecksLate() {
+    return incrementalCheckMode == IncrementalCheckMode.RUN_IJS_CHECKS_LATE;
   }
 
   private Config.JsDocParsing parseJsDocDocumentation = Config.JsDocParsing.TYPES_ONLY;
@@ -211,15 +223,6 @@ public class CompilerOptions implements Serializable {
   boolean inferTypes;
 
   private boolean useNewTypeInference;
-
-  /**
-   * Several passes after type checking use type information. We have converted all these passes
-   * to use TypeI, and most users of NTI use NTI types throughout their compilation.
-   * But there are a few NTI users that still use the old mode, where OTI runs after NTI
-   * and the optimizations see the old types. We plan to switch these users to NTI-only builds
-   * and delete this option.
-   */
-  private boolean runOTIafterNTI = false;
 
   /**
    * Relevant only when {@link #useNewTypeInference} is true, where we normally disable OTI errors.
@@ -899,6 +902,12 @@ public class CompilerOptions implements Serializable {
   /** Rewrite CommonJS modules so that they can be concatenated together. */
   boolean processCommonJSModules = false;
 
+  /**
+   * Rewrite ES6 modules to CommonJs-like modules that can be concatenated together. Requires
+   * the module runtime.
+   */
+  private boolean transpileEs6ModulesToCjsModules = false;
+
   /** CommonJS module prefix. */
   List<String> moduleRoots = ImmutableList.of(ModuleLoader.DEFAULT_FILENAME_PREFIX);
 
@@ -1149,13 +1158,15 @@ public class CompilerOptions implements Serializable {
 
   String instrumentationTemplateFile;
 
+  private static final ImmutableList<ConformanceConfig> GLOBAL_CONFORMANCE_CONFIGS =
+      ImmutableList.of(ResourceLoader.loadGlobalConformance(CompilerOptions.class));
+
   /**
    * List of conformance configs to use in CheckConformance.
    *
    * <p>The first entry of this list is always the Global ConformanceConfig
    */
-  private ImmutableList<ConformanceConfig> conformanceConfigs =
-      ImmutableList.of(ResourceLoader.loadGlobalConformance(CompilerOptions.class));
+  private ImmutableList<ConformanceConfig> conformanceConfigs = GLOBAL_CONFORMANCE_CONFIGS;
 
   /**
    * For use in {@link CompilationLevel#WHITESPACE_ONLY} mode, when using goog.module.
@@ -2004,14 +2015,6 @@ public class CompilerOptions implements Serializable {
     return this.checkTypes || this.useNewTypeInference;
   }
 
-  public boolean getRunOTIafterNTI() {
-    return this.runOTIafterNTI;
-  }
-
-  public void setRunOTIafterNTI(boolean enable) {
-    this.runOTIafterNTI = enable;
-  }
-
   // Not dead code; used by the open-source users of the compiler.
   public void setReportOTIErrorsUnderNTI(boolean enable) {
     this.reportOTIErrorsUnderNTI = enable;
@@ -2025,7 +2028,7 @@ public class CompilerOptions implements Serializable {
     this.typeCheckEs6Natively = enable;
   }
 
-/**
+  /**
    * @return Whether assumeStrictThis is set.
    */
   public boolean assumeStrictThis() {
@@ -2479,7 +2482,7 @@ public class CompilerOptions implements Serializable {
   }
 
   public boolean shouldPreservesGoogProvidesAndRequires() {
-    return this.preserveClosurePrimitives || this.shouldGenerateTypedExterns();
+    return this.preserveClosurePrimitives;
   }
 
   public boolean shouldPreserveGoogModule() {
@@ -2517,7 +2520,7 @@ public class CompilerOptions implements Serializable {
 
   public void addCustomPass(CustomPassExecutionTime time, CompilerPass customPass) {
     if (customPasses == null) {
-      customPasses = LinkedHashMultimap.<CustomPassExecutionTime, CompilerPass>create();
+      customPasses = LinkedHashMultimap.create();
     }
     customPasses.put(time, customPass);
   }
@@ -2698,6 +2701,14 @@ public class CompilerOptions implements Serializable {
    */
   public void setProcessCommonJSModules(boolean processCommonJSModules) {
     this.processCommonJSModules = processCommonJSModules;
+  }
+
+  public void setTranspileEs6ModulesToCjsModules(boolean transpileEs6ModulesToCjsModules) {
+    this.transpileEs6ModulesToCjsModules = transpileEs6ModulesToCjsModules;
+  }
+
+  public boolean getTranspileEs6ModulesToCjsModules() {
+    return transpileEs6ModulesToCjsModules;
   }
 
   /**
@@ -2951,6 +2962,7 @@ public class CompilerOptions implements Serializable {
             .add("printInputDelimiter", printInputDelimiter)
             .add("printSourceAfterEachPass", printSourceAfterEachPass)
             .add("processCommonJSModules", processCommonJSModules)
+            .add("transpileEs6ModulesToCjsModules", transpileEs6ModulesToCjsModules)
             .add("processObjectPropertyString", processObjectPropertyString)
             .add("propertyInvalidationErrors", propertyInvalidationErrors)
             .add("propertyRenaming", propertyRenaming)
@@ -3060,6 +3072,9 @@ public class CompilerOptions implements Serializable {
     /** ECMAScript standard approved in 2017. Adds async/await and other syntax */
     ECMASCRIPT_2017,
 
+    /** ECMAScript standard approved in 2018. Adds "..." in object literals/patterns. */
+    ECMASCRIPT_2018,
+
     /** ECMAScript latest draft standard. */
     ECMASCRIPT_NEXT,
 
@@ -3078,12 +3093,6 @@ public class CompilerOptions implements Serializable {
         default:
           return true;
       }
-    }
-
-    /** Whether this is ECMAScript 6 or higher. */
-    @Deprecated
-    public boolean isEs6OrHigher() {
-      return this.toFeatureSet().contains(FeatureSet.ES6);
     }
 
     public static LanguageMode fromString(String value) {
@@ -3105,7 +3114,7 @@ public class CompilerOptions implements Serializable {
       }
     }
 
-    FeatureSet toFeatureSet() {
+    public FeatureSet toFeatureSet() {
       switch (this) {
         case ECMASCRIPT3:
           return FeatureSet.ES3;
@@ -3118,6 +3127,8 @@ public class CompilerOptions implements Serializable {
           return FeatureSet.ES7_MODULES;
         case ECMASCRIPT_2017:
           return FeatureSet.ES8_MODULES;
+        case ECMASCRIPT_2018:
+          return FeatureSet.ES2018_MODULES;
         case ECMASCRIPT_NEXT:
           return FeatureSet.ES_NEXT;
         case ECMASCRIPT6_TYPED:

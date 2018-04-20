@@ -197,7 +197,7 @@ class ProcessClosurePrimitives extends AbstractPostOrderCallback
 
   @Override
   public void process(Node externs, Node root) {
-    NodeTraversal.traverseRootsEs6(compiler, this, externs, root);
+    NodeTraversal.traverseRoots(compiler, this, externs, root);
 
     for (Node n : defineCalls) {
       replaceGoogDefines(n);
@@ -386,7 +386,8 @@ class ProcessClosurePrimitives extends AbstractPostOrderCallback
         if (n.getFirstChild().isName()
             && !parent.isCall()
             && !parent.isAssign()
-            && n.matchesQualifiedName("goog.base")) {
+            && n.matchesQualifiedName("goog.base")
+            && !n.getSourceFileName().endsWith("goog.js")) {
           reportBadGoogBaseUse(t, n, "May only be called directly.");
         }
         break;
@@ -1174,8 +1175,8 @@ class ProcessClosurePrimitives extends AbstractPostOrderCallback
     if (typeDeclaration != null) {
       compiler.forwardDeclareType(typeDeclaration);
       // Forward declaration was recorded and we can remove the call.
-      compiler.reportChangeToEnclosingScope(parent);
-      parent.detach();
+      Node toRemove = parent.isExprResult() ? parent : parent.getParent();
+      NodeUtil.deleteNode(toRemove, compiler);
     }
   }
 
@@ -1597,7 +1598,8 @@ class ProcessClosurePrimitives extends AbstractPostOrderCallback
   private JSDocInfo createUnknownTypeJsDocInfo() {
     JSDocInfoBuilder castToUnknownBuilder = new JSDocInfoBuilder(true);
     castToUnknownBuilder.recordType(
-        new JSTypeExpression(JsDocInfoParser.parseTypeString("?"), ""));
+        new JSTypeExpression(
+            JsDocInfoParser.parseTypeString("?"), "<ProcessClosurePrimitives.java>"));
     return castToUnknownBuilder.build();
   }
 

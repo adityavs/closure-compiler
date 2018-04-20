@@ -66,6 +66,13 @@ abstract class PotentialDeclaration {
     return new MethodDeclaration(name, functionNode);
   }
 
+  static PotentialDeclaration fromStringKey(Node stringKeyNode) {
+    checkArgument(stringKeyNode.isStringKey());
+    checkArgument(stringKeyNode.getParent().isObjectLit());
+    String name = "this." + stringKeyNode.getString();
+    return new StringKeyDeclaration(name, stringKeyNode);
+  }
+
   static PotentialDeclaration fromDefine(Node callNode) {
     checkArgument(NodeUtil.isCallTo(callNode, "goog.define"));
     return new DefineDeclaration(callNode);
@@ -89,7 +96,7 @@ abstract class PotentialDeclaration {
     return NodeUtil.getBestJSDocInfo(lhs);
   }
 
-  private boolean isDetached() {
+  boolean isDetached() {
     for (Node current = lhs; current != null; current = current.getParent()) {
       if (current.isScript()) {
         return false;
@@ -129,62 +136,37 @@ abstract class PotentialDeclaration {
    *   and goog.module exports
    * This is the most common type of potential declaration.
    */
-  static class NameDeclaration extends PotentialDeclaration {
+  private static class NameDeclaration extends PotentialDeclaration {
 
     NameDeclaration(String fullyQualifiedName, Node lhs, Node rhs) {
       super(fullyQualifiedName, lhs, rhs);
     }
 
-    void simplifyNamespace(AbstractCompiler compiler) {
-      Node objLit = getRhs();
+    private void simplifyNamespace(AbstractCompiler compiler) {
       if (getRhs().isOr()) {
-        objLit = getRhs().getLastChild().detach();
+        Node objLit = getRhs().getLastChild().detach();
         getRhs().replaceWith(objLit);
         compiler.reportChangeToEnclosingScope(getLhs());
       }
-      if (objLit.hasChildren()) {
-        for (Node key : objLit.children()) {
-          switch (key.getToken()) {
-            case STRING_KEY:
-              if (!isTypedRhs(key.getLastChild())) {
-                ConvertToTypedInterface
-                    .maybeWarnForConstWithoutExplicitType(compiler, key.getJSDocInfo(), key);
-                removeStringKeyValue(key);
-                maybeUpdateJsdoc(key);
-                compiler.reportChangeToEnclosingScope(key);
-              }
-              break;
-            case GETTER_DEF:
-            case MEMBER_FUNCTION_DEF:
-            case SETTER_DEF:
-              // Nothing to simplify here...
-              break;
-            case COMPUTED_PROP:
-              NodeUtil.deleteNode(key, compiler);
-              break;
-            default:
-              throw new IllegalStateException("Unexpected object literal body: " + key);
-          }
-        }
-      }
+    }
 
+    private void simplifySymbol(AbstractCompiler compiler) {
+      checkArgument(NodeUtil.isCallTo(getRhs(), "Symbol"));
+      Node callNode = getRhs();
+      while (callNode.hasMoreThanOneChild()) {
+        NodeUtil.deleteNode(callNode.getLastChild(), compiler);
+      }
     }
 
     @Override
     void simplify(AbstractCompiler compiler) {
-      if (getRhs() == null) {
+      if (getRhs() == null || shouldPreserve()) {
         return;
       }
       Node nameNode = getLhs();
       JSDocInfo jsdoc = getJsDoc();
       if (jsdoc != null && jsdoc.hasEnumParameterType()) {
-        // Remove values from enums
-        if (getRhs().isObjectLit() && getRhs().hasChildren()) {
-          for (Node key : getRhs().children()) {
-            removeStringKeyValue(key);
-          }
-          compiler.reportChangeToEnclosingScope(getRhs());
-        }
+        super.simplifyEnumValues(compiler);
         return;
       }
       if (NodeUtil.isNamespaceDecl(nameNode)) {
@@ -197,13 +179,24 @@ abstract class PotentialDeclaration {
         compiler.reportChangeToEnclosingScope(nameNode);
         return;
       }
+      if (NodeUtil.isCallTo(getRhs(), "Symbol")) {
+        simplifySymbol(compiler);
+        return;
+      }
+      if (getLhs().getParent().isConst()) {
+        jsdoc = JsdocUtil.markConstant(jsdoc);
+      }
       // Just completely remove the RHS, and replace with a getprop.
       Node newStatement =
           NodeUtil.newQNameDeclaration(compiler, nameNode.getQualifiedName(), null, jsdoc);
       newStatement.useSourceInfoIfMissingFromForTree(nameNode);
       Node oldStatement = getRemovableNode();
       NodeUtil.deleteChildren(oldStatement, compiler);
-      oldStatement.replaceWith(newStatement);
+      if (oldStatement.isExport()) {
+        oldStatement.addChildToBack(newStatement);
+      } else {
+        oldStatement.replaceWith(newStatement);
+      }
       compiler.reportChangeToEnclosingScope(newStatement);
     }
 
@@ -211,27 +204,27 @@ abstract class PotentialDeclaration {
       rhs.replaceWith(IR.cast(IR.number(0), JsdocUtil.getQmarkTypeJSDoc()).srcrefTree(rhs));
     }
 
-    private static void removeStringKeyValue(Node stringKey) {
-      Node value = stringKey.getOnlyChild();
-      Node replacementValue = IR.number(0).srcrefTree(value);
-      stringKey.replaceChild(value, replacementValue);
-    }
-
-    private static void maybeUpdateJsdoc(Node jsdocNode) {
-      checkArgument(jsdocNode.isStringKey(), jsdocNode);
-      JSDocInfo jsdoc = jsdocNode.getJSDocInfo();
-      if (jsdoc == null
-          || !jsdoc.containsDeclaration()
-          || ConvertToTypedInterface.isConstToBeInferred(jsdoc, jsdocNode)) {
-        jsdocNode.setJSDocInfo(JsdocUtil.getUnusableTypeJSDoc(jsdoc));
-      }
+    @Override
+    boolean shouldPreserve() {
+      Node rhs = getRhs();
+      Node nameNode = getLhs();
+      JSDocInfo jsdoc = getJsDoc();
+      boolean isExport = isExportLhs(nameNode);
+      return super.shouldPreserve()
+          || isImportRhs(rhs)
+          || (isExport && rhs != null && (rhs.isQualifiedName() || rhs.isObjectLit()))
+          || (jsdoc != null && jsdoc.isConstructor() && rhs != null && rhs.isQualifiedName())
+          || (rhs != null
+              && rhs.isObjectLit()
+              && !rhs.hasChildren()
+              && (jsdoc == null || !JsdocUtil.hasAnnotatedType(jsdoc)));
     }
   }
 
   /**
    * A declaration of a property on `this` inside a constructor.
    */
-  static class ThisPropDeclaration extends PotentialDeclaration {
+  private static class ThisPropDeclaration extends PotentialDeclaration {
     private final Node insertionPoint;
 
     ThisPropDeclaration(String fullyQualifiedName, Node lhs, Node rhs) {
@@ -242,6 +235,9 @@ abstract class PotentialDeclaration {
 
     @Override
     void simplify(AbstractCompiler compiler) {
+      if (shouldPreserve()) {
+        return;
+      }
       // Just completely remove the RHS, if present, and replace with a getprop.
       Node newStatement =
           NodeUtil.newQNameDeclaration(compiler, getFullyQualifiedName(), null, getJsDoc());
@@ -286,11 +282,127 @@ abstract class PotentialDeclaration {
     }
   }
 
-  static boolean isTypedRhs(Node rhs) {
+  private static class StringKeyDeclaration extends PotentialDeclaration {
+    StringKeyDeclaration(String name, Node stringKeyNode) {
+      super(name, stringKeyNode, stringKeyNode.getLastChild());
+    }
+
+    @Override
+    void simplify(AbstractCompiler compiler) {
+      if (shouldPreserve()) {
+        return;
+      }
+      JSDocInfo jsdoc = getJsDoc();
+      if (jsdoc != null && jsdoc.hasEnumParameterType()) {
+        super.simplifyEnumValues(compiler);
+        return;
+      }
+      Node key = getLhs();
+      removeStringKeyValue(key);
+      compiler.reportChangeToEnclosingScope(key);
+      if (jsdoc == null
+          || !jsdoc.containsDeclaration()
+          || isConstToBeInferred()) {
+        key.setJSDocInfo(JsdocUtil.getUnusableTypeJSDoc(jsdoc));
+      }
+    }
+
+    @Override
+    boolean shouldPreserve() {
+      return super.isDetached() || super.shouldPreserve() || !isInNamespace();
+    }
+
+    private boolean isInNamespace() {
+      Node stringKey = getLhs();
+      Node objLit = stringKey.getParent();
+      Node lvalue = NodeUtil.getBestLValue(objLit);
+      if (lvalue == null) {
+        return false;
+      }
+      JSDocInfo jsdoc = NodeUtil.getBestJSDocInfo(lvalue);
+      return !isExportLhs(lvalue)
+          && !JsdocUtil.hasAnnotatedType(jsdoc)
+          && NodeUtil.isNamespaceDecl(lvalue);
+    }
+
+    @Override
+    Node getRemovableNode() {
+      return getLhs();
+    }
+
+  }
+
+  /** Remove values from enums */
+  private void simplifyEnumValues(AbstractCompiler compiler) {
+    if (getRhs().isObjectLit() && getRhs().hasChildren()) {
+      for (Node key : getRhs().children()) {
+        removeStringKeyValue(key);
+      }
+      compiler.reportChangeToEnclosingScope(getRhs());
+    }
+  }
+
+  boolean isDefiniteDeclaration() {
+    Node parent = getLhs().getParent();
+    switch (parent.getToken()) {
+      case VAR:
+      case LET:
+      case CONST:
+      case CLASS:
+      case FUNCTION:
+        return true;
+      default:
+        return isExportLhs(getLhs())
+            || (getJsDoc() != null && getJsDoc().containsDeclaration())
+            || (getRhs() != null && PotentialDeclaration.isTypedRhs(getRhs()));
+    }
+  }
+
+  boolean shouldPreserve() {
+    return getRhs() != null && isTypedRhs(getRhs());
+  }
+
+  boolean isConstToBeInferred() {
+    return isConstToBeInferred(getLhs());
+  }
+
+  static boolean isConstToBeInferred(Node nameNode) {
+    JSDocInfo jsdoc = NodeUtil.getBestJSDocInfo(nameNode);
+    boolean isConst =
+        nameNode.getParent().isConst()
+            || isExportLhs(nameNode)
+            || (jsdoc != null && jsdoc.hasConstAnnotation());
+    return isConst
+        && !JsdocUtil.hasAnnotatedType(jsdoc)
+        && !NodeUtil.isNamespaceDecl(nameNode);
+  }
+
+  private static boolean isTypedRhs(Node rhs) {
     return rhs.isFunction()
         || rhs.isClass()
         || NodeUtil.isCallTo(rhs, "goog.defineClass")
         || (rhs.isQualifiedName() && rhs.matchesQualifiedName("goog.abstractMethod"))
         || (rhs.isQualifiedName() && rhs.matchesQualifiedName("goog.nullFunction"));
   }
+
+  private static boolean isExportLhs(Node lhs) {
+    return (lhs.isName() && lhs.matchesQualifiedName("exports"))
+        || (lhs.isGetProp() && lhs.getFirstChild().matchesQualifiedName("exports"));
+  }
+
+  static boolean isImportRhs(@Nullable Node rhs) {
+    if (rhs == null || !rhs.isCall()) {
+      return false;
+    }
+    Node callee = rhs.getFirstChild();
+    return callee.matchesQualifiedName("goog.require")
+        || callee.matchesQualifiedName("goog.forwardDeclare");
+  }
+
+  private static void removeStringKeyValue(Node stringKey) {
+    Node value = stringKey.getOnlyChild();
+    Node replacementValue = IR.number(0).srcrefTree(value);
+    stringKey.replaceChild(value, replacementValue);
+  }
+
 }

@@ -377,13 +377,13 @@ public final class VariableReferenceCheckTest extends CompilerTestCase {
     // Verify we don't complain about early references in externs
     String externs = "window; var window;";
     String code = "";
-    testSame(externs, code);
+    testSame(externs(externs), srcs(code));
   }
 
   public void testNoWarnDuplicateInExterns_withES6Modules() {
     String externs = "export var google; /** @suppress {duplicate} */ var google";
     String code = "";
-    testSame(externs, code);
+    testSame(externs(externs), srcs(code));
   }
 
   public void testUnusedLocalVar() {
@@ -923,7 +923,7 @@ public final class VariableReferenceCheckTest extends CompilerTestCase {
       "function x() {}",
     };
     String message = "Variable x declared more than once. First occurrence: input0";
-    testError(srcs(js), error(VarCheck.VAR_MULTIPLY_DECLARED_ERROR, message));
+    testError(srcs(js), error(VarCheck.VAR_MULTIPLY_DECLARED_ERROR).withMessage(message));
   }
 
   public void testFunctionHoistingRedeclaration2() {
@@ -932,7 +932,7 @@ public final class VariableReferenceCheckTest extends CompilerTestCase {
       "var x;",
     };
     String message = "Variable x declared more than once. First occurrence: input0";
-    testError(srcs(js), error(VarCheck.VAR_MULTIPLY_DECLARED_ERROR, message));
+    testError(srcs(js), error(VarCheck.VAR_MULTIPLY_DECLARED_ERROR).withMessage(message));
   }
 
   public void testArrowFunction() {

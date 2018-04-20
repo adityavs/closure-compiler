@@ -58,7 +58,7 @@ public final class RefactoringDriver {
   /** Run a refactoring and return any suggested fixes as a result. */
   public List<SuggestedFix> drive(Scanner scanner, Pattern includeFilePattern) {
     JsFlumeCallback callback = new JsFlumeCallback(scanner, includeFilePattern);
-    NodeTraversal.traverseEs6(compiler, rootNode, callback);
+    NodeTraversal.traverse(compiler, rootNode, callback);
     List<SuggestedFix> fixes = callback.getFixes();
     fixes.addAll(scanner.processAllMatches(callback.getMatches()));
     return fixes;
@@ -116,11 +116,7 @@ public final class RefactoringDriver {
 
   public static class Builder {
     private static final Function<String, SourceFile> TO_SOURCE_FILE_FN =
-        new Function<String, SourceFile>() {
-          @Override public SourceFile apply(String file) {
-            return new SourceFile.Builder().buildFromFile(file);
-          }
-        };
+        file -> new SourceFile.Builder().buildFromFile(file);
 
     private final ImmutableList.Builder<SourceFile> inputs = ImmutableList.builder();
     private final ImmutableList.Builder<SourceFile> externs = ImmutableList.builder();

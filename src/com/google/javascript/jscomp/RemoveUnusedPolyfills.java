@@ -59,7 +59,7 @@ class RemoveUnusedPolyfills implements CompilerPass {
   @Override
   public void process(Node externs, Node root) {
     CollectUnusedPolyfills collector = new CollectUnusedPolyfills();
-    NodeTraversal.traverseEs6(compiler, root, collector);
+    NodeTraversal.traverse(compiler, root, collector);
     for (Node node : collector.removableNodes()) {
       Node parent = node.getParent();
       NodeUtil.removeChild(parent, node);
@@ -201,7 +201,7 @@ class RemoveUnusedPolyfills implements CompilerPass {
       // Look up the typename in the registry.  All the polyfilled method
       // receiver types are built-in JS types, so they had better not be
       // missing from the registry.
-      TypeI type = compiler.getTypeIRegistry().getType(typeName);
+      TypeI type = compiler.getTypeIRegistry().getGlobalType(typeName);
       if (type == null) {
         throw new RuntimeException("Missing built-in type: " + typeName);
       }

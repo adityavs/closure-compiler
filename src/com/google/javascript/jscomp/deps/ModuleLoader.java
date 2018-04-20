@@ -44,8 +44,10 @@ import javax.annotation.Nullable;
  */
 public final class ModuleLoader {
 
-  public static final DiagnosticType MODULE_CONFLICT = DiagnosticType.warning(
-      "JSC_MODULE_CONFLICT", "File has both goog.module and ES6 modules: {0}");
+  public static final DiagnosticType MODULE_CONFLICT =
+      DiagnosticType.warning(
+          "JSC_MODULE_CONFLICT",
+          "File cannot be a combination of goog.provide, goog.module, and/or ES6 module: {0}");
 
   /** According to the spec, the forward slash should be the delimiter on all platforms. */
   public static final String MODULE_SLASH = ModuleNames.MODULE_SLASH;
@@ -94,7 +96,7 @@ public final class ModuleLoader {
     this.moduleRootPaths = createRootPaths(moduleRoots, pathResolver);
     this.modulePaths =
         resolvePaths(
-            Iterables.transform(Iterables.transform(inputs, UNWRAP_DEPENDENCY_INFO), pathResolver),
+            Iterables.transform(Iterables.transform(inputs, DependencyInfo::getName), pathResolver),
             moduleRootPaths);
 
     switch (resolutionMode) {
@@ -165,8 +167,16 @@ public final class ModuleLoader {
     }
 
     /**
+     * Determines if this path is the same as another path, ignoring any potential leading slashes
+     * on both.
+     */
+    public boolean equalsIgnoreLeadingSlash(ModulePath other) {
+      return other != null && toModuleName().equals(other.toModuleName());
+    }
+
+    /**
      * Turns a filename into a JS identifier that can be used in rewritten code.
-     * Removes leading ./, replaces / with $, removes trailing .js
+     * Removes leading /, replaces / with $, removes trailing .js
      * and replaces - with _.
      */
     public String toJSIdentifier() {
@@ -175,7 +185,7 @@ public final class ModuleLoader {
 
     /**
      * Turns a filename into a JS identifier that is used for moduleNames in
-     * rewritten code. Removes leading ./, replaces / with $, removes trailing .js
+     * rewritten code. Removes leading /, replaces / with $, removes trailing .js
      * and replaces - with _. All moduleNames get a "module$" prefix.
      */
     public String toModuleName() {
@@ -354,21 +364,12 @@ public final class ModuleLoader {
       }
     };
   }
-
-  private static final Function<DependencyInfo, String> UNWRAP_DEPENDENCY_INFO =
-      new Function<DependencyInfo, String>() {
-        @Override
-        public String apply(DependencyInfo info) {
-          return info.getName();
-        }
-      };
-
   /** A trivial module loader with no roots. */
   public static final ModuleLoader EMPTY =
       new ModuleLoader(
           null,
-          ImmutableList.<String>of(),
-          ImmutableList.<DependencyInfo>of(),
+          ImmutableList.of(),
+          ImmutableList.of(),
           ResolutionMode.BROWSER);
 
   /** An enum used to specify what algorithm to use to locate non path-based modules */

@@ -63,6 +63,21 @@ final class JsdocUtil {
     return builder.build();
   }
 
+  static JSDocInfo markConstant(JSDocInfo oldJSDoc) {
+    JSDocInfoBuilder builder = JSDocInfoBuilder.maybeCopyFrom(oldJSDoc);
+    builder.recordConstancy();
+    return builder.build();
+  }
+
+  static JSDocInfo mergeJsdocs(@Nullable JSDocInfo classicJsdoc, @Nullable JSDocInfo inlineJsdoc) {
+    if (inlineJsdoc == null || !inlineJsdoc.hasType()) {
+      return classicJsdoc;
+    }
+    JSDocInfoBuilder builder = JSDocInfoBuilder.maybeCopyFrom(classicJsdoc);
+    builder.recordType(inlineJsdoc.getType());
+    return builder.build();
+  }
+
   static boolean hasAnnotatedType(JSDocInfo jsdoc) {
     if (jsdoc == null) {
       return false;
@@ -71,6 +86,7 @@ final class JsdocUtil {
         || jsdoc.hasReturnType()
         || jsdoc.getParameterCount() > 0
         || jsdoc.isConstructorOrInterface()
+        || jsdoc.hasTypedefType()
         || jsdoc.hasThisType()
         || jsdoc.hasEnumParameterType();
   }
@@ -97,6 +113,9 @@ final class JsdocUtil {
           return getConstJSDoc(oldJSDoc, "string");
         }
         break;
+    }
+    if (rhs.isCast()) {
+      return getConstJSDoc(oldJSDoc, rhs.getJSDocInfo().getType().getRoot());
     }
     return null;
   }

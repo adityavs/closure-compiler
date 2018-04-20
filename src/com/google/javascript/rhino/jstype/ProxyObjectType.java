@@ -72,6 +72,11 @@ public class ProxyObjectType extends ObjectType {
   }
 
   @Override
+  public HasPropertyKind getPropertyKind(String propertyName, boolean autobox) {
+    return referencedType.getPropertyKind(propertyName, autobox);
+  }
+
+  @Override
   PropertyMap getPropertyMap() {
     return referencedObjType == null
         ? PropertyMap.immutableEmptyMap() : referencedObjType.getPropertyMap();
@@ -121,6 +126,11 @@ public class ProxyObjectType extends ObjectType {
   @Override
   public boolean matchesStringContext() {
     return referencedType.matchesStringContext();
+  }
+
+  @Override
+  public boolean matchesSymbolContext() {
+    return referencedType.matchesSymbolContext();
   }
 
   @Override
@@ -357,8 +367,8 @@ public class ProxyObjectType extends ObjectType {
   }
 
   @Override
-  JSType resolveInternal(ErrorReporter t, StaticTypedScope<JSType> scope) {
-    setReferencedType(referencedType.resolve(t, scope));
+  JSType resolveInternal(ErrorReporter reporter, StaticTypedScope<JSType> scope) {
+    setReferencedType(referencedType.resolve(reporter, scope));
     return this;
   }
 

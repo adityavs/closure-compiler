@@ -66,7 +66,11 @@ public final class FeatureSet implements Serializable {
 
   public static final FeatureSet ES8 = ES8_MODULES.without(Feature.MODULES);
 
-  public static final FeatureSet ES_NEXT = ES8_MODULES.with(LangVersion.ES_NEXT.features());
+  public static final FeatureSet ES2018_MODULES = ES8_MODULES.with(LangVersion.ES2018.features());
+
+  public static final FeatureSet ES2018 = ES2018_MODULES.without(Feature.MODULES);
+
+  public static final FeatureSet ES_NEXT = ES2018_MODULES.with(LangVersion.ES_NEXT.features());
 
   public static final FeatureSet TYPESCRIPT =  ES_NEXT.with(LangVersion.TYPESCRIPT.features());
 
@@ -82,12 +86,16 @@ public final class FeatureSet implements Serializable {
               Feature.MEMBER_DECLARATIONS,
               Feature.TEMPLATE_LITERALS));
 
+  public static final FeatureSet OTI_SUPPORTED =
+      ES5.with(Feature.GENERATORS, Feature.LET_DECLARATIONS, Feature.CONST_DECLARATIONS);
+
   private enum LangVersion {
     ES3,
     ES5,
     ES6,
     ES7,
     ES8,
+    ES2018,
     ES_NEXT,
     TYPESCRIPT;
 
@@ -146,9 +154,9 @@ public final class FeatureSet implements Serializable {
     ASYNC_FUNCTIONS("async function", LangVersion.ES8),
     TRAILING_COMMA_IN_PARAM_LIST("trailing comma in param list", LangVersion.ES8),
 
-    // features from tc39 https://github.com/tc39/proposal-object-rest-spread
-    OBJECT_LITERALS_WITH_SPREAD("object literals with spread", LangVersion.ES_NEXT),
-    OBJECT_PATTERN_REST("object pattern rest", LangVersion.ES_NEXT),
+    // ES 2018 adds https://github.com/tc39/proposal-object-rest-spread
+    OBJECT_LITERALS_WITH_SPREAD("object literals with spread", LangVersion.ES2018),
+    OBJECT_PATTERN_REST("object pattern rest", LangVersion.ES2018),
 
     // ES6 typed features that are not at all implemented in browsers
     ACCESSIBILITY_MODIFIER("accessibility modifier", LangVersion.TYPESCRIPT),
@@ -196,14 +204,14 @@ public final class FeatureSet implements Serializable {
     if (ES6_MODULES.contains(this)) {
       return "es6";
     }
-    if (NTI_SUPPORTED.contains(this)) {
-      return "ntiSupported";
-    }
     if (ES7_MODULES.contains(this)) {
       return "es7";
     }
     if (ES8_MODULES.contains(this)) {
       return "es8";
+    }
+    if (ES2018_MODULES.contains(this)) {
+      return "es9";
     }
     if (ES_NEXT.contains(this)) {
       return "es_next";
@@ -214,8 +222,48 @@ public final class FeatureSet implements Serializable {
     throw new IllegalStateException(this.toString());
   }
 
-  public FeatureSet without(Feature feature) {
-    return new FeatureSet(difference(features, EnumSet.of(feature)));
+  /**
+   * Returns a string representation useful for debugging.
+   *
+   * <p>This is not suitable for encoding in deps.js or depgraph files, because it may return
+   * strings like 'otiSupported' and 'ntiSupported' which are not real language modes.
+   */
+  public String versionForDebugging() {
+    if (ES3.contains(this)) {
+      return "es3";
+    }
+    if (ES5.contains(this)) {
+      return "es5";
+    }
+    if (OTI_SUPPORTED.contains(this)) {
+      return "otiSupported";
+    }
+    if (ES6_MODULES.contains(this)) {
+      return "es6";
+    }
+    if (NTI_SUPPORTED.contains(this)) {
+      return "ntiSupported";
+    }
+    if (ES7_MODULES.contains(this)) {
+      return "es7";
+    }
+    if (ES8_MODULES.contains(this)) {
+      return "es8";
+    }
+    if (ES2018_MODULES.contains(this)) {
+      return "es9";
+    }
+    if (ES_NEXT.contains(this)) {
+      return "es_next";
+    }
+    if (TYPESCRIPT.contains(this)) {
+      return "ts";
+    }
+    throw new IllegalStateException(this.toString());
+  }
+
+  public FeatureSet without(Feature featureToRemove, Feature... moreFeaturesToRemove) {
+    return new FeatureSet(difference(features, EnumSet.of(featureToRemove, moreFeaturesToRemove)));
   }
 
   public FeatureSet without(FeatureSet other) {
@@ -320,10 +368,15 @@ public final class FeatureSet implements Serializable {
         return ES6;
       case "ntiSupported":
         return NTI_SUPPORTED;
+      case "otiSupported":
+        return OTI_SUPPORTED;
       case "es7":
         return ES7;
       case "es8":
         return ES8;
+      case "es2018":
+      case "es9":
+        return ES2018;
       case "es_next":
         return ES_NEXT;
       case "ts":

@@ -52,10 +52,15 @@ public final class ConvertToTypedInterfaceTest extends CompilerTestCase {
     test(externs("/** @type {number} */ var x;"), srcs("x = 7;"), expected(""));
   }
 
+  public void testUnannotatedDeclaration() {
+    test("var x;", "/** @const {*} */ var x;");
+  }
+
   public void testSimpleConstJsdocPropagation() {
     test("/** @const */ var x = 5;", "/** @const {number} */ var x;");
     test("/** @const */ var x = true;", "/** @const {boolean} */ var x;");
     test("/** @const */ var x = 'str';", "/** @const {string} */ var x;");
+    test("/** @const */ var x = `str`;", "/** @const {string} */ var x;");
     test("/** @const */ var x = null;", "/** @const {null} */ var x;");
     test("/** @const */ var x = void 0;", "/** @const {void} */ var x;");
     test("/** @const */ var x = /a/;", "/** @const {!RegExp} */ var x;");
@@ -68,6 +73,11 @@ public final class ConvertToTypedInterfaceTest extends CompilerTestCase {
         "/** @const */ var x = cond ? true : 5;",
         "/** @const {*} */ var x;",
         warning(ConvertToTypedInterface.CONSTANT_WITHOUT_EXPLICIT_TYPE));
+  }
+
+  public void testConstKeywordWithAnnotatedType() {
+    test("/** @type {number} */ const x = 5;", "/** @const {number} */ var x;");
+    test("/** @type {!Foo} */ const f = new Foo;", "/** @const {!Foo} */ var f;");
   }
 
   public void testConstKeywordJsdocPropagation() {
@@ -86,15 +96,26 @@ public final class ConvertToTypedInterfaceTest extends CompilerTestCase {
         warning(ConvertToTypedInterface.CONSTANT_WITHOUT_EXPLICIT_TYPE));
   }
 
+  public void testPropagateConstCast() {
+    test("const x = /** @type {!Array<number>} */ ([]);", "/** @const {!Array<number>} */ var x;");
+
+    test(
+        "let /** (string|number) */ x = /** @type {number} */ (5);",
+        "/** @type {(string|number)} */ var x;");
+  }
+
   public void testSplitMultiDeclarations() {
     test("var /** number */ x = 4, /** string */ y = 'str';",
+        "/** @type {number} */ var x; /** @type {string} */ var y;");
+
+    test("var /** number */ x, /** string */ y;",
         "/** @type {number} */ var x; /** @type {string} */ var y;");
 
     test("let /** number */ x = 4, /** string */ y = 'str';",
     "/** @type {number} */ var x; /** @type {string} */ var y;");
 
     test("let /** number */ x, /** string */ y;",
-        "let /** number */ x; let /** string */ y;");
+        "/** @type {number} */ let x; /** @type {string} */ let y;");
   }
 
   public void testThisPropertiesInConstructors() {
@@ -266,6 +287,13 @@ public final class ConvertToTypedInterfaceTest extends CompilerTestCase {
             "}",
             "/** @const {T} */ Bar.prototype.x;"));
 
+  }
+
+  public void testGlobalThis() {
+    testSame("/** @const */ this.globalNamespace = {};");
+    test(
+        "/** @const */ this.globalNamespace = this.globalNamespace || {};",
+        "/** @const */ this.globalNamespace = {};");
   }
 
   public void testGoogAddSingletonGetter() {
@@ -633,6 +661,20 @@ public final class ConvertToTypedInterfaceTest extends CompilerTestCase {
             "export {BLAH};"));
   }
 
+  public void testEs6ModulesExportedNameDeclarations() {
+    testSame("/** @type {number} */ export let x;");
+    testSame("/** @type {number} */ export var x;");
+
+    test("/** @type {number} */ export var x = 5;", "/** @type {number} */ export var x;");
+    test("/** @type {number} */ export const X = 5;", "/** @const {number} */ export var X;");
+    //TODO(blickly): Ideally, we would leave let declarations alone
+    test("/** @type {number} */ export let x = 5;", "/** @type {number} */ export var x;");
+
+    test(
+        "/** @type {number} */ export const X = 5, Y = z;",
+        "/** @const {number} */ export var X; /** @const {number} */ export var Y;");
+  }
+
   public void testGoogModules() {
     testSame(
         lines(
@@ -717,6 +759,15 @@ public final class ConvertToTypedInterfaceTest extends CompilerTestCase {
               "/** @type {number} */ Foo.prototype.x;",
               "exports = Foo;"),
         });
+  }
+
+  public void testGoogModulesWithTypedefExports() {
+    testSame(
+        lines(
+            "goog.module('x.y.z');",
+            "",
+            "/** @typedef {number} */",
+            "exports.Foo;"));
   }
 
   public void testGoogModulesWithUndefinedExports() {
@@ -843,6 +894,12 @@ public final class ConvertToTypedInterfaceTest extends CompilerTestCase {
     test(
         "var x = 7; /** @enum {number} */ var E = { A: x };",
         "/** @const {*} */ var x; /** @enum {number} */ var E = { A: 0 };");
+  }
+
+  public void testEnumInsideNamespace() {
+    test(
+        "const ns = { /** @enum {number} */ ENUM: { A: 1, B: 2, C: 3} };",
+        "const ns = { /** @enum {number} */ ENUM: { A: 0, B: 0, C: 0} };");
   }
 
   public void testTryCatch() {
@@ -1040,6 +1097,18 @@ public final class ConvertToTypedInterfaceTest extends CompilerTestCase {
     test(
         "for (var i = 0; i < 10; i++) { var /** number */ field = i; }",
         "/** @const {*} */ var i; /** @type {number } */ var field;");
+  }
+
+  public void testSymbols() {
+    testSame("const sym = Symbol();");
+
+    testSame("/** @const */ var sym = Symbol();");
+
+    test("const sym = Symbol(computeDescription());", "const sym = Symbol();");
+
+    test(
+        "/** @type {symbol} */ var sym = Symbol.for(computeDescription());",
+        "/** @type {symbol} */ var sym;");
   }
 
   public void testNamespaces() {
@@ -1289,7 +1358,8 @@ public final class ConvertToTypedInterfaceTest extends CompilerTestCase {
         lines(
             "goog.provide('a.b.c.d.e.f.g');",
             "",
-            "a.b.c.d.e.f.g.Foo = class {};"));
+            "a.b.c.d.e.f.g.Foo = class {};"),
+        warning(ConvertToTypedInterface.GOOG_SCOPE_HIDDEN_TYPE));
 
     test(
         lines(
@@ -1307,7 +1377,22 @@ public final class ConvertToTypedInterfaceTest extends CompilerTestCase {
         lines(
             "goog.provide('a.b.c.d.e.f.g');",
             "",
-            "a.b.c.d.e.f.g.Foo = class {};"));
+            "a.b.c.d.e.f.g.Foo = class {};"),
+    warning(ConvertToTypedInterface.GOOG_SCOPE_HIDDEN_TYPE));
+
+    test(
+        lines(
+            "/** @const */ var $jscomp = $jscomp || {};",
+            "/** @const */ $jscomp.scope = {};",
+            "",
+            "$jscomp.scope.strayClass = class {",
+            "  constructor() {",
+            "    this.Foo = class {};",
+            "  };",
+            "};",
+            ""),
+        "",
+    warning(ConvertToTypedInterface.GOOG_SCOPE_HIDDEN_TYPE));
   }
 
   public void testDestructuringDoesntCrash() {
@@ -1385,7 +1470,7 @@ public final class ConvertToTypedInterfaceTest extends CompilerTestCase {
   }
 
   public void testGoogGlobalTyped() {
-    testSame("/** @const */ var goog = {}; goog.global = this;");
+    testSame("/** @const */ var goog = {}; /** @const */ goog.global = this;");
   }
 
 

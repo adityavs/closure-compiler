@@ -153,7 +153,6 @@ import com.google.javascript.rhino.Token;
 import com.google.javascript.rhino.TokenStream;
 import com.google.javascript.rhino.dtoa.DToA;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -196,7 +195,7 @@ class IRFactory {
 
   static final String STRING_CONTINUATION_WARNING =
       "String continuations are not recommended. See"
-      + " https://google.github.io/styleguide/javascriptguide.xml?showone=Multiline_string_literals#Multiline_string_literals";
+      + " https://google.github.io/styleguide/jsguide.html#features-strings-no-line-continuations";
 
   static final String OCTAL_STRING_LITERAL_WARNING =
       "Octal literals in strings are not supported in this language mode.";
@@ -220,7 +219,6 @@ class IRFactory {
   static final String UNDEFINED_LABEL = "undefined label \"%s\"";
 
   private final String sourceString;
-  private final List<Integer> newlines;
   private final StaticSourceFile sourceFile;
   private final String sourceName;
   private final Config config;
@@ -280,22 +278,12 @@ class IRFactory {
     this.sourceString = sourceString;
     this.nextCommentIter = comments.iterator();
     this.currentComment = skipNonJsDoc(nextCommentIter);
-    this.newlines = new ArrayList<>();
     this.sourceFile = sourceFile;
     // The template node properties are applied to all nodes in this transform.
     this.templateNode = createTemplateNode();
 
     this.fileLevelJsDocBuilder =
         new JSDocInfoBuilder(config.jsDocParsingMode().shouldParseDescriptions());
-
-    // Pre-generate all the newlines in the file.
-    for (int charNo = 0; true; charNo++) {
-      charNo = sourceString.indexOf('\n', charNo);
-      if (charNo == -1) {
-        break;
-      }
-      newlines.add(charNo);
-    }
 
     // Sometimes this will be null in tests.
     this.sourceName = sourceFile == null ? null : sourceFile.getName();
@@ -362,16 +350,6 @@ class IRFactory {
     irFactory.resultNode = n;
 
     return irFactory;
-  }
-
-  static FeatureSet detectFeatures(
-      ProgramTree tree, StaticSourceFile sourceFile, String sourceString) {
-    IRFactory irFactory =
-        new IRFactory(sourceString, sourceFile, NULL_CONFIG, NULL_REPORTER, tree.sourceComments);
-    Node n = irFactory.transformDispatcher.process(tree);
-    irFactory.validateAll(n);
-
-    return irFactory.features;
   }
 
   static final Config NULL_CONFIG = Config.builder().build();
@@ -860,14 +838,18 @@ class IRFactory {
     return location.column;
   }
 
+  String languageFeatureWarningMessage(Feature feature) {
+    return "This language feature is only supported for "
+              + LanguageMode.minimumRequiredFor(feature)
+              + " mode or better: "
+              + feature;
+  }
+
   void maybeWarnForFeature(ParseTree node, Feature feature) {
     features = features.with(feature);
     if (!isSupportedForInputLanguageMode(feature)) {
       errorReporter.warning(
-          "this language feature is only supported for "
-              + LanguageMode.minimumRequiredFor(feature)
-              + " mode or better: "
-              + feature,
+          languageFeatureWarningMessage(feature),
           sourceName,
           lineno(node), charno(node));
     }
@@ -878,10 +860,7 @@ class IRFactory {
     features = features.with(feature);
     if (!isSupportedForInputLanguageMode(feature)) {
       errorReporter.warning(
-          "this language feature is only supported for "
-              + LanguageMode.minimumRequiredFor(feature)
-              + " mode or better: "
-              + feature,
+          languageFeatureWarningMessage(feature),
           sourceName,
           lineno(token), charno(token));
     }
@@ -891,10 +870,7 @@ class IRFactory {
     features = features.with(feature);
     if (!isSupportedForInputLanguageMode(feature)) {
       errorReporter.warning(
-          "this language feature is only supported for "
-              + LanguageMode.minimumRequiredFor(feature)
-              + " mode or better: "
-              + feature,
+          languageFeatureWarningMessage(feature),
           sourceName,
           node.getLineno(), node.getCharno());
     }
@@ -1438,11 +1414,11 @@ class IRFactory {
     }
 
     Node processBinaryExpression(BinaryOperatorTree exprNode) {
-      if (exprNode.operator.type == TokenType.STAR_STAR
-          || exprNode.operator.type == TokenType.STAR_STAR_EQUAL) {
-        maybeWarnForFeature(exprNode, Feature.EXPONENT_OP);
-      }
       if (hasPendingCommentBefore(exprNode.right)) {
+        if (exprNode.operator.type == TokenType.STAR_STAR
+            || exprNode.operator.type == TokenType.STAR_STAR_EQUAL) {
+          maybeWarnForFeature(exprNode, Feature.EXPONENT_OP);
+        }
         return newNode(
             transformBinaryTokenType(exprNode.operator.type),
             transform(exprNode.left),
@@ -1460,6 +1436,10 @@ class IRFactory {
       Node current = null;
       Node previous = null;
       while (exprTree != null) {
+        if (exprTree.operator.type == TokenType.STAR_STAR
+            || exprTree.operator.type == TokenType.STAR_STAR_EQUAL) {
+          maybeWarnForFeature(exprTree, Feature.EXPONENT_OP);
+        }
         previous = current;
         // Skip the first child but recurse normally into the right operand as typically this isn't
         // deep and because we have already checked that there isn't any JSDoc we can traverse
@@ -2337,10 +2317,16 @@ class IRFactory {
       maybeWarnForFeature(tree, Feature.MODULES);
 
       Node firstChild = transformOrEmpty(tree.defaultBindingIdentifier, tree);
-      Node secondChild = (tree.nameSpaceImportIdentifier != null)
-          ? newStringNode(Token.IMPORT_STAR, tree.nameSpaceImportIdentifier.value)
-          : transformListOrEmpty(Token.IMPORT_SPECS, tree.importSpecifierList);
-      setSourceInfo(secondChild, tree);
+      Node secondChild;
+      if (tree.nameSpaceImportIdentifier == null) {
+        secondChild = transformListOrEmpty(Token.IMPORT_SPECS, tree.importSpecifierList);
+        // Currently source info is "import {foo} from '...';" expression. If needed this should be
+        // changed to use only "{foo}" part.
+        setSourceInfo(secondChild, tree);
+      } else {
+        secondChild = newStringNode(Token.IMPORT_STAR, tree.nameSpaceImportIdentifier.value);
+        setSourceInfo(secondChild, tree.nameSpaceImportIdentifier);
+      }
       Node thirdChild = processString(tree.moduleSpecifier);
 
       return newNode(Token.IMPORT, firstChild, secondChild, thirdChild);

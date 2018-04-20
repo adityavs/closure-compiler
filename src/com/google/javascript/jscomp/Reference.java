@@ -166,7 +166,7 @@ public final class Reference implements StaticRef, Serializable {
     // VAR and LET are the only types of variable declarations that may not initialize
     // their variables. Catch blocks, named functions, and parameters all do.
     return (isDeclaration() && !getParent().isVar() && !getParent().isLet())
-        || nameNode.getFirstChild() != null;
+        || nameNode.hasChildren();
   }
 
   /**
@@ -210,7 +210,7 @@ public final class Reference implements StaticRef, Serializable {
       case VAR:
       case LET:
       case CONST:
-        return (nameNode.getFirstChild() != null || isLhsOfEnhancedForExpression(nameNode));
+        return (nameNode.hasChildren() || isLhsOfEnhancedForExpression(nameNode));
       case DEFAULT_VALUE:
         return parent.getFirstChild() == nameNode;
       case INC:
@@ -223,9 +223,9 @@ public final class Reference implements StaticRef, Serializable {
       case FOR_IN:
       case FOR_OF:
         return NodeUtil.isEnhancedFor(parent) && parent.getFirstChild() == nameNode;
-      case OBJECT_PATTERN:
       case ARRAY_PATTERN:
       case STRING_KEY:
+      case COMPUTED_PROP:
         return NodeUtil.isLhsByDestructuring(nameNode);
       default:
         return (NodeUtil.isAssignmentOp(parent) && parent.getFirstChild() == nameNode);

@@ -454,7 +454,7 @@ public final class AmbiguatePropertiesTest extends TypeICompilerTestCase {
   }
 
   public void testReadPropertyOfGlobalThis() {
-    testSame(EXTERNS + "Object.prototype.prop;", "f(this.prop);");
+    testSame(externs(EXTERNS + "Object.prototype.prop;"), srcs("f(this.prop);"));
   }
 
   public void testSetQuotedPropertyOfThis() {
@@ -1143,5 +1143,23 @@ public final class AmbiguatePropertiesTest extends TypeICompilerTestCase {
 
     this.mode = TypeInferenceMode.NTI_ONLY;
     test(js, output);
+  }
+
+  public void testDontRenamePrototypeWithoutExterns() {
+    String js = lines(
+      "/** @interface */",
+      "function Foo() {}",
+      "/** @return {!Foo} */",
+      "Foo.prototype.foo = function() {};");
+
+    String output = lines(
+      "/** @interface */",
+      "function Foo() {}",
+      "/** @return {!Foo} */",
+      "Foo.prototype.a = function() {};");
+
+    // NTI reqires at least the MINIMAL_EXTERNS.
+    this.mode = TypeInferenceMode.OTI_ONLY;
+    test(externs(""), srcs(js), expected(output));
   }
 }

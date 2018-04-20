@@ -669,10 +669,11 @@ public final class InlineAndCollapsePropertiesTest extends CompilerTestCase {
 
   public void testGlobalAliasWithProperties5() {
     testSame(
-        "/** @constructor */ var blob = function() {}",
-        "var nullFunction = function(){};\n"
-        + "blob.init = nullFunction;\n"
-        + "use(blob.init)");
+        externs("/** @constructor */ var blob = function() {}"),
+        srcs(
+            "var nullFunction = function(){};\n"
+                + "blob.init = nullFunction;\n"
+                + "use(blob.init)"));
   }
 
   public void testLocalAliasOfEnumWithInstanceofCheck() {
@@ -1342,5 +1343,51 @@ public final class InlineAndCollapsePropertiesTest extends CompilerTestCase {
     test(
         "var a = {b: {c: 5}}; var b = a; function f(x=b.b) { alert(x.c); }",
         "var a$b = {c: 5}; var b = null; function f(x=a$b) { alert(x.c); }");
+  }
+
+  public void testAliasPropertyOnUnsafelyRedefinedNamespace() {
+    testSame("var obj = {foo: 3}; var foo = obj.foo; obj = {}; alert(foo);");
+  }
+
+  public void testAliasPropertyOnSafelyRedefinedNamespace() {
+    // non-constructor property doesn't get collapsed
+    test(
+        "var obj = {foo: 3}; var foo = obj.foo; obj = obj || {}; alert(foo);",
+        "var obj = {foo: 3}; var foo = null   ; obj = obj || {}; alert(obj.foo);");
+
+    // constructor property does get collapsed
+    test(
+        lines(
+            "var ns = {};",
+            "/** @constructor */ ns.ctor = function() {};",
+            "ns.ctor.foo = 3;",
+            "var foo = ns.ctor.foo;",
+            "ns = ns || {};",
+            "alert(foo);"),
+        lines(
+            "var ns = {};",
+            "/** @constructor */ var ns$ctor = function() {};",
+            "var ns$ctor$foo = 3;",
+            "var foo = null;",
+            "ns = ns || {};",
+            "alert(ns$ctor$foo);"));
+
+    // NOTE(lharker): this mirrors current code in Closure library
+    test(
+        lines(
+            "var goog = {};",
+            "goog.module = function() {};",
+            "/** @constructor */ goog.module.ModuleManager = function() {};",
+            "goog.module.ModuleManager.getInstance = function() {};",
+            "goog.module = goog.module || {};",
+            "var ModuleManager = goog.module.ModuleManager;",
+            "alert(ModuleManager.getInstance());"),
+        lines(
+            "var goog$module = function() {};",
+            "/** @constructor */ var goog$module$ModuleManager = function() {};",
+            "var goog$module$ModuleManager$getInstance = function() {};",
+            "goog$module = goog$module || {};",
+            "var ModuleManager = null;",
+            "alert(goog$module$ModuleManager$getInstance());"));
   }
 }

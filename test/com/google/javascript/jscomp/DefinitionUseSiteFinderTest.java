@@ -489,7 +489,7 @@ public final class DefinitionUseSiteFinderTest extends CompilerTestCase {
   }
 
   void checkDefinitions(String externs, String source, Set<String> expected) {
-    testSame(externs, source);
+    testSame(externs(externs), srcs(source));
     assertEquals(expected, found);
     found.clear();
   }
@@ -577,8 +577,8 @@ public final class DefinitionUseSiteFinderTest extends CompilerTestCase {
     @Override
     public void process(Node externs, Node root) {
       passUnderTest.process(externs, root);
-      NodeTraversal.traverseEs6(compiler, externs, this);
-      NodeTraversal.traverseEs6(compiler, root, this);
+      NodeTraversal.traverse(compiler, externs, this);
+      NodeTraversal.traverse(compiler, root, this);
 
       buildFound(passUnderTest, found);
     }

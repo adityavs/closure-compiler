@@ -269,6 +269,8 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
   private String lastPassName;
 
   private Set<String> externProperties = null;
+  private ImmutableMap<String, PropertyAccessKind> externGetterAndSetterProperties = null;
+  private ImmutableMap<String, PropertyAccessKind> sourceGetterAndSetterProperties = null;
 
   private static final Joiner pathJoiner = Joiner.on(File.separator);
 
@@ -437,7 +439,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
       options.setWarningLevel(DiagnosticGroups.ACCESS_CONTROLS_CONST, CheckLevel.OFF);
     }
     // When running OTI after NTI, turn off the warnings from OTI.
-    if (options.getNewTypeInference() && options.getRunOTIafterNTI()) {
+    if (options.getNewTypeInference()) {
       options.checkTypes = true;
       if (!options.reportOTIErrorsUnderNTI) {
         options.setWarningLevel(
@@ -489,11 +491,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
       List<T1> externs, List<T2> sources, CompilerOptions options) {
     JSModule module = new JSModule(SINGLETON_MODULE_NAME);
     for (SourceFile source : sources) {
-      if (this.getPersistentInputStore() != null) {
-        module.add(this.getPersistentInputStore().getCachedCompilerInput(source));
-      } else {
-        module.add(new CompilerInput(source));
-      }
+      module.add(new CompilerInput(source));
     }
 
     List<JSModule> modules = new ArrayList<>(1);
@@ -1581,7 +1579,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
 
   @Override
   // Only used by jsdev
-  public MemoizedTypedScopeCreator getTypedScopeCreator() {
+  public TypedScopeCreator getTypedScopeCreator() {
     return getPassConfig().getTypedScopeCreator();
   }
 
@@ -1607,7 +1605,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
   public SymbolTable buildKnownSymbolTable() {
     SymbolTable symbolTable = new SymbolTable(this, getTypeRegistry());
 
-    MemoizedTypedScopeCreator typedScopeCreator = getTypedScopeCreator();
+    TypedScopeCreator typedScopeCreator = getTypedScopeCreator();
     if (typedScopeCreator != null) {
       symbolTable.addScopes(typedScopeCreator.getAllMemoizedScopes());
       symbolTable.addSymbolsFrom(typedScopeCreator);
@@ -1625,7 +1623,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
         new ReferenceCollectingCallback(
             this,
             ReferenceCollectingCallback.DO_NOTHING_BEHAVIOR,
-            SyntacticScopeCreator.makeUntyped(this));
+            new Es6SyntacticScopeCreator(this));
     refCollector.process(getRoot());
     symbolTable.addSymbolsFrom(refCollector);
 
@@ -1807,7 +1805,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
         // In this case we must force module rewriting to occur on the imported file
         Map<String, CompilerInput> inputsToRewrite = new HashMap<>();
         for (CompilerInput input : inputs) {
-          for (String require : input.getKnownRequires()) {
+          for (String require : input.getKnownRequiredSymbols()) {
             if (inputModuleIdentifiers.containsKey(require)
                 && !inputsToRewrite.containsKey(require)) {
               inputsToRewrite.put(require, inputModuleIdentifiers.get(require));
@@ -1861,7 +1859,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
           SourceInformationAnnotator sia =
               new SourceInformationAnnotator(
                   input.getName(), options.devMode != DevMode.OFF);
-          NodeTraversal.traverseEs6(this, n, sia);
+          NodeTraversal.traverse(this, n, sia);
         }
 
         if (NodeUtil.isFromTypeSummary(n)) {
@@ -2015,7 +2013,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
     this.moduleTypesByName.put(input.getPath().toModuleName(), input.getJsModuleType());
 
     ArrayList<String> allDeps = new ArrayList<>();
-    allDeps.addAll(input.getRequires());
+    allDeps.addAll(input.getRequiredSymbols());
     allDeps.addAll(input.getDynamicRequires());
     for (String requiredNamespace : allDeps) {
       CompilerInput requiredInput = null;
@@ -2590,6 +2588,9 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
    */
   static final String SYNTHETIC_EXTERNS_AT_END = "{SyntheticVarsAtEnd}";
 
+  /** Prefix of the generated file name for synthetic injected libraries */
+  static final String SYNTHETIC_CODE_PREFIX = " [synthetic:";
+
   private CompilerInput synthesizedExternsInput = null;
   private CompilerInput synthesizedExternsInputAtEnd = null;
 
@@ -2761,6 +2762,8 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
         return Config.LanguageMode.ECMASCRIPT7;
       case ECMASCRIPT_2017:
         return Config.LanguageMode.ECMASCRIPT8;
+      case ECMASCRIPT_2018:
+        return Config.LanguageMode.ECMASCRIPT2018;
       case ECMASCRIPT_NEXT:
         return Config.LanguageMode.ES_NEXT;
       default:
@@ -2882,7 +2885,15 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
 
   @Override
   boolean hasHaltingErrors() {
-    return !getOptions().canContinueAfterErrors() && getErrorCount() > 0;
+    if (getOptions().canContinueAfterErrors() || getErrorCount() == 0) {
+      return false;
+    }
+    for (JSError error : getErrors()) {
+       if (error.getType().level == CheckLevel.ERROR) {
+         return true;
+       }
+    }
+    return false;
   }
 
   /**
@@ -3268,6 +3279,28 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
     return externProperties;
   }
 
+  @Override
+  ImmutableMap<String, PropertyAccessKind> getExternGetterAndSetterProperties() {
+    return externGetterAndSetterProperties;
+  }
+
+  @Override
+  void setExternGetterAndSetterProperties(
+      ImmutableMap<String, PropertyAccessKind> externGetterAndSetterProperties) {
+    this.externGetterAndSetterProperties = externGetterAndSetterProperties;
+  }
+
+  @Override
+  ImmutableMap<String, PropertyAccessKind> getSourceGetterAndSetterProperties() {
+    return sourceGetterAndSetterProperties;
+  }
+
+  @Override
+  void setSourceGetterAndSetterProperties(
+      ImmutableMap<String, PropertyAccessKind> sourceGetterAndSetterProperties) {
+    this.sourceGetterAndSetterProperties = sourceGetterAndSetterProperties;
+  }
+
   /**
    * Replaces one file in a hot-swap mode. The given JsAst should be made
    * from a new version of a file that already was present in the last compile
@@ -3363,7 +3396,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
     // Load/parse the code.
     String originalCode = ResourceLoader.loadTextResource(
         Compiler.class, "js/" + resourceName + ".js");
-    Node ast = parseSyntheticCode(" [synthetic:" + resourceName + "] ", originalCode);
+    Node ast = parseSyntheticCode(SYNTHETIC_CODE_PREFIX + resourceName + "] ", originalCode);
 
     // Look for string literals of the form 'require foo bar' or 'externs baz' or 'normalize'.
     // As we process each one, remove it from its parent.
@@ -3543,7 +3576,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
     private final VariableMap variableMap;
     private final VariableMap propertyMap;
     private final VariableMap anonymousFunctionaMap;
-    private final FunctionNames functioNames;
+    private final FunctionNames functionNames;
     private final VariableMap stringMap;
     private final String idGeneratorMap;
     private final IdGenerator crossModuleIdGenerator;
@@ -3581,7 +3614,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
       this.variableMap = compiler.variableMap;
       this.propertyMap = compiler.propertyMap;
       this.anonymousFunctionaMap = compiler.anonymousFunctionNameMap;
-      this.functioNames = compiler.functionNames;
+      this.functionNames = compiler.functionNames;
       this.stringMap = compiler.stringMap;
       this.idGeneratorMap = compiler.idGeneratorMap;
       this.crossModuleIdGenerator = compiler.crossModuleIdGenerator;
@@ -3636,9 +3669,13 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
               @Override
               public CompilerState call() throws Exception {
                 Tracer tracer = newTracer(PassNames.DESERIALIZE_COMPILER_STATE);
+                logger.fine("Deserializing the CompilerState");
                 CompilerState compilerState = (CompilerState) objectInputStream.readObject();
+                logger.fine("Finished deserializing CompilerState");
                 if (compilerState.typeRegistry != null) {
+                  logger.fine("Deserializing the TypeRegistry");
                   compilerState.typeRegistry.restoreContents(objectInputStream);
+                  logger.fine("Finished deserializing TypeRegistry");
                 }
                 stopTracer(tracer, PassNames.DESERIALIZE_COMPILER_STATE);
                 return compilerState;
@@ -3677,7 +3714,7 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
     anonymousFunctionNameMap = compilerState.anonymousFunctionaMap;
     idGeneratorMap = compilerState.idGeneratorMap;
     crossModuleIdGenerator = compilerState.crossModuleIdGenerator;
-    functionNames = compilerState.functioNames;
+    functionNames = compilerState.functionNames;
     defaultDefineValues = checkNotNull(compilerState.defaultDefineValues);
     annotationMap = checkNotNull(compilerState.annotationMap);
     inputSourceMaps = compilerState.inputSourceMaps;
@@ -3699,17 +3736,6 @@ public class Compiler extends AbstractCompiler implements ErrorHandler, SourceFi
     }
     if (tracker != null) {
       tracker.updateAfterDeserialize(jsRoot);
-    }
-  }
-
-  public void resetCompilerInput() {
-    for (JSModule module : this.modules) {
-      for (CompilerInput input : module.getInputs()) {
-        input.reset();
-      }
-    }
-    for (CompilerInput input : this.externs) {
-      input.reset();
     }
   }
 

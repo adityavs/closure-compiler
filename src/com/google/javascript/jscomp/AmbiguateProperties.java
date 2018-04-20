@@ -87,7 +87,7 @@ class AmbiguateProperties implements CompilerPass {
   private final Map<String, Property> propertyMap = new HashMap<>();
 
   /** Property names that don't get renamed */
-  private final Set<String> externedNames;
+  private final ImmutableSet<String> externedNames;
 
   /** Names to which properties shouldn't be renamed, to avoid name conflicts */
   private final Set<String> quotedNames = new HashSet<>();
@@ -140,7 +140,11 @@ class AmbiguateProperties implements CompilerPass {
         .addAllTypeMismatches(compiler.getImplicitInterfaceUses())
         .build();
 
-    this.externedNames = compiler.getExternProperties();
+    this.externedNames =
+        ImmutableSet.<String>builder()
+            .add("prototype")
+            .addAll(compiler.getExternProperties())
+            .build();
   }
 
   static AmbiguateProperties makePassForTesting(
@@ -176,7 +180,7 @@ class AmbiguateProperties implements CompilerPass {
   public void process(Node externs, Node root) {
     // Find all property references and record the types on which they occur.
     // Populate stringNodesToRename, propertyMap, quotedNames.
-    NodeTraversal.traverseEs6(compiler, root, new ProcessProperties());
+    NodeTraversal.traverse(compiler, root, new ProcessProperties());
 
     ImmutableSet.Builder<String> reservedNames = ImmutableSet.<String>builder()
         .addAll(externedNames)

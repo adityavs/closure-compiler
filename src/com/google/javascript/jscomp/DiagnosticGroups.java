@@ -31,6 +31,7 @@ import com.google.javascript.jscomp.lint.CheckMissingSemicolon;
 import com.google.javascript.jscomp.lint.CheckNullableReturn;
 import com.google.javascript.jscomp.lint.CheckPrimitiveAsObject;
 import com.google.javascript.jscomp.lint.CheckPrototypeProperties;
+import com.google.javascript.jscomp.lint.CheckRedundantNullabilityModifier;
 import com.google.javascript.jscomp.lint.CheckRequiresAndProvidesSorted;
 import com.google.javascript.jscomp.lint.CheckUnusedLabels;
 import com.google.javascript.jscomp.lint.CheckUselessBlocks;
@@ -59,6 +60,7 @@ public class DiagnosticGroups {
           "missingSourcesWarnings",
           // TODO(johnlenz): "strictMissingProperties" is here until it has a shake down cruise.
           "strictMissingProperties",
+          "strictPrimitiveOperators",
           "strictCheckTypes");
 
   public DiagnosticGroups() {}
@@ -141,9 +143,10 @@ public class DiagnosticGroups {
           + "missingSourcesWarnings, "
           + "reportUnknownTypes, "
           + "suspiciousCode, "
+          + "strictCheckTypes, "
           + "strictMissingProperties, "
           + "strictModuleDepCheck, "
-          + "strictCheckTypes, "
+          + "strictPrimitiveOperators, "
           + "typeInvalidation, "
           + "undefinedNames, "
           + "undefinedVars, "
@@ -403,11 +406,17 @@ public class DiagnosticGroups {
   public static final DiagnosticGroup STRICT_MISSING_PROPERTIES =
       DiagnosticGroups.registerGroup("strictMissingProperties",
           TypeCheck.STRICT_INEXISTENT_PROPERTY,
-          TypeCheck.STRICT_INEXISTENT_PROPERTY_WITH_SUGGESTION);
+          TypeCheck.STRICT_INEXISTENT_PROPERTY_WITH_SUGGESTION,
+          TypeCheck.STRICT_INEXISTENT_UNION_PROPERTY);
+
+  public static final DiagnosticGroup STRICT_PRIMITIVE_OPERATORS =
+      DiagnosticGroups.registerGroup("strictPrimitiveOperators",
+          TypeValidator.INVALID_OPERAND_TYPE);
 
   public static final DiagnosticGroup STRICT_CHECK_TYPES =
       DiagnosticGroups.registerGroup("strictCheckTypes",
-          STRICT_MISSING_PROPERTIES);
+          STRICT_MISSING_PROPERTIES,
+          STRICT_PRIMITIVE_OPERATORS);
 
   public static final DiagnosticGroup REPORT_UNKNOWN_TYPES =
       DiagnosticGroups.registerGroup("reportUnknownTypes",
@@ -585,6 +594,10 @@ public class DiagnosticGroups {
       DiagnosticGroups.registerGroup("misplacedMsgAnnotation",
           CheckJSDoc.MISPLACED_MSG_ANNOTATION);
 
+  public static final DiagnosticGroup MISPLACED_SUPPRESS =
+      DiagnosticGroups.registerGroup("misplacedSuppress",
+          CheckJSDoc.MISPLACED_SUPPRESS);
+
   public static final DiagnosticGroup SUSPICIOUS_CODE =
       DiagnosticGroups.registerGroup(
           "suspiciousCode",
@@ -615,6 +628,10 @@ public class DiagnosticGroups {
       DiagnosticGroups.registerGroup("unusedLocalVariables",
           VariableReferenceCheck.UNUSED_LOCAL_ASSIGNMENT);
 
+  public static final DiagnosticGroup MISSING_CONST_PROPERTY =
+      DiagnosticGroups.registerGroup(
+          "jsdocMissingConst", CheckConstPrivateProperties.MISSING_CONST_PROPERTY);
+
   public static final DiagnosticGroup JSDOC_MISSING_TYPE =
       DiagnosticGroups.registerGroup("jsdocMissingType",
               RhinoErrorReporter.JSDOC_MISSING_TYPE_WARNING);
@@ -642,12 +659,14 @@ public class DiagnosticGroups {
               CheckPrimitiveAsObject.NEW_PRIMITIVE_OBJECT,
               CheckPrimitiveAsObject.PRIMITIVE_OBJECT_DECLARATION,
               CheckPrototypeProperties.ILLEGAL_PROTOTYPE_MEMBER,
+              CheckRedundantNullabilityModifier.REDUNDANT_NULLABILITY_MODIFIER_JSDOC,
               CheckRequiresAndProvidesSorted.DUPLICATE_REQUIRE,
               CheckRequiresAndProvidesSorted.REQUIRES_NOT_SORTED,
               CheckRequiresAndProvidesSorted.PROVIDES_NOT_SORTED,
               CheckRequiresAndProvidesSorted.PROVIDES_AFTER_REQUIRES,
               CheckUnusedLabels.UNUSED_LABEL,
               CheckUselessBlocks.USELESS_BLOCK,
+              ClosureCheckModule.DECLARE_LEGACY_NAMESPACE_IN_NON_MODULE,
               ClosureCheckModule.GOOG_MODULE_IN_NON_MODULE,
               ClosureCheckModule.INCORRECT_SHORTNAME_CAPITALIZATION,
               ClosureCheckModule.LET_GOOG_REQUIRE,
@@ -683,9 +702,11 @@ public class DiagnosticGroups {
   // file at a time, for example because they require typechecking. If you enable these as errors
   // in your build targets, the JS Compiler team will break your build and not rollback.
   public static final DiagnosticGroup ANALYZER_CHECKS =
-      DiagnosticGroups.registerGroup("analyzerChecks", // undocumented
+      DiagnosticGroups.registerGroup(
+          "analyzerChecks", // undocumented
           ANALYZER_CHECKS_INTERNAL,
-          UNUSED_PRIVATE_PROPERTY);
+          UNUSED_PRIVATE_PROPERTY,
+          MISSING_CONST_PROPERTY);
 
   public static final DiagnosticGroup USE_OF_GOOG_BASE =
       DiagnosticGroups.registerGroup("useOfGoogBase",

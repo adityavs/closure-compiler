@@ -113,11 +113,11 @@ class InlineFunctions implements CompilerPass {
   public void process(Node externs, Node root) {
     checkState(compiler.getLifeCycleStage().isNormalized());
 
-    NodeTraversal.traverseEs6(compiler, root, new FindCandidateFunctions());
+    NodeTraversal.traverse(compiler, root, new FindCandidateFunctions());
     if (fns.isEmpty()) {
       return; // Nothing left to do.
     }
-    NodeTraversal.traverseEs6(compiler, root, new FindCandidatesReferences(fns, anonFns));
+    NodeTraversal.traverse(compiler, root, new FindCandidatesReferences(fns, anonFns));
     trimCandidatesNotMeetingMinimumRequirements();
     if (fns.isEmpty()) {
       return; // Nothing left to do.
@@ -140,7 +140,7 @@ class InlineFunctions implements CompilerPass {
     }
     resolveInlineConflicts();
     decomposeExpressions();
-    NodeTraversal.traverseEs6(compiler, root, new CallVisitor(fns, anonFns, new Inline(injector)));
+    NodeTraversal.traverse(compiler, root, new CallVisitor(fns, anonFns, new Inline(injector)));
 
     removeInlinedFunctions();
   }
@@ -454,9 +454,6 @@ class InlineFunctions implements CompilerPass {
     }
 
     if (parent.isCall() && parent.getFirstChild() == name) {
-      if (hasSpreadCallArgument(parent)) {
-        return false;
-      }
       // This is a normal reference to the function.
       return true;
     }
@@ -722,18 +719,6 @@ class InlineFunctions implements CompilerPass {
     }
   }
 
-  private static boolean hasSpreadCallArgument(Node callNode) {
-    Predicate<Node> hasSpreadCallArgumentPredicate =
-        new Predicate<Node>() {
-          @Override
-          public boolean apply(Node input) {
-            return input.isSpread();
-          }
-        };
-
-    return NodeUtil.has(callNode, hasSpreadCallArgumentPredicate, Predicates.<Node>alwaysTrue());
-  }
-
   /**
    * @return Whether the function has any parameters that would stop the compiler from inlining.
    * Currently this includes object patterns, array patterns, and default values.
@@ -748,7 +733,7 @@ class InlineFunctions implements CompilerPass {
         }
       };
 
-    return NodeUtil.has(node, pred, Predicates.<Node>alwaysTrue());
+    return NodeUtil.has(node, pred, Predicates.alwaysTrue());
   }
 
   /** @see #resolveInlineConflicts */

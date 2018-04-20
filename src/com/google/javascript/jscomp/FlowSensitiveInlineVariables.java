@@ -31,6 +31,7 @@ import com.google.javascript.jscomp.graph.DiGraph.DiGraphNode;
 import com.google.javascript.rhino.Node;
 import com.google.javascript.rhino.Token;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.Set;
@@ -77,39 +78,71 @@ class FlowSensitiveInlineVariables implements CompilerPass, ScopedCallback {
   private MustBeReachingVariableDef reachingDef;
   private MaybeReachingVariableUse reachingUses;
 
-  private static final Predicate<Node> SIDE_EFFECT_PREDICATE =
-      new Predicate<Node>() {
-        @Override
-        public boolean apply(Node n) {
-          // When the node is null it means, we reached the implicit return
-          // where the function returns (possibly without an return statement)
-          if (n == null) {
-            return false;
-          }
+  private static class SideEffectPredicate implements Predicate<Node> {
+    // Check if there are side effects affecting the value of any of these names
+    // (but not properties defined on that name)
+    private final Set<String> namesToCheck;
 
-          // TODO(user): We only care about calls to functions that
-          // passes one of the dependent variable to a non-side-effect free
-          // function.
-          if (n.isCall() && NodeUtil.functionCallHasSideEffects(n)) {
-            return true;
-          }
+    public SideEffectPredicate() {
+      namesToCheck = null;
+    }
 
-          if (n.isNew() && NodeUtil.constructorCallHasSideEffects(n)) {
-            return true;
-          }
+    public SideEffectPredicate(Set<String> names) {
+      this.namesToCheck = names;
+    }
 
-          if (n.isDelProp()) {
-            return true;
-          }
+    @Override
+    public boolean apply(Node n) {
+      // When the node is null it means, we reached the implicit return
+      // where the function returns (possibly without an return statement)
+      if (n == null) {
+        return false;
+      }
 
-          for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {
-            if (!ControlFlowGraph.isEnteringNewCfgNode(c) && apply(c)) {
-              return true;
-            }
-          }
-          return false;
+      if (namesToCheck != null
+          && n.isName()
+          && namesToCheck.contains(n.getString())
+          && NodeUtil.isLValue(n)) {
+        // the name is being written to. this is a problem, unless it is part of a top-level assign
+        // chain and the write will take place after all CFG node subexpressions are evaluated
+        return !isTopLevelAssignTarget(n);
+      }
+
+      // TODO(user): We only care about calls to functions that
+      // passes one of the dependent variable to a non-side-effect free
+      // function.
+      if (n.isCall() && NodeUtil.functionCallHasSideEffects(n)) {
+        return true;
+      }
+
+      if (n.isNew() && NodeUtil.constructorCallHasSideEffects(n)) {
+        return true;
+      }
+
+      if (n.isDelProp()) {
+        return true;
+      }
+
+      for (Node c = n.getFirstChild(); c != null; c = c.getNext()) {
+        if (!ControlFlowGraph.isEnteringNewCfgNode(c) && apply(c)) {
+          return true;
         }
-      };
+      }
+      return false;
+    }
+  };
+
+  // predicate that does not check for any ASSIGNs, only function calls and delete props
+  private static final Predicate<Node> SIDE_EFFECT_PREDICATE = new SideEffectPredicate();
+
+  /** Whether the given node is the target of a (possibly chained) assignment */
+  private static boolean isTopLevelAssignTarget(Node n) {
+    Node ancestor = n.getParent();
+    while (ancestor.isAssign()) {
+      ancestor = ancestor.getParent();
+    }
+    return ancestor.isExprResult();
+  }
 
   public FlowSensitiveInlineVariables(AbstractCompiler compiler) {
     this.compiler = compiler;
@@ -156,7 +189,7 @@ class FlowSensitiveInlineVariables implements CompilerPass, ScopedCallback {
 
     // Using the forward reaching definition search to find all the inline
     // candidates
-    NodeTraversal.traverseEs6(compiler, t.getScopeRoot(), new GatherCandidates());
+    NodeTraversal.traverse(compiler, t.getScopeRoot(), new GatherCandidates());
     // Compute the backward reaching use. The CFG can be reused.
     reachingUses = new MaybeReachingVariableUse(cfg, t.getScope(), compiler, scopeCreator);
     reachingUses.analyze();
@@ -258,7 +291,7 @@ class FlowSensitiveInlineVariables implements CompilerPass, ScopedCallback {
 
         // Make sure that the name node is purely a read.
         if ((NodeUtil.isAssignmentOp(parent) && parent.getFirstChild() == n)
-            || parent.isVar()
+            || NodeUtil.isNameDeclaration(parent)
             || parent.isInc()
             || parent.isDec()
             || parent.isParamList()
@@ -302,7 +335,7 @@ class FlowSensitiveInlineVariables implements CompilerPass, ScopedCallback {
       final Node cfgNode = n;
 
       gatherCb.setCfgNode(cfgNode);
-      NodeTraversal.traverseEs6(compiler, cfgNode, gatherCb);
+      NodeTraversal.traverse(compiler, cfgNode, gatherCb);
     }
   }
 
@@ -358,17 +391,26 @@ class FlowSensitiveInlineVariables implements CompilerPass, ScopedCallback {
         return false;
       }
 
+      Set<String> namesToCheck = new HashSet<>();
+      if (defMetadata.depends != null) {
+        for (Var var : defMetadata.depends) {
+          namesToCheck.add(var.getName());
+        }
+      }
+
+      SideEffectPredicate sideEffectPredicateWithNames = new SideEffectPredicate(namesToCheck);
+
       // A subexpression evaluated after the variable has a side effect.
       // Example, for x:
       // x = readProp(b), modifyProp(b); print(x);
-      if (checkPostExpressions(def, getDefCfgNode(), SIDE_EFFECT_PREDICATE)) {
+      if (checkPostExpressions(def, getDefCfgNode(), sideEffectPredicateWithNames)) {
         return false;
       }
 
       // Similar check as the above but this time, all the sub-expressions
       // evaluated before the variable.
       // x = readProp(b); modifyProp(b), print(x);
-      if (checkPreExpressions(use, useCfgNode, SIDE_EFFECT_PREDICATE)) {
+      if (checkPreExpressions(use, useCfgNode, sideEffectPredicateWithNames)) {
         return false;
       }
 
@@ -399,50 +441,7 @@ class FlowSensitiveInlineVariables implements CompilerPass, ScopedCallback {
         return false;
       }
 
-      // We give up inlining stuff with R-Value that has:
-      // 1) GETPROP, GETELEM,
-      // 2) anything that creates a new object.
-      // 3) a direct reference to a catch expression.
-      // Example:
-      // var x = a.b.c; j.c = 1; print(x);
-      // Inlining print(a.b.c) is not safe consider j and be alias to a.b.
-      // TODO(user): We could get more accuracy by looking more in-detail
-      // what j is and what x is trying to into to.
-      // TODO(johnlenz): rework catch expression handling when we
-      // have lexical scope support so catch expressions don't
-      // need to be special cased.
-      if (NodeUtil.has(
-          def.getLastChild(),
-          new Predicate<Node>() {
-            @Override
-            public boolean apply(Node input) {
-              switch (input.getToken()) {
-                case GETELEM:
-                case GETPROP:
-                case ARRAYLIT:
-                case OBJECTLIT:
-                case REGEXP:
-                case NEW:
-                  return true;
-                case NAME:
-                  Var var = scope.getOwnSlot(input.getString());
-                  if (var != null && var.getParentNode().isCatch()) {
-                    return true;
-                  }
-                  // fall through
-                default:
-                  break;
-              }
-              return false;
-            }
-          },
-          new Predicate<Node>() {
-            @Override
-            public boolean apply(Node input) {
-              // Recurse if the node is not a function.
-              return !input.isFunction();
-            }
-          })) {
+      if (!isRhsSafeToInline(scope)) {
         return false;
       }
 
@@ -532,7 +531,7 @@ class FlowSensitiveInlineVariables implements CompilerPass, ScopedCallback {
               }
             }
           };
-      NodeTraversal.traverseEs6(compiler, n, gatherCb);
+      NodeTraversal.traverse(compiler, n, gatherCb);
     }
 
     /**
@@ -551,8 +550,8 @@ class FlowSensitiveInlineVariables implements CompilerPass, ScopedCallback {
                 // We make a special exception when the entire cfgNode is a chain
                 // of assignments, since in that case the assignment statements
                 // will happen after the inlining of the right hand side.
-                // TODO(blickly): Make the SIDE_EFFECT_PREDICATE check more exact
-                //   and remove this special case.
+                // TODO(lharker): We can probably remove the isAssignChain check, and instead use
+                // the SideEffectPredicate to look for dangerous assignments in the same CFG node
                 if (parent.isAssign() && (parent.getFirstChild() == n)
                     && isAssignChain(parent, cfgNode)) {
                   // Don't count lhs of top-level assignment chain
@@ -573,7 +572,78 @@ class FlowSensitiveInlineVariables implements CompilerPass, ScopedCallback {
             }
           };
 
-      NodeTraversal.traverseEs6(compiler, cfgNode, gatherCb);
+      NodeTraversal.traverse(compiler, cfgNode, gatherCb);
+    }
+
+    /**
+     * Check if the definition we're considering inline has anything that makes inlining unsafe
+     * (that hasn't already been caught).
+     *
+     * @param usageScope The scope we will inline the variable into.
+     */
+    private boolean isRhsSafeToInline(final Scope usageScope) {
+      // Don't inline definitions with an R-Value that has:
+      // 1) GETPROP, GETELEM,
+      // 2) anything that creates a new object.
+      // Example:
+      // var x = a.b.c; j.c = 1; print(x);
+      // Inlining print(a.b.c) is not safe - consider if j were an alias to a.b.
+      if (NodeUtil.has(
+          def.getLastChild(),
+          new Predicate<Node>() {
+            @Override
+            public boolean apply(Node input) {
+              switch (input.getToken()) {
+                case GETELEM:
+                case GETPROP:
+                case ARRAYLIT:
+                case OBJECTLIT:
+                case REGEXP:
+                case NEW:
+                  return true; // unsafe to inline.
+                default:
+                  break;
+              }
+              return false;
+            }
+          },
+          new Predicate<Node>() {
+            @Override
+            public boolean apply(Node input) {
+              // Recurse if the node is not a function.
+              return !input.isFunction();
+            }
+          })) {
+        return false;
+      }
+
+      // Don't inline definitions with an rvalue referencing names that are not declared in the
+      // usage's scope. (Unlike the above check, this includes names referenced inside function
+      // expressions in the rvalue).
+      // e.g. the name "a" below in the definition of "b":
+      //   {
+      //     let a = 3;
+      //     var b = a;
+      //   }
+      // return b;   // "a" is not declared in this scope so we can't inline this to "return a;"
+      if (NodeUtil.has(
+          def.getLastChild(),
+          new Predicate<Node>() {
+            @Override
+            public boolean apply(Node input) {
+              if (input.isName()) {
+                String name = input.getString();
+                if (!name.isEmpty() && !usageScope.hasSlot(name)) {
+                  return true; // unsafe to inline.
+                }
+              }
+              return false;
+            }
+          },
+          Predicates.alwaysTrue())) {
+        return false;
+      }
+      return true;
     }
   }
 

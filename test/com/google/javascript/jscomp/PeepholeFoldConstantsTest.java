@@ -1345,10 +1345,23 @@ public final class PeepholeFoldConstantsTest extends TypeICompilerTestCase {
     testSame("({a:x}).a ++");
     testSame("({a:x}).a --");
 
-    // functions can't reference the object through 'this'.
-    testSame("({a:function(){return this}}).a");
+    // Getters should not be inlined.
     testSame("({get a() {return this}}).a");
+
+    // Except, if we can see that the getter function never references 'this'.
+    test("({get a() {return 0}}).a", "(function() {return 0})()");
+
+    // It's okay to inline functions, as long as they're not immediately called.
+    // (For tests where they are immediately called, see testFoldObjectLiteralRefCall)
+    test("({a:function(){return this}}).a", "(function(){return this})");
+
+    // It's also okay to inline functions that are immediately called, so long as we know for
+    // sure the function doesn't reference 'this'.
+    test("({a:function(){return 0}}).a()", "(function(){return 0})()");
+
+    // Don't inline setters.
     testSame("({set a(b) {return this}}).a");
+    testSame("({set a(b) {this._a = b}}).a");
 
     // Leave unknown props alone, the might be on the prototype
     testSame("({}).a");
@@ -1378,6 +1391,21 @@ public final class PeepholeFoldConstantsTest extends TypeICompilerTestCase {
 
     // GETELEM is handled the same way.
     test("var x = ({'a':1})['a']", "var x = 1");
+
+    // try folding string computed properties
+    test("var a = {['a']:x}['a']", "var a = x");
+    test("var a = {'a': x, ['a']: y}['a']", "var a = y;");
+    testSame("var a = {['foo']: x}.a;");
+    // Note: it may be useful to fold symbols in the future.
+    testSame("var y = Symbol(); var a = {[y]: 3}[y];");
+
+    // don't fold member functions since they are different from fn expressions and arrow fns
+    testSame("var x = {a() {}}.a;");
+    testSame("var x = {a() { return this; }}.a;");
+    testSame("var x = {a() { return super.a; }}.a;");
+    testSame("var x = {a: 1, a() {}}.a;");
+    test("var x = {a() {}, a: 1}.a;", "var x = 1;");
+    testSame("var x = {a() {}}.b");
   }
 
   public void testFoldObjectLiteralRef2() {
@@ -1385,6 +1413,13 @@ public final class PeepholeFoldConstantsTest extends TypeICompilerTestCase {
     test("({a:x}).a += 1", "({a:x}).a = x + 1");
     late = true;
     testSame("({a:x}).a += 1");
+  }
+
+  // Regression test for https://github.com/google/closure-compiler/issues/2873
+  // It would be incorrect to fold this to "x();" because the 'this' value inside the function
+  // will be the global object, instead of the object {a:x} as it should be.
+  public void testFoldObjectLiteralRefCall() {
+    testSame("({a:x}).a()");
   }
 
   public void testIEString() {

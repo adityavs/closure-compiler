@@ -18,7 +18,6 @@ package com.google.javascript.jscomp;
 
 import static com.google.common.base.Preconditions.checkState;
 
-import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 import com.google.javascript.rhino.JSDocInfo;
 import com.google.javascript.rhino.Node;
@@ -56,17 +55,6 @@ public class TypedScope extends AbstractScope<TypedScope, TypedVar>
 
   // Scope.java contains an arguments field.
   // We haven't added it here because it's unused by the passes that need typed scopes.
-
-  private static final Predicate<TypedVar> DECLARATIVELY_UNBOUND_VARS_WITHOUT_TYPES =
-    new Predicate<TypedVar>() {
-      @Override
-      public boolean apply(TypedVar var) {
-        return var.getParentNode() != null
-          && var.getType() == null
-          && var.getParentNode().isVar()
-          && !var.isExtern();
-      }
-    };
 
   TypedScope(TypedScope parent, Node rootNode) {
     super(rootNode);
@@ -125,6 +113,8 @@ public class TypedScope extends AbstractScope<TypedScope, TypedVar>
   public JSType getTypeOfThis() {
     if (isGlobal()) {
       return ObjectType.cast(getRootNode().getJSType());
+    } else if (!getRootNode().isFunction()) {
+      return getClosestContainerScope().getTypeOfThis();
     }
 
     checkState(getRootNode().isFunction());
@@ -150,12 +140,46 @@ public class TypedScope extends AbstractScope<TypedScope, TypedVar>
   }
 
   @Override
-  TypedVar makeArgumentsVar() {
-    return TypedVar.makeArguments(this);
+  TypedVar makeImplicitVar(ImplicitVar var) {
+    if (this.isGlobal()) {
+      // TODO(sdh): This is incorrect for 'global this', but since that's currently not handled
+      // by this code, it's okay to bail out now until we find the root cause.  See b/74980936.
+      return null;
+    }
+    return new TypedVar(false, var.name, null, getImplicitVarType(var), this, -1, null);
   }
 
+  private JSType getImplicitVarType(ImplicitVar var) {
+    if (var == ImplicitVar.ARGUMENTS) {
+      // Look for an extern named "arguments" and use its type if available.
+      // TODO(sdh): consider looking for "Arguments" ctor rather than "arguments" var: this could
+      // allow deleting the variable, which doesn't really belong in externs in the first place.
+      TypedVar globalArgs = getGlobalScope().getVar(Var.ARGUMENTS);
+      return globalArgs != null && globalArgs.isExtern()
+          ? globalArgs.getType()
+          : null;
+    }
+    // TODO(sdh): get the superclass for super?
+    return getTypeOfThis();
+  }
+
+  /**
+   * Returns the variables in this scope that have been declared with 'var' (or 'let') and not
+   * declared with a known type. These variables can safely be set to undefined (rather than
+   * unknown) at the start of type inference, and will be reset to the correct type when analyzing
+   * the first assignment to them. Parameters and externs are excluded because they are not
+   * initialized in the function body.
+   */
   public Iterable<TypedVar> getDeclarativelyUnboundVarsWithoutTypes() {
-    return Iterables.filter(getVarIterable(), DECLARATIVELY_UNBOUND_VARS_WITHOUT_TYPES);
+    return Iterables.filter(getVarIterable(), this::isDeclarativelyUnboundVarWithoutType);
+  }
+
+  private boolean isDeclarativelyUnboundVarWithoutType(TypedVar var) {
+    return var.getParentNode() != null
+        && var.getType() == null
+        // TODO(sdh): should we include LET here as well?
+        && var.getParentNode().isVar()
+        && !var.isExtern();
   }
 
   static interface TypeResolver {
@@ -176,7 +200,6 @@ public class TypedScope extends AbstractScope<TypedScope, TypedVar>
     this.typeResolver = resolver;
   }
 
-  @SuppressWarnings("unchecked")
   @Override
   public JSType getNamespaceOrTypedefType(String typeName) {
     StaticTypedSlot<JSType> slot = getSlot(typeName);

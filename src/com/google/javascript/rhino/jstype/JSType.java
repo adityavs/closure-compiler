@@ -40,7 +40,6 @@
 package com.google.javascript.rhino.jstype;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.javascript.rhino.jstype.TernaryValue.UNKNOWN;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.HashBasedTable;
@@ -80,7 +79,7 @@ public abstract class JSType implements TypeI {
   private static final CanCastToVisitor CAN_CAST_TO_VISITOR =
       new CanCastToVisitor();
 
-  private static final ImmutableSet<String> COVARIANT_TYPES =
+  private static final ImmutableSet<String> BIVARIANT_TYPES =
       ImmutableSet.of("Object", "IArrayLike", "Array");
 
   /**
@@ -147,12 +146,40 @@ public abstract class JSType implements TypeI {
     return displayName != null && !displayName.isEmpty();
   }
 
+  /** A tristate value returned from canPropertyBeDefined. */
+  public enum HasPropertyKind {
+    ABSENT, // The property is not known to be part of this type
+    KNOWN_PRESENT, // The properties is known to be defined on a type or its super types
+    MAYBE_PRESENT; // The property is loosely associated with a type, typically one of its subtypes
+
+    public static HasPropertyKind of(boolean has) {
+      return has ? KNOWN_PRESENT : ABSENT;
+    }
+  }
+
   /**
    * Checks whether the property is present on the object.
    * @param pname The property name.
    */
-  public boolean hasProperty(String pname) {
-    return false;
+  public HasPropertyKind getPropertyKind(String pname) {
+    return getPropertyKind(pname, true);
+  }
+
+  /**
+   * Checks whether the property is present on the object.
+   * @param pname The property name.
+   * @param autobox Whether to check for the presents on an autoboxed type
+   */
+  public HasPropertyKind getPropertyKind(String pname, boolean autobox) {
+    return HasPropertyKind.ABSENT;
+  }
+
+  /**
+   * Checks whether the property is present on the object.
+   * @param pname The property name.
+   */
+  public final boolean hasProperty(String pname) {
+    return !getPropertyKind(pname, false).equals(HasPropertyKind.ABSENT);
   }
 
   public boolean isNoType() {
@@ -206,6 +233,10 @@ public abstract class JSType implements TypeI {
     return false;
   }
 
+  public boolean isSymbolObjectType() {
+    return false;
+  }
+
   boolean isTheObjectType() {
     return false;
   }
@@ -215,12 +246,16 @@ public abstract class JSType implements TypeI {
     return false;
   }
 
+  public boolean isSymbolValueType() {
+    return false;
+  }
+
   /**
    * Tests whether the type is a string (value or Object).
    * @return <code>this &lt;: (String, string)</code>
    */
   public final boolean isString() {
-    return isSubtype(
+    return isSubtypeOf(
         getNativeType(JSTypeNative.STRING_VALUE_OR_OBJECT_TYPE));
   }
 
@@ -229,8 +264,13 @@ public abstract class JSType implements TypeI {
    * @return <code>this &lt;: (Number, number)</code>
    */
   public final boolean isNumber() {
-    return isSubtype(
+    return isSubtypeOf(
         getNativeType(JSTypeNative.NUMBER_VALUE_OR_OBJECT_TYPE));
+  }
+
+  public final boolean isSymbol() {
+    return isSubtypeOf(
+        getNativeType(JSTypeNative.SYMBOL_VALUE_OR_OBJECT_TYPE));
   }
 
   public boolean isArrayType() {
@@ -321,7 +361,7 @@ public abstract class JSType implements TypeI {
       ImmutableList<JSType> alternatesList = this.toMaybeUnionType().getAlternatesList();
       for (int i = 0; i < alternatesList.size(); i++) {
         JSType alternate = alternatesList.get(i);
-        if (alternate.isSubtype(arrayType)) {
+        if (alternate.isSubtypeOf(arrayType)) {
           return true;
         }
       }
@@ -676,7 +716,7 @@ public abstract class JSType implements TypeI {
    */
   @Override
   public final boolean isEquivalentTo(TypeI that) {
-    return checkEquivalenceHelper((JSType) that, EquivalenceMethod.IDENTITY);
+    return isEquivalentTo(that, false);
   }
 
   public final boolean isEquivalentTo(TypeI that, boolean isStructural) {
@@ -696,19 +736,21 @@ public abstract class JSType implements TypeI {
    * @see <a href="http://www.youtube.com/watch?v=_RpSv3HjpEw">Unknown unknowns</a>
    */
   public final boolean differsFrom(JSType that) {
-    return !checkEquivalenceHelper(that, EquivalenceMethod.DATA_FLOW);
+    return !checkEquivalenceHelper(that, EquivalenceMethod.DATA_FLOW, EqCache.create());
   }
 
   /**
    * An equivalence visitor.
    */
-  boolean checkEquivalenceHelper(
-      final JSType that, EquivalenceMethod eqMethod) {
-    return checkEquivalenceHelper(that, eqMethod, EqCache.create());
+  @Deprecated
+  boolean checkEquivalenceHelper(final JSType that, EquivalenceMethod eqMethod) {
+    return checkEquivalenceHelper(
+        that,
+        eqMethod,
+        EqCache.create());
   }
 
-  boolean checkEquivalenceHelper(final JSType that, EquivalenceMethod eqMethod,
-      EqCache eqCache) {
+  boolean checkEquivalenceHelper(final JSType that, EquivalenceMethod eqMethod, EqCache eqCache) {
     if (this == that) {
       return true;
     }
@@ -820,25 +862,6 @@ public abstract class JSType implements TypeI {
 
   /**
    * This predicate is used to test whether a given type can appear in a
-   * 'Int32' context.  This context includes, for example, the operands of a
-   * bitwise or operator.  Since we do not currently support integer types,
-   * this is a synonym for {@code Number}.
-   */
-  public final boolean matchesInt32Context() {
-    return matchesNumberContext();
-  }
-
-  /**
-   * This predicate is used to test whether a given type can appear in a
-   * 'Uint32' context.  This context includes the right-hand operand of a shift
-   * operator.
-   */
-  public final boolean matchesUint32Context() {
-    return matchesNumberContext();
-  }
-
-  /**
-   * This predicate is used to test whether a given type can appear in a
    * numeric context, such as an operand of a multiply operator.
    */
   public boolean matchesNumberContext() {
@@ -854,6 +877,14 @@ public abstract class JSType implements TypeI {
    * to add types that do not automatically convert to {@code String}.
    */
   public boolean matchesStringContext() {
+    return false;
+  }
+
+  /**
+   * This predicate is used to test whether a given type can appear in a
+   * {@code symbol} context such as property access.
+   */
+  public boolean matchesSymbolContext() {
     return false;
   }
 
@@ -923,6 +954,7 @@ public abstract class JSType implements TypeI {
     return autoboxesTo() != null;
   }
 
+  // TODO(johnlenz): this method is only used for testing, consider removing this.
   /**
    * Turn an object type to its corresponding scalar type.
    *
@@ -977,7 +1009,7 @@ public abstract class JSType implements TypeI {
    * Algorithm (11.9.3, page 55&ndash;56) of the ECMA-262 specification.<p>
    */
   public final boolean canTestForEqualityWith(JSType that) {
-    return testForEquality(that).equals(UNKNOWN);
+    return testForEquality(that).equals(TernaryValue.UNKNOWN);
   }
 
   /**
@@ -997,12 +1029,12 @@ public abstract class JSType implements TypeI {
     return testForEqualityHelper(this, that);
   }
 
-  TernaryValue testForEqualityHelper(JSType aType, JSType bType) {
+  final TernaryValue testForEqualityHelper(JSType aType, JSType bType) {
     if (bType.isAllType() || bType.isUnknownType() ||
         bType.isNoResolvedType() ||
         aType.isAllType() || aType.isUnknownType() ||
         aType.isNoResolvedType()) {
-      return UNKNOWN;
+      return TernaryValue.UNKNOWN;
     }
 
     boolean aIsEmpty = aType.isEmptyType();
@@ -1011,12 +1043,18 @@ public abstract class JSType implements TypeI {
       if (aIsEmpty && bIsEmpty) {
         return TernaryValue.TRUE;
       } else {
-        return UNKNOWN;
+        return TernaryValue.UNKNOWN;
       }
     }
 
     if (aType.isFunctionType() || bType.isFunctionType()) {
       JSType otherType = aType.isFunctionType() ? bType : aType;
+
+      // TODO(johnlenz): tighten function type comparisons in general.
+      if (otherType.isSymbol()) {
+        return TernaryValue.FALSE;
+      }
+
       // In theory, functions are comparable to anything except
       // null/undefined. For example, on FF3:
       // function() {} == 'function () {\n}'
@@ -1031,9 +1069,24 @@ public abstract class JSType implements TypeI {
         return TernaryValue.UNKNOWN;
       }
     }
+
     if (bType.isEnumElementType() || bType.isUnionType()) {
       return bType.testForEquality(aType);
     }
+
+    // If this is a "Symbol" or that is "symbol" or "Symbol"
+    if (aType.isSymbol()) {
+      return bType.canCastTo(getNativeType(JSTypeNative.SYMBOL_VALUE_OR_OBJECT_TYPE))
+          ? TernaryValue.UNKNOWN
+          : TernaryValue.FALSE;
+    }
+
+    if (bType.isSymbol()) {
+      return aType.canCastTo(getNativeType(JSTypeNative.SYMBOL_VALUE_OR_OBJECT_TYPE))
+          ? TernaryValue.UNKNOWN
+          : TernaryValue.FALSE;
+    }
+
     return null;
   }
 
@@ -1046,7 +1099,7 @@ public abstract class JSType implements TypeI {
    */
   public final boolean canTestForShallowEqualityWith(JSType that) {
     if (isEmptyType() || that.isEmptyType()) {
-      return isSubtype(that) || that.isSubtype(this);
+      return isSubtypeOf(that) || that.isSubtypeOf(this);
     }
 
     JSType inf = getGreatestSubtype(that);
@@ -1176,9 +1229,9 @@ public abstract class JSType implements TypeI {
     }  else if (thatType.isTemplatizedType()) {
       return thatType.toMaybeTemplatizedType().getGreatestSubtypeHelper(
           thisType);
-    } else if (thisType.isSubtype(thatType)) {
+    } else if (thisType.isSubtypeOf(thatType)) {
       return filterNoResolvedType(thisType);
-    } else if (thatType.isSubtype(thisType)) {
+    } else if (thatType.isSubtypeOf(thisType)) {
       return filterNoResolvedType(thatType);
     } else if (thisType.isRecordType()) {
       return thisType.toMaybeRecordType().getGreatestSubtypeHelper(thatType);
@@ -1526,16 +1579,27 @@ public abstract class JSType implements TypeI {
     TemplateTypeMap thisTypeParams = thisType.getTemplateTypeMap();
     TemplateTypeMap thatTypeParams = thatType.getTemplateTypeMap();
     boolean templateMatch = true;
-    if (isExemptFromTemplateTypeInvariance(thatType)) {
+    if (isBivariantType(thatType)) {
       // Array and Object are exempt from template type invariance; their
-      // template types maps are considered a match only if the ObjectElementKey
-      // values are subtypes/supertypes of one another.
+      // template types maps are bivariant.  That is they are considered
+      // a match if either ObjectElementKey values are subtypes of the
+      // other.
       TemplateType key = thisType.registry.getObjectElementKey();
       JSType thisElement = thisTypeParams.getResolvedTemplateType(key);
       JSType thatElement = thatTypeParams.getResolvedTemplateType(key);
 
       templateMatch = thisElement.isSubtype(thatElement, implicitImplCache, subtypingMode)
           || thatElement.isSubtype(thisElement, implicitImplCache, subtypingMode);
+    } else if (isIThenableSubtype(thatType)) {
+      // NOTE: special case IThenable subclass (Promise, etc).  These classes are expected to be
+      // covariant.
+      // Also note that this ignores any additional template type arguments that might be defined
+      // on subtypes.  If we expand this to other types, a more correct solution will be needed.
+      TemplateType key = thisType.registry.getThenableValueKey();
+      JSType thisElement = thisTypeParams.getResolvedTemplateType(key);
+      JSType thatElement = thatTypeParams.getResolvedTemplateType(key);
+
+      templateMatch = thisElement.isSubtype(thatElement, implicitImplCache, subtypingMode);
     } else {
       templateMatch = thisTypeParams.checkEquivalenceHelper(
           thatTypeParams, EquivalenceMethod.INVARIANT, subtypingMode);
@@ -1569,12 +1633,26 @@ public abstract class JSType implements TypeI {
   }
 
   /**
-   * Determines if the specified type is exempt from standard invariant
-   * templatized typing rules.
+   * Determines if the supplied type should be checked as a bivariant
+   * templatized type rather the standard invariant templatized type
+   * rules.
    */
-  static boolean isExemptFromTemplateTypeInvariance(JSType type) {
+  static boolean isBivariantType(JSType type) {
     ObjectType objType = type.toObjectType();
-    return objType == null || COVARIANT_TYPES.contains(objType.getReferenceName());
+    return objType != null
+        // && objType.isNativeObjectType()
+        && BIVARIANT_TYPES.contains(objType.getReferenceName());
+  }
+
+  /**
+   * Determines if the specified type is exempt from standard invariant templatized typing rules.
+   */
+  static boolean isIThenableSubtype(JSType type) {
+    if (type.isTemplatizedType()) {
+      TemplatizedType ttype = type.toMaybeTemplatizedType();
+      return ttype.getTemplateTypeMap().hasTemplateKey(ttype.registry.getThenableValueKey());
+    }
+    return false;
   }
 
   /**
@@ -1604,7 +1682,7 @@ public abstract class JSType implements TypeI {
    * artifacts from a previous generation, so we will eventually need
    * a generational flag instead of a boolean one.
    */
-  public final JSType resolve(ErrorReporter t, StaticTypedScope<JSType> scope) {
+  public final JSType resolve(ErrorReporter reporter, StaticTypedScope<JSType> scope) {
     if (resolved) {
       // TODO(nicksantos): Check to see if resolve() looped back on itself.
       // Preconditions.checkNotNull(resolveResult);
@@ -1614,7 +1692,7 @@ public abstract class JSType implements TypeI {
       return resolveResult;
     }
     resolved = true;
-    resolveResult = resolveInternal(t, scope);
+    resolveResult = resolveInternal(reporter, scope);
     resolveResult.setResolvedTypeInternal(resolveResult);
     return resolveResult;
   }
@@ -1622,7 +1700,7 @@ public abstract class JSType implements TypeI {
   /**
    * @see #resolve
    */
-  abstract JSType resolveInternal(ErrorReporter t, StaticTypedScope<JSType> scope);
+  abstract JSType resolveInternal(ErrorReporter reporter, StaticTypedScope<JSType> scope);
 
   void setResolvedTypeInternal(JSType type) {
     resolveResult = type;
@@ -1639,8 +1717,8 @@ public abstract class JSType implements TypeI {
    * @see #resolve
    */
   static final JSType safeResolve(
-      JSType type, ErrorReporter t, StaticTypedScope<JSType> scope) {
-    return type == null ? null : type.resolve(t, scope);
+      JSType type, ErrorReporter reporter, StaticTypedScope<JSType> scope) {
+    return type == null ? null : type.resolve(reporter, scope);
   }
 
   /**
